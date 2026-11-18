@@ -1,0 +1,69 @@
+// A generic type renders, orders, and matches by the arguments each
+// instantiation supplies: a parameter that is a `String` or `char` reads
+// quoted as a field declared so does, a vector of a generic struct sorts by
+// its fields, and a struct-variant literal infers its enum's arguments.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Pair<T> {
+    a: i64
+    v: T
+}
+
+#[derive(Debug)]
+struct Wrap<T>(T, u8)
+
+#[derive(Debug)]
+enum Either<T> {
+    One(T)
+    Two { x: T, n: i64 }
+}
+
+#[derive(Debug)]
+struct Inner {
+    k: i64
+}
+
+fn total(e: Either<i64>) -> i64 {
+    match e {
+        Either::One(v) => v
+        Either::Two { x, n } => x + n
+    }
+}
+
+fn ordered_total(n: i64) -> i64 {
+    let mut ps: Vec<Pair<i64>> = #[]
+    for i in 0..n {
+        ps.push(Pair { a: (i * 7) % n, v: i })
+    }
+    ps.sort()
+    let mut total = 0
+    for (i, p) in ps.iter().enumerate() {
+        total += i * p.v
+    }
+    total
+}
+
+fn main() {
+    println(ordered_total(9))
+    let p = Pair { a: 1, v: "x" }
+    println(p)
+    println(f"{p:?}")
+    println(#[p])
+    println(Some(Pair { a: 2, v: 'c' }))
+    println(Pair { a: 3, v: 7 })
+    println(Pair { a: 4, v: Inner { k: 9 } })
+    println(Pair { a: 5, v: #["a", "b"] })
+    println(Wrap("w", 1))
+    println(Either::One("e"))
+    let two = Either::Two { x: 'q', n: 2 }
+    println(two)
+    println(f"{two:?}")
+    println(total(Either::Two { x: 40, n: 2 }) + total(Either::One(1)))
+
+    let mut ps = #[Pair { a: 3, v: "c" }, Pair { a: 1, v: "a" }, Pair { a: 2, v: "b" }]
+    ps.sort()
+    println(ps)
+    let mut ns = #[Pair { a: 2, v: 20 }, Pair { a: 2, v: 10 }, Pair { a: 1, v: 30 }]
+    ns.sort()
+    println(ns)
+    println(Pair { a: 1, v: "x" } < Pair { a: 1, v: "y" })
+}

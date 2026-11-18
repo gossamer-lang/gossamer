@@ -48,6 +48,8 @@ fn empty_enum_decl(
         where_clause,
         variants: Vec::new(),
         repr,
+        traits: Vec::new(),
+        items: Vec::new(),
     }
 }
 
@@ -280,6 +282,8 @@ impl Parser<'_> {
             generics: Generics::default(),
             where_clause: WhereClause::default(),
             body: StructBody::Unit,
+            traits: Vec::new(),
+            items: Vec::new(),
         };
         let span = self.join(item_start, self.last_span());
         let id = self.alloc_id();
@@ -392,6 +396,8 @@ impl Parser<'_> {
                 generics: Generics::default(),
                 where_clause: WhereClause::default(),
                 body: StructBody::Unit,
+                traits: Vec::new(),
+                items: Vec::new(),
             }));
         }
         let declined_type = if self.at_contextual_word("union") {
@@ -419,6 +425,8 @@ impl Parser<'_> {
                 generics: Generics::default(),
                 where_clause: WhereClause::default(),
                 body: StructBody::Unit,
+                traits: Vec::new(),
+                items: Vec::new(),
             }));
         }
         None
@@ -879,87 +887,155 @@ impl Parser<'_> {
         self.bump();
         let name = self.parse_ident_required("struct name");
         let generics = self.parse_generics();
-        if self.at_keyword(Keyword::Where) {
-            let where_clause = self.parse_where_clause();
-            let body = self.parse_struct_body_terminated();
-            return StructDecl {
-                name,
-                generics,
-                where_clause,
-                body,
-            };
-        }
-        let body = self.parse_struct_body();
+        // A tuple struct's fields come before its traits and body:
+        // `struct Pair(i64, i64): Display { .. }`.
+        let tuple = self
+            .at_punct(Punct::LParen)
+            .then(|| self.parse_tuple_fields("to close tuple struct body"));
+        let traits = self.parse_type_traits();
         let where_clause = self.parse_where_clause();
+        let (body, items) = match tuple {
+            Some(fields) => {
+                let items = if self.at_punct(Punct::LBrace) {
+                    self.bump();
+                    self.parse_type_body_items("to close struct body")
+                } else {
+                    self.eat_punct(Punct::Semi);
+                    Vec::new()
+                };
+                (StructBody::Tuple(fields), items)
+            }
+            None => self.parse_struct_body(),
+        };
         StructDecl {
             name,
             generics,
             where_clause,
             body,
+            traits,
+            items,
         }
     }
 
-    fn parse_struct_body_terminated(&mut self) -> StructBody {
-        self.parse_struct_body()
+    /// The traits a type lists after its name (`: Bench + Display`), which
+    /// the functions in its body implement.
+    fn parse_type_traits(&mut self) -> Vec<gossamer_ast::TraitBound> {
+        if self.eat_punct(Punct::Colon) {
+            self.parse_trait_bound_list()
+        } else {
+            Vec::new()
+        }
     }
 
-    fn parse_struct_body(&mut self) -> StructBody {
+    /// The functions, associated types, and constants of a type body, up to
+    /// and including its closing brace.
+    fn parse_type_body_items(&mut self, close: &'static str) -> Vec<ImplItem> {
+        let mut items = Vec::new();
+        while !self.at_punct(Punct::RBrace) && !self.at_eof() && !at_foreign_item_keyword(self) {
+            let before = self.tokens.checkpoint();
+            items.push(self.parse_impl_item());
+            if self.tokens.checkpoint() == before {
+                self.bump();
+            }
+        }
+        self.expect_punct(Punct::RBrace, close);
+        items
+    }
+
+    /// Whether the cursor, past any attributes and visibility, starts a
+    /// function, associated type, or constant rather than a field.
+    fn at_type_body_item(&mut self) -> bool {
+        let mark = self.tokens.checkpoint();
+        let _ = self.parse_attrs();
+        let _ = self.parse_visibility();
+        let item = matches!(
+            self.peek().kind,
+            TokenKind::Keyword(Keyword::Fn | Keyword::Type | Keyword::Const | Keyword::Unsafe)
+        ) || ((self.at_contextual_word("default")
+            || self.at_contextual_word("comptime"))
+            && matches!(self.peek_nth(1).kind, TokenKind::Keyword(Keyword::Fn)));
+        self.tokens.rewind(mark);
+        item
+    }
+
+    fn parse_tuple_fields(&mut self, close: &'static str) -> Vec<TupleField> {
+        self.bump();
+        let mut fields = Vec::new();
+        while !self.at_punct(Punct::RParen) && !self.at_eof() {
+            let before_field = self.tokens.checkpoint();
+            let attrs = self.parse_attrs();
+            let visibility = self.parse_visibility();
+            let ty = self.parse_type();
+            fields.push(TupleField {
+                attrs,
+                visibility,
+                ty,
+            });
+            if self.tokens.checkpoint() == before_field {
+                self.bump();
+                continue;
+            }
+            if !self.eat_list_separator() {
+                break;
+            }
+        }
+        self.expect_punct(Punct::RParen, close);
+        fields
+    }
+
+    /// A field's `= expr` default, when one follows its type.
+    fn parse_field_default(&mut self) -> Option<Box<Expr>> {
+        self.eat_punct(Punct::Eq)
+            .then(|| Box::new(self.parse_expr_no_assign()))
+    }
+
+    /// A named struct's braced body (its fields, then any functions,
+    /// associated types, and constants), or a unit struct's `;`.
+    fn parse_struct_body(&mut self) -> (StructBody, Vec<ImplItem>) {
         if self.eat_punct(Punct::LBrace) {
-            let mut fields = Vec::new();
-            // An item keyword ends the field list: the `}` is missing, and
-            // reading the next item as a field would report every one of
-            // its tokens instead of the one absent brace.
-            while !self.at_punct(Punct::RBrace) && !self.at_eof() && !at_item_keyword(self) {
-                let before_field = self.tokens.checkpoint();
-                let attrs = self.parse_attrs();
-                let visibility = self.parse_visibility();
-                let name = self.parse_ident_required("field name");
-                self.expect_punct(Punct::Colon, "after field name");
-                let ty = self.parse_type();
-                fields.push(StructField {
-                    attrs,
-                    visibility,
-                    name,
-                    ty,
-                });
-                if self.tokens.checkpoint() == before_field {
-                    self.bump();
-                    continue;
-                }
-                if !self.eat_list_separator() {
-                    break;
-                }
+            let fields = self.parse_named_fields();
+            let items = self.parse_type_body_items("to close struct body");
+            return (StructBody::Named(fields), items);
+        }
+        self.eat_punct(Punct::Semi);
+        (StructBody::Unit, Vec::new())
+    }
+
+    /// The named fields of a braced body, up to its first function,
+    /// associated type, or constant, or its closing brace.
+    fn parse_named_fields(&mut self) -> Vec<StructField> {
+        let mut fields = Vec::new();
+        // An item keyword ends the field list: the `}` is missing, and
+        // reading the next item as a field would report every one of
+        // its tokens instead of the one absent brace.
+        while !self.at_punct(Punct::RBrace)
+            && !self.at_eof()
+            && !at_foreign_item_keyword(self)
+            && !self.at_type_body_item()
+        {
+            let before_field = self.tokens.checkpoint();
+            let attrs = self.parse_attrs();
+            let visibility = self.parse_visibility();
+            let name = self.parse_ident_required("field name");
+            self.expect_punct(Punct::Colon, "after field name");
+            let ty = self.parse_type();
+            let default = self.parse_field_default();
+            fields.push(StructField {
+                attrs,
+                visibility,
+                name,
+                ty,
+                default,
+            });
+            if self.tokens.checkpoint() == before_field {
+                self.bump();
+                continue;
             }
-            self.expect_punct(Punct::RBrace, "to close struct body");
-            return StructBody::Named(fields);
-        }
-        if self.eat_punct(Punct::LParen) {
-            let mut fields = Vec::new();
-            while !self.at_punct(Punct::RParen) && !self.at_eof() {
-                let before_field = self.tokens.checkpoint();
-                let attrs = self.parse_attrs();
-                let visibility = self.parse_visibility();
-                let ty = self.parse_type();
-                fields.push(TupleField {
-                    attrs,
-                    visibility,
-                    ty,
-                });
-                if self.tokens.checkpoint() == before_field {
-                    self.bump();
-                    continue;
-                }
-                if !self.eat_list_separator() {
-                    break;
-                }
+            if !self.eat_list_separator() {
+                break;
             }
-            self.expect_punct(Punct::RParen, "to close tuple struct body");
-            return StructBody::Tuple(fields);
         }
-        if self.eat_punct(Punct::Semi) {
-            return StructBody::Unit;
-        }
-        StructBody::Unit
+        fields
     }
 
     fn parse_enum_decl(&mut self, packed: bool) -> EnumDecl {
@@ -968,13 +1044,20 @@ impl Parser<'_> {
         let generics = self.parse_generics();
         // `enum Name : uN { .. }` names the width the discriminant is stored
         // in. It sits before the where clause, where a reader looks for the
-        // type's own shape rather than its bounds.
-        let declared_bits = if self.at_punct(Punct::Colon) {
-            self.bump();
-            self.parse_enum_repr_width()
-        } else {
-            None
-        };
+        // type's own shape rather than its bounds. The traits the enum lists
+        // follow the width, or take its place: `enum Shape: Area { .. }`.
+        let mut declared_bits = None;
+        let mut traits = Vec::new();
+        if self.eat_punct(Punct::Colon) {
+            if self.at_enum_repr_width() {
+                declared_bits = self.parse_enum_repr_width();
+                if self.eat_punct(Punct::Plus) {
+                    traits = self.parse_trait_bound_list();
+                }
+            } else {
+                traits = self.parse_trait_bound_list();
+            }
+        }
         let repr = gossamer_ast::EnumRepr {
             packed,
             declared_bits,
@@ -984,57 +1067,16 @@ impl Parser<'_> {
             return empty_enum_decl(name, generics, where_clause, repr);
         }
         let mut variants = Vec::new();
-        while !self.at_punct(Punct::RBrace) && !self.at_eof() {
+        while !self.at_punct(Punct::RBrace) && !self.at_eof() && !self.at_type_body_item() {
             let before_variant = self.tokens.checkpoint();
             let attrs = self.parse_attrs();
             let variant_name = self.parse_ident_required("variant name");
             let body = if self.eat_punct(Punct::LBrace) {
-                let mut fields = Vec::new();
-                while !self.at_punct(Punct::RBrace) && !self.at_eof() {
-                    let before_field = self.tokens.checkpoint();
-                    let field_attrs = self.parse_attrs();
-                    let visibility = self.parse_visibility();
-                    let field_name = self.parse_ident_required("field name");
-                    self.expect_punct(Punct::Colon, "after field name");
-                    let ty = self.parse_type();
-                    fields.push(StructField {
-                        attrs: field_attrs,
-                        visibility,
-                        name: field_name,
-                        ty,
-                    });
-                    if self.tokens.checkpoint() == before_field {
-                        self.bump();
-                        continue;
-                    }
-                    if !self.eat_list_separator() {
-                        break;
-                    }
-                }
+                let fields = self.parse_named_fields();
                 self.expect_punct(Punct::RBrace, "to close variant body");
                 StructBody::Named(fields)
-            } else if self.eat_punct(Punct::LParen) {
-                let mut fields = Vec::new();
-                while !self.at_punct(Punct::RParen) && !self.at_eof() {
-                    let before_field = self.tokens.checkpoint();
-                    let field_attrs = self.parse_attrs();
-                    let visibility = self.parse_visibility();
-                    let ty = self.parse_type();
-                    fields.push(TupleField {
-                        attrs: field_attrs,
-                        visibility,
-                        ty,
-                    });
-                    if self.tokens.checkpoint() == before_field {
-                        self.bump();
-                        continue;
-                    }
-                    if !self.eat_list_separator() {
-                        break;
-                    }
-                }
-                self.expect_punct(Punct::RParen, "to close variant body");
-                StructBody::Tuple(fields)
+            } else if self.at_punct(Punct::LParen) {
+                StructBody::Tuple(self.parse_tuple_fields("to close variant body"))
             } else {
                 StructBody::Unit
             };
@@ -1057,14 +1099,29 @@ impl Parser<'_> {
                 break;
             }
         }
-        self.expect_punct(Punct::RBrace, "to close enum body");
+        let items = self.parse_type_body_items("to close enum body");
         EnumDecl {
             name,
             generics,
             where_clause,
             variants,
             repr,
+            traits,
+            items,
         }
+    }
+
+    /// Whether the cursor sits on an unsigned width (`u8`) naming how an
+    /// enum's discriminant is stored, rather than a trait the enum lists.
+    fn at_enum_repr_width(&self) -> bool {
+        let token = self.peek();
+        matches!(token.kind, TokenKind::Ident)
+            && self
+                .slice(token.span)
+                .strip_prefix('u')
+                .is_some_and(|digits| {
+                    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+                })
     }
 
     /// Parses the `uN` of an `enum Name : uN` representation, in bits.
@@ -1499,13 +1556,13 @@ impl Parser<'_> {
                 // (the auto-bundled sibling shape) silently
                 // disappears and `json::Value` references inside
                 // the module fail to resolve.
-                let use_decl = self.parse_use_decl();
-                self.hoisted_uses.push(use_decl);
+                let use_decls = self.parse_use_decls();
+                self.hoisted_uses.extend(use_decls);
                 continue;
             }
             if self.at_attributed_use() {
-                let use_decl = self.parse_attributed_use();
-                self.hoisted_uses.push(use_decl);
+                let use_decls = self.parse_attributed_use();
+                self.hoisted_uses.extend(use_decls);
                 continue;
             }
             if !crate::recovery::is_item_start(self) {
@@ -1544,17 +1601,16 @@ impl Parser<'_> {
 
 /// `true` on a keyword that can only introduce an item. A struct field
 /// may be prefixed with `pub`, so visibility alone does not qualify.
-fn at_item_keyword(parser: &Parser<'_>) -> bool {
+/// An item keyword that cannot begin a type body's function, associated
+/// type, or constant, so it ends a body whose `}` is missing.
+fn at_foreign_item_keyword(parser: &Parser<'_>) -> bool {
     matches!(
         parser.peek().kind,
         TokenKind::Keyword(
-            Keyword::Fn
-                | Keyword::Struct
+            Keyword::Struct
                 | Keyword::Enum
                 | Keyword::Trait
                 | Keyword::Impl
-                | Keyword::Type
-                | Keyword::Const
                 | Keyword::Static
                 | Keyword::Mod
                 | Keyword::Use

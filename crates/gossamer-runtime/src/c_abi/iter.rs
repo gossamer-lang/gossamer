@@ -610,8 +610,8 @@ impl Iterator for BorrowedGosVecI64 {
         // dropped. Element replacement keeps the header shape unchanged and
         // is intentionally observed by loading the slot on each pull.
         let source = unsafe { &*self.source };
-        if source.generation != self.generation
-            || source.mutation_generation != self.mutation_generation
+        if crate::c_abi::vec::vec_mutation_stamp(source)
+            != (self.generation, self.mutation_generation)
             || source.len != self.len
             || source.cap != self.cap
         {
@@ -1293,6 +1293,8 @@ unsafe fn lazy_from_vec_classed(source: *mut GosVec, class: u8) -> *mut GosLazyI
         return lazy_classed(class, std::iter::empty());
     }
     // SAFETY: the caller supplies a live GosVec header.
+    crate::c_abi::vec::track_vec_mutations(unsafe { &mut *source });
+    // SAFETY: as above.
     let header = unsafe { &*source };
     if header.elem_bytes > 8 {
         crate::c_abi::panic::panic_text(
@@ -1302,10 +1304,11 @@ unsafe fn lazy_from_vec_classed(source: *mut GosVec, class: u8) -> *mut GosLazyI
     // SAFETY: retaining the header gives the iterator state its own share
     // until `BorrowedGosVecI64::drop`.
     unsafe { gos_rt_vec_retain(source) };
+    let (generation, mutation_generation) = crate::c_abi::vec::vec_mutation_stamp(header);
     let borrowed = BorrowedGosVecI64 {
         source,
-        generation: header.generation,
-        mutation_generation: header.mutation_generation,
+        generation,
+        mutation_generation,
         len: header.len,
         cap: header.cap,
         index: 0,
@@ -1368,8 +1371,8 @@ impl Iterator for BorrowedGosVecAggr {
         // SAFETY: construction retains the source header until this state is
         // dropped, so the buffer the addresses point into stays live.
         let source = unsafe { &*self.source };
-        if source.generation != self.generation
-            || source.mutation_generation != self.mutation_generation
+        if crate::c_abi::vec::vec_mutation_stamp(source)
+            != (self.generation, self.mutation_generation)
             || source.len != self.len
             || source.cap != self.cap
         {
@@ -1415,7 +1418,10 @@ pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_from_vec_aggr(
             return lazy_classed(lazy_elem_class::AGGR, std::iter::empty());
         }
         // SAFETY: the caller supplies a live GosVec header.
+        crate::c_abi::vec::track_vec_mutations(unsafe { &mut *source });
+        // SAFETY: as above.
         let header = unsafe { &*source };
+        let stamp = crate::c_abi::vec::vec_mutation_stamp(header);
         let counted = crate::c_abi::vec::vec_elem_is_inline_aggregate(header)
             && !crate::c_abi::vec::vec_elem_is_handle(header);
         // A counted copy carries its own shares, so a collecting terminal
@@ -1442,8 +1448,8 @@ pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_from_vec_aggr(
             BorrowedGosVecAggr {
                 source,
                 counted,
-                generation: header.generation,
-                mutation_generation: header.mutation_generation,
+                generation: stamp.0,
+                mutation_generation: stamp.1,
                 len: header.len,
                 cap: header.cap,
                 index: 0,
@@ -4351,7 +4357,7 @@ mod lazy_iterator_tests {
                 1
             );
             assert_eq!(popped, 3);
-            assert_ne!((*source).mutation_generation, 2);
+            assert_ne!(crate::c_abi::vec::vec_mutation_stamp(&*source).1, 0);
             gos_rt_lazy_iter_drop_i64(iter);
             crate::c_abi::map::gos_rt_vec_free(source);
         }

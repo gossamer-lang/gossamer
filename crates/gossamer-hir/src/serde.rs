@@ -69,15 +69,22 @@ pub struct HirSerdeField {
 
 impl HirSerdeField {
     /// The options the attributes of field `name` state, under the
-    /// container's rename rule.
+    /// container's rename rule. `declared` names the function evaluating the
+    /// field's own default, which a missing key reads when no `#[default]`
+    /// says otherwise.
     #[must_use]
-    pub fn of(attrs: &gossamer_ast::Attrs, name: &str, rule: Option<RenameRule>) -> Self {
+    pub fn of(
+        attrs: &gossamer_ast::Attrs,
+        name: &str,
+        rule: Option<RenameRule>,
+        declared: Option<String>,
+    ) -> Self {
         let options = SerdeField::of(attrs);
         let key = options.key(name, rule);
         Self {
             key: (key != name).then_some(key),
             skip: options.skip,
-            default: options.default,
+            default: options.default.or(declared.map(FieldDefault::Declared)),
         }
     }
 }
@@ -1132,8 +1139,9 @@ impl Gen<'_> {
         out.raw("]");
     }
 
-    /// A `String`-keyed map as an object, its keys sorted so the text is the
-    /// same on every tier.
+    /// A `String`-keyed map as an object, its keys in byte order so the text
+    /// is the same on every tier. Every tier answers such a map's `keys()` in
+    /// that order already, so the walk takes them as they come.
     fn encode_map(&mut self, out: &mut Emit, value: HirExpr, ty: Ty, value_ty: Ty, span: Span) {
         let i64_ty = self.tcx.int_ty(IntTy::I64);
         let unit = self.tcx.unit();
@@ -1143,10 +1151,7 @@ impl Gen<'_> {
         let names = self.fresh("keys");
         let receiver = map.clone();
         let all = self.method(receiver, "keys", Vec::new(), names_ty, span);
-        out.stmt(self.let_stmt(&names, true, names_ty, all, span));
-        let receiver = self.local(&names, names_ty, span);
-        let sorted = self.method(receiver, "sort", Vec::new(), unit, span);
-        out.stmt(self.expr_stmt(sorted, span));
+        out.stmt(self.let_stmt(&names, false, names_ty, all, span));
         let count = self.fresh("n");
         let receiver = self.local(&names, names_ty, span);
         let len = self.method(receiver, "len", Vec::new(), i64_ty, span);
@@ -1292,6 +1297,12 @@ impl Gen<'_> {
     ) -> HirExpr {
         match default {
             Some(FieldDefault::Value(value)) => self.literal_default(value, ty, span),
+            Some(FieldDefault::Declared(function)) => {
+                let mut path = info.segments.clone();
+                path.pop();
+                path.push(function.clone());
+                self.call_segments(&path, Vec::new(), ty, span)
+            }
             Some(FieldDefault::Zero) | None => self.default_value(ty, info, span),
         }
     }

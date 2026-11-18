@@ -428,6 +428,29 @@ fn builtin_concat(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::String(out.into()))
 }
 
+/// A field of a synthesized `to_string` typed by one of its declaration's
+/// own type parameters: a `String` or `char` reads quoted, as a field
+/// declared so does, and anything else renders as `{}` renders it.
+pub(crate) fn builtin_field_display(args: &[Value]) -> RuntimeResult<Value> {
+    match args {
+        [Value::String(_) | Value::Char(_)] => {
+            crate::stdlib_builtins::strconv::builtin_debug_quote(args)
+        }
+        _ => builtin_concat(args),
+    }
+}
+
+/// [`builtin_field_display`] for a synthesized `fmt`: anything but a
+/// `String` or `char` renders as `{:?}` renders it.
+pub(crate) fn builtin_field_debug(args: &[Value]) -> RuntimeResult<Value> {
+    match args {
+        [Value::String(_) | Value::Char(_)] => {
+            crate::stdlib_builtins::strconv::builtin_debug_quote(args)
+        }
+        _ => builtin_debug(args),
+    }
+}
+
 /// `__debug(value)` - the `{:?}` rendering channel. It matches Display
 /// everywhere the two agree; a bare float keeps a fractional part or an
 /// exponent so the text reads back as a float, which is also how a float

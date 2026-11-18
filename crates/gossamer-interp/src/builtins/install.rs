@@ -64,6 +64,14 @@ fn install_io_builtins(globals: &mut Vec<(&'static str, Value)>) {
     globals.push(("assert_eq", builtin("assert_eq", builtin_assert_eq)));
     globals.push(("__concat", builtin("__concat", builtin_concat)));
     globals.push(("__debug", builtin("__debug", builtin_debug)));
+    globals.push((
+        "__gos_field_display",
+        builtin("__gos_field_display", builtin_field_display),
+    ));
+    globals.push((
+        "__gos_field_debug",
+        builtin("__gos_field_debug", builtin_field_debug),
+    ));
     globals.push(("__fmt_prec", builtin("__fmt_prec", builtin_fmt_prec)));
     globals.push(("__fmt_radix", builtin("__fmt_radix", builtin_fmt_radix)));
     globals.push(("__fmt_upper", builtin("__fmt_upper", builtin_fmt_upper)));

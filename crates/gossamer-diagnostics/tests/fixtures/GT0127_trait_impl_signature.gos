@@ -1,0 +1,13 @@
+// ERROR: GT0127
+
+trait Shape {
+    fn area(&self) -> f64
+}
+
+struct Square: Shape {
+    side: f64
+
+    fn area(&self) -> i64 { 4 }
+}
+
+fn main() { println(Square { side: 2.0 }.side) }

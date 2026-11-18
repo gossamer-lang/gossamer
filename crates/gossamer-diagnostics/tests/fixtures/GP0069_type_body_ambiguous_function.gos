@@ -1,0 +1,10 @@
+// ERROR: GP0069
+
+struct Point: Display + Debug {
+    x: i64
+    y: i64
+
+    fn fmt(&self) -> String { f"({self.x}, {self.y})" }
+}
+
+fn main() { println(Point { x: 1, y: 2 }) }

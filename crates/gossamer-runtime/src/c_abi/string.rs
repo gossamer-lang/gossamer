@@ -833,7 +833,7 @@ unsafe fn extend_str_index(s: *mut c_char, old_len: usize, added: &[u8], cap: us
 }
 
 #[inline]
-unsafe fn typed_str_cap(s: *const c_char) -> Option<usize> {
+pub(crate) unsafe fn typed_str_cap(s: *const c_char) -> Option<usize> {
     if s.is_null() || !has_typed_body_shape(s) {
         return None;
     }
@@ -1149,6 +1149,54 @@ where
     alloc_growable_filled(content_len, cap, force_heap, KnownText::Unchecked, fill)
 }
 
+/// Bytes a buffer that becomes a string body keeps in front of its content,
+/// for [`string_from_prefixed`] to write the header into.
+pub(crate) const BODY_PREFIX_BYTES: usize = STRING_BODY_OFFSET;
+
+/// The string whose content is `buf[BODY_PREFIX_BYTES..]`, made
+/// from `buf`'s own block when a string can own it, so the content is not
+/// copied; otherwise a copy of the content.
+///
+/// A string's block is the allocator's own, and inside an arena region a
+/// fresh string belongs to the region, so those cases copy.
+pub(crate) fn string_from_prefixed(buf: Vec<u8>) -> *mut c_char {
+    debug_assert!(buf.len() >= BODY_PREFIX_BYTES);
+    #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+    if !crate::c_abi::rc::region_is_active() && u32::try_from(buf.len()).is_ok() {
+        return adopt_prefixed(buf);
+    }
+    alloc_cstring(&buf[BODY_PREFIX_BYTES..])
+}
+
+/// [`string_from_prefixed`] for a buffer whose block the string takes over.
+#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+fn adopt_prefixed(mut buf: Vec<u8>) -> *mut c_char {
+    let content_len = buf.len() - BODY_PREFIX_BYTES;
+    let cap = content_len;
+    let total = STRING_BODY_OFFSET + cap + 1 + str_index_bytes(cap);
+    buf.reserve_exact(total - buf.len());
+    // A buffer sized for a larger document gives back what this one does
+    // not use; the allocator keeps the block in place when little is.
+    buf.shrink_to(total);
+    crate::c_abi::ledger::benchmark_allocation(total);
+    let mut buf = std::mem::ManuallyDrop::new(buf);
+    // A word-aligned `Vec<u8>` block comes from `mi_malloc`, as a string
+    // body's does, so the string's free returns it to the same allocator.
+    // SAFETY: the block holds at least `total` bytes with the content in
+    // place after the prefix, and the string takes it over whole.
+    unsafe {
+        init_string_body(
+            buf.as_mut_ptr(),
+            content_len,
+            cap,
+            STR_BUILDER_TAG,
+            false,
+            true,
+            KnownText::Unchecked,
+        )
+    }
+}
+
 /// Allocates a string of `len` ASCII bytes that `fill` writes in full.
 /// `force_heap` keeps the string out of the open region, as a copy of
 /// region-backed bytes must be.
@@ -1167,6 +1215,11 @@ pub(crate) fn alloc_ascii_cstring(bytes: &[u8]) -> *mut c_char {
         bytes.is_ascii(),
         "alloc_ascii_cstring: content is not ASCII"
     );
+    if let [byte] = bytes
+        && let Some(literal) = ascii_string(*byte)
+    {
+        return literal;
+    }
     let force_heap = crate::c_abi::rc::in_region_arena(bytes.as_ptr());
     alloc_growable_filled(
         bytes.len(),
@@ -1430,6 +1483,32 @@ where
     // prefix promised by its caller.
     unsafe {
         let content = base.add(STRING_BODY_OFFSET);
+        fill(content);
+        init_string_body(base, content_len, cap, tag, promoted, zero_tail, known)
+    }
+}
+
+/// Writes the header, terminator, and character index of a string body whose
+/// allocation starts at `base` and whose `content_len` bytes of content are
+/// already in place, and registers it; answers the body.
+///
+/// # Safety
+///
+/// `base` addresses `STRING_BODY_OFFSET + cap + 1 + str_index_bytes(cap)`
+/// writable bytes allocated as `tag` and `promoted` say, holding `content_len
+/// <= cap` content bytes from `STRING_BODY_OFFSET` on.
+unsafe fn init_string_body(
+    base: *mut u8,
+    content_len: usize,
+    cap: usize,
+    tag: u8,
+    promoted: bool,
+    zero_tail: bool,
+    known: KnownText,
+) -> *mut c_char {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let content = base.add(STRING_BODY_OFFSET);
         let owner = base.cast::<StringOwner>();
         owner.write(StringOwner {
             abi_version: STRING_OWNER_VERSION,
@@ -1448,7 +1527,6 @@ where
         std::ptr::copy_nonoverlapping((cap as u32).to_le_bytes().as_ptr(), hdr.add(4), 4);
         std::ptr::copy_nonoverlapping((content_len as u32).to_le_bytes().as_ptr(), hdr.add(8), 4);
         *hdr.add(12) = tag;
-        fill(content);
         if zero_tail {
             // Region allocations arrive zeroed. A heap allocation needs only
             // its terminator: the header's length is what says how much of
@@ -2122,6 +2200,53 @@ pub unsafe extern "C" fn gos_rt_vec_clone_field(src: *const GosVec) -> *mut GosV
 /// cross-domain free that produced heisencrashes anywhere else in
 /// the runtime malloc'd next. See
 /// `~/dev/contexts/lang/fix_architecture_ownership.md` §3.1.
+/// Element `idx` of the vector-of-vectors `v`, which holds `elem` there, for
+/// a new owner. When `v` is the only holder of its storage, the element is
+/// taken out and its slot left empty, so `v`'s free passes it over; otherwise
+/// the answer is a copy of `elem`, as `gos_rt_vec_clone` makes. The compiler
+/// calls this only where nothing reads that slot of `v` again.
+///
+/// # Safety
+///
+/// `v` is null or a live `GosVec`, and `elem` is null or a live `GosVec`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_take_vec_elem(
+    v: *mut GosVec,
+    idx: i64,
+    elem: *const GosVec,
+) -> *mut GosVec {
+    ffi_entry!({
+        if !v.is_null() && !elem.is_null() {
+            // SAFETY: `v` is a live vector (contract), checked non-null above.
+            let vec = unsafe { &mut *v };
+            let sole_owner = crate::c_abi::vec::vec_rc(vec) == 1
+                && !crate::c_abi::vec::vec_is_region(vec)
+                && !crate::c_abi::vec::vec_is_frame(vec)
+                && !crate::c_abi::vec::vec_is_window(vec)
+                && !crate::c_abi::vec::vec_is_str_view(vec)
+                && !crate::c_abi::rc::in_region_arena(elem.cast());
+            if sole_owner
+                && vec.elem_kind == crate::c_abi::vec::vec_elem_kind::VEC
+                && vec.elem_bytes == 8
+                && !vec.ptr.is_null()
+                && (0..vec.len).contains(&idx)
+            {
+                // SAFETY: `idx` is inside the buffer of one-word elements.
+                let slot = unsafe { vec.ptr.as_ptr().add(idx as usize * 8).cast::<usize>() };
+                // SAFETY: `slot` addresses one element word.
+                if unsafe { slot.read_unaligned() } == elem as usize {
+                    // SAFETY: as above; the element's share passes to the caller.
+                    unsafe { slot.write_unaligned(0) };
+                    crate::c_abi::vec::bump_vec_mutation_generation(vec);
+                    return elem.cast_mut();
+                }
+            }
+        }
+        // SAFETY: `elem` is null or live (contract), which the copy accepts.
+        unsafe { gos_rt_vec_clone(elem) }
+    })
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_clone(src: *const GosVec) -> *mut GosVec {
     ffi_entry!({
@@ -4098,6 +4223,9 @@ pub extern "C" fn gos_rt_bool_to_str(b: i32) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_char_to_str(c: i32) -> *mut c_char {
     ffi_entry!({
+        if let Some(literal) = u8::try_from(c).ok().and_then(ascii_string) {
+            return literal;
+        }
         let scalar = u32::try_from(c)
             .ok()
             .and_then(char::from_u32)
@@ -4106,6 +4234,80 @@ pub extern "C" fn gos_rt_char_to_str(c: i32) -> *mut c_char {
         let s = scalar.encode_utf8(&mut buf);
         alloc_cstring(s.as_bytes())
     })
+}
+
+/// Where a literal's body starts in its blob: past the owner record, an
+/// unused word, the capacity, the length, and the tag.
+const STATIC_BODY_AT: usize = 29;
+
+/// The static one-character string holding `byte`, when it is ASCII.
+fn ascii_string(byte: u8) -> Option<*mut c_char> {
+    let blob = ASCII_STRINGS.0.get(usize::from(byte))?;
+    // A static body is never written: every path that grows or releases a
+    // string copies or skips one, as it does a literal.
+    Some(blob[STATIC_BODY_AT..].as_ptr().cast::<c_char>().cast_mut())
+}
+
+/// Bytes of one single-character literal blob.
+const STATIC_CHAR_BLOB: usize = 40;
+
+/// Every one-character ASCII string, laid out as the compiler lays out a
+/// string literal, so turning an ASCII `char` into a `String` hands out one of
+/// these and allocates nothing. Eight-aligned blobs put each body at an
+/// address congruent to 5, as every typed body is.
+#[repr(C, align(8))]
+struct AsciiStrings([[u8; STATIC_CHAR_BLOB]; 128]);
+
+static ASCII_STRINGS: AsciiStrings = AsciiStrings(ascii_string_blobs());
+
+const fn ascii_string_blobs() -> [[u8; STATIC_CHAR_BLOB]; 128] {
+    let mut blobs = [[0u8; STATIC_CHAR_BLOB]; 128];
+    let mut c = 0;
+    while c < 128 {
+        let blob = &mut blobs[c];
+        // The owner record a literal carries: ABI version 1, kind 2,
+        // destructor 3.
+        blob[0] = 1;
+        blob[2] = 2;
+        blob[4] = 3;
+        let cap = (STATIC_BODY_AT as i64 + gossamer_abi::string_layout::CAP_OFFSET) as usize;
+        let len = (STATIC_BODY_AT as i64 + gossamer_abi::string_layout::LEN_OFFSET) as usize;
+        let tag = (STATIC_BODY_AT as i64 + gossamer_abi::string_layout::TAG_OFFSET) as usize;
+        blob[cap] = 1;
+        blob[len] = 1;
+        blob[tag] = STR_STATIC_TAG;
+        blob[STATIC_BODY_AT] = c as u8;
+        let index = gossamer_abi::string_layout::INDEX_ASCII.to_le_bytes();
+        let footer = STATIC_BODY_AT + 2;
+        blob[footer] = index[0];
+        blob[footer + 1] = index[1];
+        blob[footer + 2] = index[2];
+        blob[footer + 3] = index[3];
+        c += 1;
+    }
+    blobs
+}
+
+#[cfg(test)]
+mod ascii_string_tests {
+    use super::{gos_rt_char_to_str, typed_str_bytes, typed_str_cap, typed_str_known_utf8};
+
+    #[test]
+    fn an_ascii_char_reads_back_as_its_one_character_string() {
+        for c in 0..128 {
+            let s = gos_rt_char_to_str(c);
+            assert_eq!(s as usize % 8, 5, "body alignment of {c}");
+            // SAFETY: `s` is a typed static body.
+            unsafe {
+                assert_eq!(typed_str_bytes(s), &[c as u8]);
+                assert_eq!(typed_str_cap(s), Some(1));
+                assert!(typed_str_known_utf8(s));
+            }
+        }
+        let wide = gos_rt_char_to_str('\u{e9}' as i32);
+        // SAFETY: `wide` is a typed body.
+        assert_eq!(unsafe { typed_str_bytes(wide) }, "\u{e9}".as_bytes());
+    }
 }
 
 #[cfg(test)]

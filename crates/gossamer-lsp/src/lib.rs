@@ -8,6 +8,7 @@
 
 mod comptime;
 mod inlay;
+mod members;
 mod navigation;
 mod protocol;
 mod semantic_tokens;

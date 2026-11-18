@@ -898,6 +898,24 @@ impl TypeChecker<'_> {
                             }),
                         other => other,
                     };
+                    // A struct-variant literal named through its variant
+                    // (`E::Two { .. }`) builds the enum that declares it,
+                    // with fresh arguments a generic enum's fields infer.
+                    let res = match res {
+                        Resolution::Def {
+                            def,
+                            kind: gossamer_resolve::DefKind::Variant,
+                        } => self
+                            .resolutions
+                            .path_of(def)
+                            .and_then(|p| p.split_last().map(|(_, owner)| owner.join("::")))
+                            .and_then(|owner| self.user_type_defs.get(&owner).copied())
+                            .map_or(res, |def| Resolution::Def {
+                                def,
+                                kind: gossamer_resolve::DefKind::Enum,
+                            }),
+                        other => other,
+                    };
                     match res {
                         Resolution::Def {
                             def,
@@ -1042,9 +1060,10 @@ impl TypeChecker<'_> {
                         self.reject_private_field_of(def, &field_name, expr.span);
                     }
                 }
-                // A struct-variant literal (`Shape::Rect { w: 1 }`) of a
-                // non-generic enum expects each field value at the type the
-                // variant declares, as a struct literal's field does.
+                // A struct-variant literal (`Shape::Rect { w: 1 }`) expects
+                // each field value at the type the variant declares, as a
+                // struct literal's field does; a generic enum's declared types
+                // take the literal's fresh arguments, which the values infer.
                 // The enum a struct-variant literal builds, named the way its
                 // declaration registered it: from the definition the path's
                 // head resolves to, so a module path, an alias, or a
@@ -1106,7 +1125,6 @@ impl TypeChecker<'_> {
                         };
                         variant.and_then(|variant| {
                             identity.into_iter().chain(spelled).find_map(|enum_name| {
-                                self.enum_tys.contains_key(&enum_name).then_some(())?;
                                 self.enum_variant_named_payloads
                                     .get(&(enum_name, variant.clone()))
                                     .cloned()

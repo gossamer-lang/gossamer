@@ -2427,6 +2427,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt_unwind!("gos_rt_vec_swap_safe", (Ptr, I64, I64) -> Void, Cranelift, "Bounds-checked in-place Vec swap; an index outside [0, len) is a bounds panic."),
     rt!("gos_rt_vec_swap_unchecked", (Ptr, I64, I64) -> Void, Both, "Swap two scalar-shaped GosVec elements without the bounds guard; emitted only where the loop versioner proved both indices in [0, len) against this vec."),
     rt_vec_unwind!("gos_rt_vec_take", (Ptr, I64) -> Ptr, Both, "xs.take(n) -> fresh Vec of the first n elements, clamped to [0, len]."),
+    rt_vec!("gos_rt_vec_take_vec_elem", (Ptr, I64, Ptr) -> Ptr, Cranelift, "Element `idx` of a vector of vectors for a new owner: taken out of its slot when the vector's storage has no other holder, otherwise a copy."),
     rt_unwind!("gos_rt_vec_truncate", (Ptr, I64) -> Void, Cranelift, "Truncate a GosVec in place, dropping removed elements."),
     rt!("gos_rt_vec_window", (Ptr, I64, I64) -> Ptr, Cranelift, "Return a mutable window header aliasing elements [lo, hi) of a GosVec, for `&mut xs[lo..hi]`."),
     rt_unwind!("gos_rt_vec_windows_disjoint", (I64, I64, I64, I64, I64, I64, I64) -> Void, Cranelift, "Panic when two mutable windows of one sequence passed to one call overlap."),

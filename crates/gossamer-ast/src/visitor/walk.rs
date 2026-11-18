@@ -131,6 +131,18 @@ fn walk_struct_decl<V: Visitor + ?Sized>(visitor: &mut V, decl: &StructDecl) {
     walk_generics(visitor, &decl.generics);
     walk_where_clause(visitor, &decl.where_clause);
     walk_struct_body(visitor, &decl.body);
+    walk_type_body(visitor, &decl.traits, &decl.items);
+}
+
+/// The traits a type lists after its name and the items in its body, before
+/// those items move into the `impl` blocks they stand for.
+fn walk_type_body<V: Visitor + ?Sized>(visitor: &mut V, traits: &[TraitBound], items: &[ImplItem]) {
+    for bound in traits {
+        walk_trait_bound(visitor, bound);
+    }
+    for item in items {
+        walk_impl_item(visitor, item);
+    }
 }
 
 fn walk_struct_body<V: Visitor + ?Sized>(visitor: &mut V, body: &StructBody) {
@@ -163,6 +175,7 @@ fn walk_enum_decl<V: Visitor + ?Sized>(visitor: &mut V, decl: &EnumDecl) {
     for variant in &decl.variants {
         walk_enum_variant(visitor, variant);
     }
+    walk_type_body(visitor, &decl.traits, &decl.items);
 }
 
 fn walk_enum_variant<V: Visitor + ?Sized>(visitor: &mut V, variant: &EnumVariant) {

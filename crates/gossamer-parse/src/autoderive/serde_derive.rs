@@ -17,7 +17,7 @@ enum VariantPayload {
 fn reads_zero_default(options: &SerdeField) -> bool {
     match &options.default {
         Some(FieldDefault::Zero) => true,
-        Some(FieldDefault::Value(_)) => false,
+        Some(FieldDefault::Value(_) | FieldDefault::Declared(_)) => false,
         None => options.skip,
     }
 }
@@ -1181,6 +1181,35 @@ fn field_placeholder(
     }
 }
 
+/// The placeholder and argument that render one field of a synthesized
+/// `method` (`fmt` or `to_string`), given the expression reading it.
+///
+/// A field whose type is one of the declaration's own type parameters is a
+/// `String` or `char` at some instantiations and must read quoted there, as a
+/// field of that declared type does, so it renders through the
+/// `__gos_field_*` builtin that decides per instantiation.
+fn field_render(
+    method: &str,
+    ty: &gossamer_ast::Type,
+    aliases: &HashMap<String, gossamer_ast::Type>,
+    params: &HashSet<String>,
+    value: &str,
+) -> (&'static str, String) {
+    let bare_param = matches!(&ty.kind, TypeKind::Path(path)
+        if path.segments.len() == 1
+            && path.segments[0].generics.is_empty()
+            && params.contains(&path.segments[0].name.name));
+    if bare_param {
+        let builtin = if method == "fmt" {
+            "__gos_field_debug"
+        } else {
+            "__gos_field_display"
+        };
+        return ("{}", format!("{builtin}({value})"));
+    }
+    (field_placeholder(method, ty, aliases), value.to_string())
+}
+
 /// Whether `ty`'s head names a scalar, expanding transparent aliases so a
 /// `type Meters = f64` field reads as the `f64` it stands for. `depth`
 /// bounds that expansion, per [`MAX_ALIAS_DEPTH`].
@@ -1279,11 +1308,20 @@ fn types_with_default(parsed: &SourceFile) -> HashSet<String> {
             ItemKind::Enum(decl) => (&item.attrs, &decl.name.name),
             _ => continue,
         };
-        if derive_list(attrs).iter().any(|d| d == "Default") {
+        let every_field_defaulted =
+            matches!(&item.kind, ItemKind::Struct(decl) if every_field_defaulted(decl));
+        if every_field_defaulted || derive_list(attrs).iter().any(|d| d == "Default") {
             out.insert(TyId::new(&module, name).path);
         }
     }
     out
+}
+
+/// Whether every field of a named struct declares a default, which gives
+/// the struct a `default()` of its own: `T {}` builds it.
+pub(crate) fn every_field_defaulted(decl: &StructDecl) -> bool {
+    matches!(&decl.body, StructBody::Named(fields)
+        if !fields.is_empty() && fields.iter().all(|f| f.default.is_some()))
 }
 
 /// A field's zero value for `#[derive(Default)]`, or `None` when a user
@@ -1382,8 +1420,13 @@ pub(crate) fn derive_default_gap(
     aliases: &HashMap<String, gossamer_ast::Type>,
     with_default: &HashSet<String>,
 ) -> Option<(String, String)> {
+    // A field with a declared default is built from it, so it needs no zero value.
     let fields: Vec<(String, &gossamer_ast::Type)> = match &decl.body {
-        StructBody::Named(fields) => fields.iter().map(|f| (f.name.name.clone(), &f.ty)).collect(),
+        StructBody::Named(fields) => fields
+            .iter()
+            .filter(|f| f.default.is_none())
+            .map(|f| (f.name.name.clone(), &f.ty))
+            .collect(),
         StructBody::Tuple(fields) => fields
             .iter()
             .enumerate()
@@ -1476,6 +1519,7 @@ pub fn synthesize_derive_impls_with(
     let user_fmt = types_with_user_debug(parsed);
     let user_to_string = types_with_user_display(parsed);
     let user_eq = types_with_user_method(parsed, "eq");
+    let user_default = types_with_user_method(parsed, "default");
     let user_cmp = types_with_user_method(parsed, "cmp");
 
     // Field types per struct / enum, used to grow the `formattable` set,
@@ -1657,6 +1701,15 @@ pub fn synthesize_derive_impls_with(
         // `#[derive(...)]`. The synthesized methods key off the same `PartialEq`
         // / `Ord` markers an explicit derive uses, so the two paths never
         // double-emit.
+        // A struct whose every field declares a default has a `default()`
+        // that builds `T {}`, unless the source writes one.
+        if let ItemKind::Struct(decl) = &item.kind
+            && every_field_defaulted(decl)
+            && !user_default.contains(&TyId::new(&module, &decl.name.name).path)
+            && !derives.iter().any(|d| d == "Default")
+        {
+            derives.push("Default".to_string());
+        }
         if let Some(tn) = &implicit_target {
             if comparable.contains(tn)
                 && !user_eq.contains(tn)
@@ -2007,34 +2060,34 @@ fn emit_enum_derive_impl(
         out.push_str(&format!(
             "    fn {render_method}(&self) -> String {{\n        match self {{\n"
         ));
+        let params = param_name_set(&decl.generics);
         for v in &decl.variants {
             let (pat, _, binds) = variant_shape(ty, v, "__d");
             let vn = &v.name.name;
             let arm = match &v.body {
                 StructBody::Unit => format!("\"{vn}\""),
                 StructBody::Tuple(payload) => {
-                    let holes = payload
+                    let (holes, args): (Vec<&str>, Vec<String>) = payload
                         .iter()
-                        .map(|f| field_placeholder(render_method, &f.ty, aliases))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("format(\"{vn}({holes})\", {})", binds.join(", "))
+                        .zip(&binds)
+                        .map(|(f, bind)| field_render(render_method, &f.ty, aliases, &params, bind))
+                        .unzip();
+                    format!("format(\"{vn}({})\", {})", holes.join(", "), args.join(", "))
                 }
                 StructBody::Named(fields) => {
-                    let parts: Vec<String> = fields
+                    let (parts, args): (Vec<String>, Vec<String>) = fields
                         .iter()
-                        .map(|f| {
-                            format!(
-                                "{}: {}",
-                                f.name.name,
-                                field_placeholder(render_method, &f.ty, aliases)
-                            )
+                        .zip(&binds)
+                        .map(|(f, bind)| {
+                            let (hole, arg) =
+                                field_render(render_method, &f.ty, aliases, &params, bind);
+                            (format!("{}: {hole}", f.name.name), arg)
                         })
-                        .collect();
+                        .unzip();
                     format!(
                         "format(\"{vn} {{{{ {} }}}}\", {})",
                         parts.join(", "),
-                        binds.join(", ")
+                        args.join(", ")
                     )
                 }
             };
@@ -2069,6 +2122,7 @@ fn emit_named_struct_fmt_impl(
     field_names: &[&str],
     fields: &[gossamer_ast::StructField],
     aliases: &HashMap<String, gossamer_ast::Type>,
+    params: &HashSet<String>,
 ) {
     let mut tmpl = String::new();
     tmpl.push_str(name);
@@ -2080,7 +2134,7 @@ fn emit_named_struct_fmt_impl(
         tmpl.push_str(f);
         tmpl.push_str(": ");
         tmpl.push_str(fields.get(i).map_or("{:?}", |field| {
-            field_placeholder(method, &field.ty, aliases)
+            field_render(method, &field.ty, aliases, params, "").0
         }));
     }
     tmpl.push_str(" }}");
@@ -2091,7 +2145,7 @@ fn emit_named_struct_fmt_impl(
         .iter()
         .map(|f| match json_module_spelling(&f.ty) {
             Some(module) => format!("{module}::encode(self.{}).unwrap_or(\"\")", f.name.name),
-            None => format!("self.{}", f.name.name),
+            None => field_render(method, &f.ty, aliases, params, &format!("self.{}", f.name.name)).1,
         })
         .collect();
     if field_names.is_empty() {
@@ -2226,16 +2280,15 @@ fn emit_tuple_struct_derive_impl(
             ));
         }
     }
+    let params = param_name_set(&decl.generics);
     for render_method in &render_methods {
-        let placeholders: Vec<&str> = fields
-            .iter()
-            .map(|f| field_placeholder(render_method, &f.ty, aliases))
-            .collect();
-        let argvals: Vec<String> = fields
+        let (placeholders, argvals): (Vec<&str>, Vec<String>) = fields
             .iter()
             .enumerate()
-            .map(|(i, _)| format!("self.{i}"))
-            .collect();
+            .map(|(i, f)| {
+                field_render(render_method, &f.ty, aliases, &params, &format!("self.{i}"))
+            })
+            .unzip();
         out.push_str(&format!(
             "    fn {render_method}(&self) -> String {{ format(\"{bare}({})\", {}) }}\n",
             placeholders.join(", "),
@@ -2323,9 +2376,11 @@ fn emit_struct_derive_impl(
     }
     if want_default {
         // Every field needs a zero value; a field without one leaves Default
-        // unsynthesized, and `derive_default_diags` reports it.
+        // unsynthesized, and `derive_default_diags` reports it. A field with a
+        // declared default is left out, so the literal builds it from that.
         let init: Option<Vec<(String, String)>> = fields
             .iter()
+            .filter(|f| f.default.is_none())
             .map(|f| {
                 field_default_literal(&f.ty, &ty.module, structs, aliases, with_default)
                     .map(|v| (f.name.name.clone(), v))
@@ -2350,6 +2405,7 @@ fn emit_struct_derive_impl(
             &field_names,
             fields,
             aliases,
+            &param_name_set(&decl.generics),
         );
     }
     out.push_str("}\n\n");

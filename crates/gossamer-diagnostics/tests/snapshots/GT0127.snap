@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0127]: A method of a trait impl does not match the trait's declaration of - here
+--- framed ---
+error[GT0127]: A method of a trait impl does not match the trait's declaration of
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

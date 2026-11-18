@@ -695,12 +695,47 @@ impl<'a> Lowerer<'a> {
         p64
     }
 
+    /// `x.abs()` for an `i64`, saturating as `gos_rt_math_abs_i64` does:
+    /// `i64::MIN` answers `i64::MAX`. Three instructions, where a call would
+    /// cost a frame per use in an arithmetic loop.
+    pub(crate) fn inline_saturating_abs_i64(&mut self, word: &str) -> String {
+        self.runtime_refs
+            .insert("declare i64 @llvm.abs.i64(i64, i1)".to_string());
+        let abs = self.fresh();
+        let is_min = self.fresh();
+        let out = self.fresh();
+        writeln!(
+            self.out,
+            "  {abs} = call i64 @llvm.abs.i64(i64 {word}, i1 false)"
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  {is_min} = icmp eq i64 {word}, -9223372036854775808"
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  {out} = select i1 {is_min}, i64 9223372036854775807, i64 {abs}"
+        )
+        .unwrap();
+        out
+    }
+
     pub(crate) fn lower_runtime_call_intrinsic(
         &mut self,
         name: &str,
         args: &[Operand],
         dest_local: Local,
     ) -> Result<String, BuildError> {
+        if name == "gos_rt_math_abs_i64" && args.len() == 1 {
+            let raw = self.lower_operand(&args[0])?;
+            let ty = self.operand_llvm_ty(&args[0]);
+            let word = self.coerce_llvm_value(&raw, &ty, "i64");
+            let abs = self.inline_saturating_abs_i64(&word);
+            let dest_ty = render_ty(self.tcx, self.body.local_ty(dest_local));
+            return Ok(self.coerce_llvm_value(&abs, "i64", &dest_ty));
+        }
         // A handle's retain or release is a no-op on null, and a frame's exit
         // sweep reaches the bindings of every arm it did not take with nothing
         // in them: test inline, and call only for a live handle.
@@ -1432,11 +1467,11 @@ impl<'a> Lowerer<'a> {
                 if math == gossamer_mir::F64MathIntrinsic::Abs
                     && render_ty(self.tcx, self.body.local_ty(dest_local)) != "double"
                 {
-                    return self.lower_runtime_call_intrinsic(
-                        "gos_rt_math_abs_i64",
-                        args,
-                        dest_local,
-                    );
+                    let raw = self.lower_operand(&args[0])?;
+                    let ty = self.operand_llvm_ty(&args[0]);
+                    let word = self.coerce_llvm_value(&raw, &ty, "i64");
+                    let abs = self.inline_saturating_abs_i64(&word);
+                    return Ok(self.coerce_llvm_value(&abs, "i64", &dest_ty));
                 }
                 math.llvm_name()
             }

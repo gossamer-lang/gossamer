@@ -82,9 +82,17 @@ pub(super) fn send_layout_entries(
         }
         _ => return,
     };
-    let mut word = base_word;
-    for fty in field_tys {
+    let packed = tcx.packed_field_words(ty);
+    let mut next = base_word;
+    for (index, fty) in field_tys.into_iter().enumerate() {
         let fwords = i64::from(tcx.slot_bytes(fty).max(8) / 8);
+        // A packed struct places each field other than a scalar at a
+        // word of its own layout.
+        let word = packed
+            .as_ref()
+            .and_then(|words| words.get(index))
+            .map_or(next, |at| base_word + at);
+        next += fwords;
         let entry = |kind: i64, at: i64| (kind << RC_CHILD_KIND_SHIFT) | at;
         match tcx.kind_of(fty).clone() {
             TyKind::Vec(_) | TyKind::Slice(_) => out.push(entry(RC_CHILD_VEC, word)),
@@ -148,7 +156,6 @@ pub(super) fn send_layout_entries(
             }
             _ => {}
         }
-        word += fwords;
     }
 }
 

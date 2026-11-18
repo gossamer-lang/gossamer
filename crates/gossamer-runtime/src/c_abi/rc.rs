@@ -1151,9 +1151,9 @@ fn rc_block_alloc_zeroed(total: usize) -> *mut u8 {
 }
 
 /// mimalloc's small-object ceiling (`MI_SMALL_SIZE_MAX`): a request at or
-/// below it may take the entry that skips the size-class dispatch.
-#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
-const MI_SMALL_SIZE_MAX: usize = 128 * std::mem::size_of::<usize>();
+/// below it may take the entry that skips the size-class dispatch, and is
+/// served from pages that hold many blocks of its class side by side.
+pub(crate) const MI_SMALL_SIZE_MAX: usize = 128 * std::mem::size_of::<usize>();
 
 /// Like [`rc_block_alloc_zeroed`] without the zero fill, for callers
 /// that provably write every byte.

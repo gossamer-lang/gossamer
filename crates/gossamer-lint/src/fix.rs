@@ -46,6 +46,22 @@ pub fn fixes(sf: &SourceFile, registry: &Registry, source: &str) -> Vec<Fix> {
             "unused_mut_variable" => fix_unused_mut_variable(sf, source, &mut out),
             "needless_bool" => fix_needless_bool(sf, source, &mut out),
             "comparison_to_bool_literal" => fix_bool_cmp(sf, source, &mut out),
+            "restated_field_default" => {
+                out.extend(
+                    crate::type_forms::restated_defaults(sf, source)
+                        .into_iter()
+                        .map(|found| Fix {
+                            span: found.removal,
+                            replacement: String::new(),
+                            lint_id: "restated_field_default",
+                        }),
+                );
+            }
+            "redundant_default_derive" => out.extend(
+                crate::type_forms::redundant_default_derives(sf, source)
+                    .into_iter()
+                    .map(|(_, fix)| fix),
+            ),
             _ => {}
         }
     }

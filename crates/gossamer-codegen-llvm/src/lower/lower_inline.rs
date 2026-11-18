@@ -2817,7 +2817,7 @@ impl<'a> Lowerer<'a> {
         let len1 = self.fresh();
         writeln!(self.out, "  {len1} = add i64 {len}, 1").unwrap();
         writeln!(self.out, "  store i64 {len1}, ptr {vecp}{TBAA_HEADER}").unwrap();
-        self.emit_vec_mutation_bump(&vecp);
+        let _ = self.emit_vec_mutation_bump(&vecp);
         writeln!(self.out, "  br label %{cont}").unwrap();
         let cold_start = self.out.len();
         writeln!(self.out, "{slow}:").unwrap();
@@ -3097,7 +3097,7 @@ impl<'a> Lowerer<'a> {
         let newlen = self.fresh();
         writeln!(self.out, "  {newlen} = sub i64 {len}, 1").unwrap();
         writeln!(self.out, "  store i64 {newlen}, ptr {vec_ptr}{TBAA_HEADER}").unwrap();
-        self.emit_vec_mutation_bump(&vec_ptr);
+        let popped = self.emit_vec_mutation_bump(&vec_ptr);
         let off = self.fresh();
         writeln!(self.out, "  {off} = mul i64 {newlen}, {bytes}").unwrap();
         let ea = self.elem_addr(&data, &off);
@@ -3121,7 +3121,7 @@ impl<'a> Lowerer<'a> {
         let disc = self.fresh();
         writeln!(
             self.out,
-            "  {disc} = phi i64 [ 0, %{pop} ], [ {called}, %{slow} ]"
+            "  {disc} = phi i64 [ 0, %{popped} ], [ {called}, %{slow} ]"
         )
         .unwrap();
         if !is_unit(self.tcx, self.body.local_ty(destination.local)) {
@@ -3232,19 +3232,45 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Records a structural mutation, which a lazy borrowed iterator reads to
-    /// notice that the sequence it walks has changed under it.
-    fn emit_vec_mutation_bump(&mut self, vec_ptr: &str) {
+    /// notice that the sequence it walks has changed under it. The count lives
+    /// in the vector's side record, which only a vector something watches
+    /// has; a vector without one has no iterator to tell. Answers the label
+    /// of the block the bump ends in.
+    pub(crate) fn emit_vec_mutation_bump(&mut self, vec_ptr: &str) -> String {
+        let owner_addr = self.fresh();
+        writeln!(
+            self.out,
+            "  {owner_addr} = getelementptr i8, ptr {vec_ptr}, i64 {}",
+            gossamer_abi::VEC_OWNER_OFFSET
+        )
+        .unwrap();
+        let owner = self.fresh();
+        writeln!(
+            self.out,
+            "  {owner} = load ptr, ptr {owner_addr}{TBAA_HEADER}"
+        )
+        .unwrap();
+        let watched = self.fresh();
+        writeln!(self.out, "  {watched} = icmp ne ptr {owner}, null").unwrap();
+        let bump = self.fresh_label("vec_mutation_bump");
+        let done = self.fresh_label("vec_mutation_done");
+        writeln!(self.out, "  br i1 {watched}, label %{bump}, label %{done}").unwrap();
+        writeln!(self.out, "{bump}:").unwrap();
         let addr = self.fresh();
         writeln!(
             self.out,
-            "  {addr} = getelementptr i8, ptr {vec_ptr}, i64 56"
+            "  {addr} = getelementptr i8, ptr {owner}, i64 {}",
+            gossamer_abi::VEC_OWNER_MUTATION_GENERATION_OFFSET
         )
         .unwrap();
         let cur = self.fresh();
-        writeln!(self.out, "  {cur} = load i64, ptr {addr}{TBAA_HEADER}").unwrap();
+        writeln!(self.out, "  {cur} = load i64, ptr {addr}").unwrap();
         let next = self.fresh();
         writeln!(self.out, "  {next} = add i64 {cur}, 1").unwrap();
-        writeln!(self.out, "  store i64 {next}, ptr {addr}{TBAA_HEADER}").unwrap();
+        writeln!(self.out, "  store i64 {next}, ptr {addr}").unwrap();
+        writeln!(self.out, "  br label %{done}").unwrap();
+        writeln!(self.out, "{done}:").unwrap();
+        done
     }
 
     /// Copies an inline aggregate of `bytes` bytes from the slot at `src` to

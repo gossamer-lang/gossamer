@@ -199,13 +199,15 @@ pub fn parse_with_autoderive_from(
     program: Option<ParsedProgram>,
 ) -> (SourceFile, Vec<ParseDiagnostic>) {
     let (mut sf, mut diags) = match program {
-        Some(ParsedProgram { tree, len })
-            if tree.file == file && source.is_char_boundary(len) =>
-        {
+        Some(ParsedProgram { tree, len }) if tree.file == file && source.is_char_boundary(len) => {
             crate::parse_appended(source, file, tree, len)
         }
         _ => crate::parse_source_file(source, file),
     };
+    // A field default is a function of its own, and a type body is the
+    // `impl` blocks it stands for; every pass below reads those.
+    crate::synthesize_field_default_fns(&mut sf);
+    diags.extend(crate::desugar_type_bodies(&mut sf));
     // `augment_source` synthesizes nothing from a tree that did not parse, so
     // a missing serde codec there says nothing about the type it names.
     let parsed_cleanly = diags.is_empty();

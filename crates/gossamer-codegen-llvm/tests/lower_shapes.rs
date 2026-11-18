@@ -777,16 +777,67 @@ fn fixed_u8_array_keeps_one_slot_per_element() {
 }
 
 #[test]
-fn integer_abs_uses_the_integer_runtime_helper() {
+fn integer_abs_saturates_inline_without_a_call() {
     let (body, tcx) = build_integer_abs_main();
     let ir = render_ir_to_string(&[body], &tcx, false).unwrap();
     assert!(
-        ir.contains("call i64 @gos_rt_math_abs_i64(i64"),
-        "integer abs should call the integer helper:\n{ir}"
+        ir.contains("call i64 @llvm.abs.i64(i64"),
+        "integer abs should be the integer intrinsic:\n{ir}"
+    );
+    assert!(
+        ir.contains("i64 9223372036854775807"),
+        "integer abs should saturate `i64::MIN` as the runtime helper does:\n{ir}"
+    );
+    assert!(
+        !ir.contains("@gos_rt_math_abs_i64("),
+        "integer abs should not call the runtime helper:\n{ir}"
     );
     assert!(
         !ir.contains("llvm.fabs.f64"),
         "integer abs must not call the floating-point intrinsic:\n{ir}"
+    );
+}
+
+#[test]
+fn integer_abs_of_a_computed_value_is_inline_too() {
+    let source = "fn spread(a: (i64, i64), b: (i64, i64)) -> i64 { (a.0 - b.0).abs() + (a.1 - b.1).abs() }\n\
+                  fn main() { println(spread((1, 2), (5, -3))) }\n";
+    let (bodies, tcx) = build_from_source(source);
+    let ir = render_ir_to_string(&bodies, &tcx, false).unwrap();
+    assert!(
+        !ir.contains("call i64 @gos_rt_math_abs_i64("),
+        "integer abs should not call the runtime helper:\n{ir}"
+    );
+    assert!(
+        ir.contains("@llvm.abs.i64("),
+        "integer abs should be the integer intrinsic:\n{ir}"
+    );
+}
+
+#[test]
+fn a_heap_of_integer_tuples_pushes_and_pops_inline() {
+    let source = "fn drain(n: i64) -> i64 {\n\
+                  let mut heap: MinHeap<(i64, i64)> = MinHeap::new()\n\
+                  for i in 0..n { heap.push((n - i, i)) }\n\
+                  let mut total = 0\n\
+                  while let Some((k, v)) = heap.pop() { total += k * v }\n\
+                  total\n\
+                  }\n\
+                  fn main() { println(drain(10)) }\n";
+    let (bodies, tcx) = build_from_source(source);
+    let ir = render_ir_to_string(&bodies, &tcx, false).unwrap();
+    let body = ir
+        .split("define")
+        .find(|f| f.contains("drain"))
+        .unwrap_or(&ir);
+    assert!(
+        body.contains("heap_inline"),
+        "the push and pop should be inline:\n{body}"
+    );
+    assert!(
+        body.contains("@\"gos_rt_bheap_min_push_desc\"")
+            && body.contains("@\"gos_rt_bheap_min_pop_desc_into\""),
+        "the runtime calls should stay as the fallback:\n{body}"
     );
 }
 

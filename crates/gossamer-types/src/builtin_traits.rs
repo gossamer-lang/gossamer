@@ -56,57 +56,7 @@ const FMT_METHODS: &[&str] = &["fmt", "to_string"];
 /// The `Iterator<T>` method surface available on every execution tier: what a
 /// bound naming `Iterator` licenses on a type parameter, and what an iterator
 /// receiver accepts.
-pub const ITERATOR_BOUND_METHODS: &[&str] = &[
-    "next",
-    "take",
-    "skip",
-    "step_by",
-    "enumerate",
-    "chain",
-    "zip",
-    "map",
-    "filter",
-    "filter_map",
-    "flat_map",
-    "scan",
-    "take_while",
-    "skip_while",
-    "rev",
-    "dedup",
-    "flatten",
-    "pairwise",
-    "windows",
-    "chunks",
-    "collect",
-    "count",
-    "sum",
-    "product",
-    "min",
-    "max",
-    "fold",
-    "any",
-    "all",
-    "find",
-    // Terminals and eager-only operations. An iterator argument is legal for
-    // these too: the eager ones drain it first, which is what a sequence
-    // operation over an iterator has to do anyway.
-    "find_map",
-    "for_each",
-    "position",
-    "reduce",
-    "partition",
-    "unzip",
-    "sort_by",
-    "sort_by_key",
-    "min_by",
-    "min_by_key",
-    "max_by",
-    "max_by_key",
-    "sum_by",
-    "product_by",
-    "chunk_by",
-    "count_by",
-];
+pub const ITERATOR_BOUND_METHODS: &[&str] = gossamer_ast::ITERATOR_ITEMS.split_at(1).1;
 
 /// Every trait an `impl` header or a generic bound may name without a
 /// declaration in the checked source.
@@ -783,6 +733,42 @@ mod tests {
                 entry.signature.contains(&format!("fn {method}(")),
                 "{name} renders `{}` for method `{method}`",
                 entry.signature
+            );
+        }
+    }
+
+    /// The trait a function in a type's body implements is decided before
+    /// this catalog is consulted, from the table the AST carries, so the two
+    /// must name the same traits, and the table every item an `impl` of each
+    /// may define, as a source `impl` block spells it.
+    #[test]
+    fn the_type_body_trait_table_matches_the_catalog() {
+        for entry in BUILTIN_TRAITS
+            .iter()
+            .filter(|entry| entry.kind != BuiltinTraitKind::Automatic)
+        {
+            let (_, items) = gossamer_ast::LANGUAGE_TRAIT_ITEMS
+                .iter()
+                .find(|(name, _)| *name == entry.name)
+                .unwrap_or_else(|| panic!("`{}` has no row in LANGUAGE_TRAIT_ITEMS", entry.name));
+            // `impl Display`'s `fn fmt` is renamed before the checker sees it.
+            let source_items: Vec<&str> = if entry.name == "Display" {
+                vec!["fmt"]
+            } else {
+                entry.impl_items.to_vec()
+            };
+            for item in source_items {
+                assert!(
+                    items.contains(&item),
+                    "`{}` declares `{item}`, which LANGUAGE_TRAIT_ITEMS leaves out",
+                    entry.name
+                );
+            }
+        }
+        for (name, _) in gossamer_ast::LANGUAGE_TRAIT_ITEMS {
+            assert!(
+                builtin_trait(name).is_some(),
+                "`{name}` is not a built-in trait"
             );
         }
     }

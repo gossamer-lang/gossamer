@@ -252,6 +252,15 @@ pub enum ResolveError {
         /// A name some alternative does not bind.
         name: String,
     },
+    /// A field default that reads `self` or another field of its struct. A
+    /// default is evaluated before the value it fills exists.
+    #[error("the default of field `{field}` reads `{name}`")]
+    FieldDefaultReadsValue {
+        /// The field whose default reads the name.
+        field: String,
+        /// The name it reads: `self` or another field.
+        name: String,
+    },
     /// A `use path::*` whose path names no enum. A glob imports an enum's
     /// variants; a module's items are imported by name.
     #[error("`use {path}::*` names no enum")]
@@ -422,6 +431,7 @@ impl ResolveError {
             Self::UppercaseBindingPattern { .. } => "uppercase-binding-pattern",
             Self::GlobOfNonEnum { .. } => "glob-of-non-enum",
             Self::OrPatternBindings { .. } => "or-pattern-bindings",
+            Self::FieldDefaultReadsValue { .. } => "field-default-reads-value",
             Self::ReflectingCallWithoutType { .. } => "reflecting-call-without-type",
             Self::ReservedCallName { .. } => "reserved-call-name",
             Self::UnknownNamedArgument { .. } => "unknown-named-argument",
@@ -477,6 +487,7 @@ impl ResolveError {
             | Self::DataLastCallOrder { .. }
             | Self::GlobOfNonEnum { .. }
             | Self::OrPatternBindings { .. }
+            | Self::FieldDefaultReadsValue { .. }
             | Self::UnknownLoopLabel { .. } => return false,
             Self::DependencyNotImported { module, .. } => module,
             Self::DependencyModuleCollision { module, .. } => module,
@@ -534,6 +545,7 @@ impl ResolveError {
             Self::UppercaseBindingPattern { .. } => "GR0022",
             Self::GlobOfNonEnum { .. } => "GR0024",
             Self::OrPatternBindings { .. } => "GR0025",
+            Self::FieldDefaultReadsValue { .. } => "GR0026",
             Self::ReflectingCallWithoutType { .. } => "GR0023",
         }
     }
@@ -790,6 +802,11 @@ impl ResolveDiagnostic {
                  modules can name it; write `pub(package)` on the {kind} to reach it \
                  from anywhere in this package, or `pub` to make it part of the \
                  package's public API"
+            )),
+            ResolveError::FieldDefaultReadsValue { field, name } => out.with_help(format!(
+                "a default is evaluated before the value it fills exists, so `{field}`'s \
+                 cannot read `{name}`; compute it where the value is built, or give \
+                 `{field}` no default"
             )),
             ResolveError::OrPatternBindings { name } => out.with_help(format!(
                 "bind `{name}` in every alternative, or match the alternatives in \

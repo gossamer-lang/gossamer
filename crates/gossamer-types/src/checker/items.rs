@@ -146,6 +146,7 @@ impl TypeChecker<'_> {
                     self.record_impl_param_bounds(decl);
                     self.check_trait_impl_completeness(decl, item.span);
                     self.check_trait_impl_membership(decl, item.span);
+                    self.check_trait_impl_signatures(decl);
                     self.check_trait_impl_uniqueness(decl, module_path, item.span);
                     self.check_method_uniqueness(decl, module_path);
                     self.check_trait_impl_assoc_items(decl, item.span);
@@ -188,6 +189,19 @@ impl TypeChecker<'_> {
                         .entry(decl.name.name.clone())
                         .or_default()
                         .extend(methods);
+                    self.trait_fn_decls.insert(
+                        decl.name.name.clone(),
+                        (
+                            decl.generics.params.len(),
+                            decl.items
+                                .iter()
+                                .filter_map(|it| match it {
+                                    TraitItem::Fn(fn_decl) => Some(fn_decl.clone()),
+                                    _ => None,
+                                })
+                                .collect(),
+                        ),
+                    );
                     let required = self
                         .trait_required_methods
                         .entry(decl.name.name.clone())

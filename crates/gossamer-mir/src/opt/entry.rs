@@ -140,6 +140,8 @@ fn optimise_with_bounds_limit(
     // After copy propagation has put the literals in the operand positions.
     elide_literal_string_counts(body);
     crate::verify::debug_verify_body(body);
+    move_elements_out_of_walked_vecs(body);
+    crate::verify::debug_verify_body(body);
     if std::env::var_os("GOS_BOUNDS_REMARKS").is_some() {
         let after_versioning = bounds_access_counts(body);
         eprintln!(

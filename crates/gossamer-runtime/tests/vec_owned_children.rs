@@ -369,7 +369,9 @@ fn regex_split_vec_is_string_typed_and_free_reclaims_pieces() {
     // SAFETY: every pointer argument is a value this test built above and still holds live; a
     // null one is accepted by the callee.
     let re = unsafe { gos_rt_regex_compile(pat.as_ptr()) };
-    let text = cstr("a,b,c,d");
+    // Pieces of more than one character are allocated; a one-character
+    // ASCII string is a shared static.
+    let text = cstr("ab,cd,ef,gh");
     let str_base = str_live();
     // SAFETY: every pointer argument is a value this test built above and still holds live; a
     // null one is accepted by the callee.
@@ -425,11 +427,13 @@ fn regex_find_all_free_without_iteration_reclaims_match_strings() {
 #[test]
 fn regex_captures_free_without_iteration_reclaims_some_groups() {
     let _guard = ledger_scope();
-    let pat = cstr("(a)(b)?");
+    let pat = cstr("(aa)(b)?");
     // SAFETY: every pointer argument is a value this test built above and still holds live; a
     // null one is accepted by the callee.
     let re = unsafe { gos_rt_regex_compile(pat.as_ptr()) };
-    let text = cstr("a");
+    // Groups of more than one character are allocated; a one-character
+    // ASCII string is a shared static.
+    let text = cstr("aa");
     let str_base = str_live();
     // SAFETY: every pointer argument is a value this test built above and still holds live; a
     // null one is accepted by the callee.

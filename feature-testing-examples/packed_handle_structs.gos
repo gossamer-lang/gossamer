@@ -1,0 +1,189 @@
+// Structs whose narrow fields pack beside handles: a Vec, a String, a
+// nested packed struct, and an Option keep whole words while bools and
+// small integers share one. Each is stored, sorted, keyed, copied, sent,
+// and encoded, and every use reads the same values the word-per-field
+// layout would.
+use std::{encoding::json, sync::channel}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Cell {
+    alive: bool
+    next: bool
+    neighbors: Vec<(i64, i64)>
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Tagged {
+    kind: u8
+    name: String
+    weight: i32
+    flag: bool
+}
+
+struct Holder {
+    small: u16
+    inner: Tagged
+    tail: u8
+    opt: Option<String>
+}
+
+enum Shape {
+    Dot(Tagged)
+    Pair(u8, String, bool)
+    Empty
+}
+
+struct Wire {
+    id: u8
+    label: String
+    on: bool
+}
+
+fn make(i: i64) -> Tagged {
+    Tagged { kind: (i % 7) as u8, name: f"n{i}", weight: (i * 3) as i32, flag: i % 2 == 0 }
+}
+
+fn bump(t: Tagged) -> Tagged {
+    Tagged { kind: t.kind +% 1, name: t.name + "!", weight: t.weight - 1, flag: !t.flag }
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Slot<T> {
+    a: u8
+    b: u8
+    v: T
+}
+
+fn slot_total(n: i64) -> i64 {
+    let mut slots: Vec<Slot<(i64, i64)>> = #[]
+    for i in 0..n {
+        slots.push(Slot { a: (n - i) as u8, b: i as u8, v: (i, i * 10) })
+    }
+    slots.sort()
+    slots[0].v = (100, 0)
+    let mut total = 0
+    for s in slots { total += s.a as i64 * s.v.0 + s.b as i64 }
+    total
+}
+
+struct Node {
+    weight: u8
+    leaf: bool
+    left: Option<Node>
+    right: Option<Node>
+}
+
+fn tree_weight(t: Node) -> i64 {
+    let mut total = t.weight as i64
+    if let Some(l) = t.left { total += tree_weight(l) }
+    if let Some(r) = t.right { total += tree_weight(r) }
+    total
+}
+
+fn count_alive(n: i64) -> i64 {
+    let mut cells: Vec<Cell> = #[]
+    for i in 0..n {
+        cells.push(Cell { alive: i % 3 == 0, next: i % 2 == 0, neighbors: #[(i, i + 1)] })
+    }
+    cells[1].alive = true
+    cells[2].neighbors.push((5, 5))
+    let mut total = 0
+    for c in cells {
+        if c.alive { total += c.neighbors.len() }
+        if c.next { total += 100 }
+    }
+    total
+}
+
+fn main() {
+    println(count_alive(10))
+    println(slot_total(6))
+    let mut named: Vec<Slot<String>> = (0..3).map(|i| Slot { a: (3 - i) as u8, b: 7, v: f"s{i}" }).collect()
+    named.sort()
+    named[1].b = 200
+    println(named)
+    let deep = Slot { a: 1, b: 2, v: Slot { a: 3, b: 4, v: "deep" } }
+    println(f"{deep.a} {deep.v.b} {deep.v.v}")
+    let leaf = |w: u8| Node { weight: w, leaf: true, left: None, right: None }
+    let tree = Node { weight: 1, leaf: false, left: Some(leaf(2)), right: Some(Node { weight: 3, leaf: false, left: Some(leaf(4)), right: None }) }
+    println(f"{tree_weight(tree)} {tree.leaf}")
+    let mut nodes = #[leaf(9), leaf(3), leaf(6)]
+    nodes.sort_by(|a, b| a.weight as i64 - b.weight as i64)
+    println(nodes.map(|n| n.weight))
+    let mut cells: Vec<Cell> = #[]
+    for i in 0..5 {
+        cells.push(Cell { alive: i % 2 == 0, next: false, neighbors: #[(i, i + 1)] })
+    }
+    cells[1].next = true
+    cells[2].neighbors.push((9, 9))
+    for c in cells {
+        println(f"{c.alive} {c.next} {c.neighbors}")
+    }
+    let copy = cells.clone()
+    cells[0].neighbors.push((7, 7))
+    println(f"{copy[0].neighbors} {cells[0].neighbors}")
+
+    let mut ts: Vec<Tagged> = (0..6).map(|i| make(5 - i)).collect()
+    ts.sort()
+    println(ts)
+    ts.sort_by_key(|t| t.name)
+    println(ts.map(|t| t.name))
+    println(make(3) == make(3))
+    println(make(3) < make(4))
+    println(bump(make(2)))
+
+    let mut m: Map<Tagged, i64> = Map::new()
+    m[make(1)] = 10
+    m[make(2)] = 20
+    m[make(1)] += 1
+    println(m[make(1)])
+    let mut s = #{ make(1), make(1), make(4) }
+    println(s.len())
+    let mut by_name: Map<String, Tagged> = Map::new()
+    by_name["a"] = make(8)
+    by_name["a"].weight = 100
+    println(by_name["a"])
+
+    let h = Holder { small: 65000, inner: make(6), tail: 255, opt: Some("x") }
+    let h2 = Holder { small: h.small, inner: bump(h.inner), tail: h.tail, opt: None }
+    println(f"{h.small} {h.inner} {h.tail} {h.opt} {h2.inner} {h2.opt}")
+
+    let shapes = #[Shape::Dot(make(9)), Shape::Pair(3, "p", true), Shape::Empty]
+    for sh in shapes {
+        match sh {
+            Shape::Dot(t) => println(f"dot {t.name} {t.kind}")
+            Shape::Pair(a, b, c) => println(f"pair {a} {b} {c}")
+            Shape::Empty => println("empty")
+        }
+    }
+    let maybe: Option<Tagged> = Some(make(10))
+    if let Some(t) = maybe { println(t.weight) }
+
+    let tx, rx = channel()
+    spawn(|| {
+        for i in 0..3 { tx.send(Wire { id: i as u8, label: f"w{i}", on: i == 1 }) }
+        tx.close()
+    })
+    while let Some(w) = rx.recv() { println(f"{w.id} {w.label} {w.on}") }
+
+    let mut total = 0
+    let names = ts.filter(|t| t.flag).map(|t| t.name.len())
+    names.for_each(|n| total += n)
+    println(total)
+
+    let text = json::encode(make(11)).unwrap()
+    println(text)
+    let back = json::decode::<Tagged>(text).unwrap()
+    println(back == make(11))
+
+    let mut grid: Vec<Vec<Cell>> = #[]
+    for y in 0..3 {
+        let mut row: Vec<Cell> = #[]
+        for x in 0..3 { row.push(Cell { alive: (x + y) % 2 == 0, next: false, neighbors: #[(x, y)] }) }
+        grid.push(row)
+    }
+    grid[1][1].alive = true
+    let mut alive = 0
+    for row in grid { for c in row { if c.alive { alive += 1 } } }
+    println(alive)
+}

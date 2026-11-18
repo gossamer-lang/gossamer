@@ -2738,6 +2738,37 @@ impl TypeChecker<'_> {
         );
     }
 
+    /// The type of a rendering intrinsic's call, after checking that each of
+    /// `arg_tys` renders on the channel `name` names.
+    fn check_rendering_intrinsic(&mut self, name: &str, arg_tys: &[Ty], span: Span) -> Ty {
+        for ty in arg_tys {
+            let resolved = self.infer.resolve(self.tcx, *ty);
+            if matches!(
+                self.tcx.kind(resolved),
+                Some(TyKind::Iterator(_) | TyKind::Range(_))
+            ) {
+                self.emit(TypeError::IteratorStateFormatted, span);
+                return self.tcx.error_ty();
+            }
+            let display = !renders_debug_channel(name);
+            if let Some((ty, class)) = self.not_displayable_as(resolved, display) {
+                self.emit(TypeError::ValueNotDisplayable { ty, class }, span);
+                return self.tcx.error_ty();
+            }
+            if let Some(ty) = self.generic_without_fmt(resolved) {
+                self.emit(
+                    TypeError::ValueNotDisplayable {
+                        ty,
+                        class: crate::error::NotDisplayableClass::GenericWithoutDebug,
+                    },
+                    span,
+                );
+                return self.tcx.error_ty();
+            }
+        }
+        self.tcx.string_ty()
+    }
+
     pub(super) fn check_bare_intrinsic_call(
         &mut self,
         name: &str,
@@ -2763,39 +2794,19 @@ impl TypeChecker<'_> {
             );
         }
         let ty = match name {
-            "__concat" | "__debug" | "__fmt_prec" | "__fmt_pad" | "__fmt_radix" | "__fmt_upper"
-            | "__gos_debug_quote" | "__gos_f32_display" | "__gos_f32_debug"
-            | "__gos_dyn_display" | "__gos_dyn_debug" => {
-                for ty in arg_tys {
-                    let resolved = self.infer.resolve(self.tcx, *ty);
-                    if matches!(
-                        self.tcx.kind(resolved),
-                        Some(TyKind::Iterator(_) | TyKind::Range(_))
-                    ) {
-                        self.emit(TypeError::IteratorStateFormatted, span);
-                        return Some(self.tcx.error_ty());
-                    }
-                    let display = !matches!(
-                        name,
-                        "__debug" | "__gos_debug_quote" | "__gos_dyn_debug" | "__gos_f32_debug"
-                    );
-                    if let Some((ty, class)) = self.not_displayable_as(resolved, display) {
-                        self.emit(TypeError::ValueNotDisplayable { ty, class }, span);
-                        return Some(self.tcx.error_ty());
-                    }
-                    if let Some(ty) = self.generic_without_fmt(resolved) {
-                        self.emit(
-                            TypeError::ValueNotDisplayable {
-                                ty,
-                                class: crate::error::NotDisplayableClass::GenericWithoutDebug,
-                            },
-                            span,
-                        );
-                        return Some(self.tcx.error_ty());
-                    }
-                }
-                self.tcx.string_ty()
-            }
+            "__concat"
+            | "__debug"
+            | "__fmt_prec"
+            | "__fmt_pad"
+            | "__fmt_radix"
+            | "__fmt_upper"
+            | "__gos_debug_quote"
+            | "__gos_f32_display"
+            | "__gos_f32_debug"
+            | "__gos_dyn_display"
+            | "__gos_dyn_debug"
+            | "__gos_field_display"
+            | "__gos_field_debug" => self.check_rendering_intrinsic(name, arg_tys, span),
             "__repl_discard" => self.tcx.unit(),
             // `channel()` / `channel(n)` / `channel::unbounded()` ->
             // `(Sender<?T>, Receiver<?T>)` sharing one element var, so
@@ -4003,4 +4014,17 @@ struct SimdReceiver {
     float: bool,
     int: bool,
     mask: bool,
+}
+
+/// Whether the rendering intrinsic `name` is a `{:?}` channel, which renders
+/// what `{}` would decline.
+fn renders_debug_channel(name: &str) -> bool {
+    matches!(
+        name,
+        "__debug"
+            | "__gos_debug_quote"
+            | "__gos_dyn_debug"
+            | "__gos_f32_debug"
+            | "__gos_field_debug"
+    )
 }

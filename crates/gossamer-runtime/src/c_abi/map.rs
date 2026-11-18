@@ -4062,6 +4062,8 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
         // `free_vec_buffer`.
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let compact_header = crate::c_abi::vec::vec_has_compact_header(unsafe { &*v });
+        // SAFETY: as above.
+        let tail_header = crate::c_abi::vec::vec_has_tail(unsafe { &*v });
         let inline_ptr = v.cast::<crate::c_abi::vec::InlineVec>();
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let boxed = unsafe { &*v };
@@ -4174,7 +4176,10 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
         unsafe { crate::c_abi::vec::drop_vec_owner(&mut *v) };
         // Reconstruct the owning box now that the self-referential walk is
         // done, so its drop reclaims the header block (and any inline buffer).
-        if compact_header {
+        if tail_header {
+            // SAFETY: `v` is a tail header whose split buffer, if any, was freed above.
+            unsafe { crate::c_abi::vec::free_tail_header(v) };
+        } else if compact_header {
             // SAFETY: `v` is a compact header `Box::into_raw` made, freed only here.
             drop(unsafe { Box::from_raw(v) });
         } else {
@@ -4776,11 +4781,30 @@ pub unsafe extern "C" fn gos_rt_map_keys_str(m: *const GosMap) -> *mut GosVec {
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         let push_key = |k: &[u8]| {
-            let cstr = alloc_cstring(k);
+            // An ASCII key needs no scan for its character index.
+            let cstr = if k.is_ascii() {
+                crate::c_abi::string::alloc_ascii_cstring(k)
+            } else {
+                alloc_cstring(k)
+            };
             let slot = (cstr as usize as i64).to_ne_bytes();
             // SAFETY: `out` is the live vec made above, and `slot` one 8-byte string word.
             unsafe { gos_rt_vec_push(out, slot.as_ptr()) };
         };
+        // A single key is in order already.
+        let single = match &*storage {
+            MapStorage::StrI64(inner) if inner.len() == 1 => {
+                inner.keys().next().map(ByteKey::as_slice)
+            }
+            MapStorage::StrStr(inner) if inner.len() == 1 => {
+                inner.keys().next().map(ByteKey::as_slice)
+            }
+            _ => None,
+        };
+        if let Some(key) = single {
+            push_key(key);
+            return out;
+        }
         // Sort by key (lexicographic byte order, matching the VM's
         // `SmolStr` ordering) for deterministic, cross-tier order.
         let keys = match &*storage {

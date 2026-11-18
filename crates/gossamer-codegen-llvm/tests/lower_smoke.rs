@@ -544,6 +544,21 @@ fn llvm_uncounted_loop_polls_for_preemption_at_its_header() {
     );
 }
 
+/// A unit rendered whole, as a build with debug information renders it,
+/// defines the frame-pointer attribute its bodies name, as each chunk of a
+/// split build does.
+#[test]
+fn llvm_whole_unit_defines_the_frame_pointer_attribute_its_bodies_name() {
+    let (body, tcx) = looping_main();
+    let ir = gossamer_codegen_llvm::render_ir_to_string(&[body], &tcx, false)
+        .expect("loop MIR must render to LLVM IR");
+    assert!(ir.contains(") #0"), "bodies name attribute group #0: {ir}");
+    assert!(
+        ir.contains("attributes #0 = { \"frame-pointer\"=\"all\" }"),
+        "the unit defines attribute group #0: {ir}"
+    );
+}
+
 #[test]
 fn llvm_acyclic_backward_numbered_edge_has_no_preemption_poll() {
     let (body, tcx) = acyclic_backward_numbered_main();

@@ -740,6 +740,12 @@ fn path_text(segments: &[gossamer_ast::Ident]) -> String {
         .join("::")
 }
 
+/// Whether `callee` is the prelude's `spawn`, not a function of that name.
+fn is_spawn(callee: &HirExpr) -> bool {
+    matches!(&callee.kind, HirExprKind::Path { def: None, segments }
+        if matches!(segments.as_slice(), [only] if only.name == "spawn"))
+}
+
 /// Per-parameter "the callee only reads this, and nothing derived from it
 /// outlives the call" summary, keyed by callee.
 ///
@@ -2358,6 +2364,33 @@ impl<'a> ShareScan<'a> {
                 self.expr(base, true, returned && !scalar);
                 self.expr(index, false, false);
             }
+            // A goroutine runs inside the `cohort` its `spawn` sits in (the
+            // checker holds every spawn to one in its own function), and the
+            // cohort joins it on every exit, so a closure that only reads the
+            // storage, and answers nothing that reaches it, hands it nowhere
+            // that outlives this call.
+            HirExprKind::Call { callee, args }
+                if is_spawn(callee)
+                    && args.iter().any(|a| {
+                        matches!(
+                            a.kind,
+                            HirExprKind::LiftedClosure { .. } | HirExprKind::Closure { .. }
+                        )
+                    }) =>
+            {
+                for a in args {
+                    if matches!(
+                        a.kind,
+                        HirExprKind::LiftedClosure { .. } | HirExprKind::Closure { .. }
+                    ) {
+                        if self.closure_reach(a, false, false) != Some(false) {
+                            self.escaped = true;
+                        }
+                    } else {
+                        self.any_mention(a);
+                    }
+                }
+            }
             HirExprKind::Call { callee, args } => {
                 // A holder answered by the function carries what it holds into
                 // the answer; anywhere else it keeps it.
@@ -2534,6 +2567,17 @@ impl<'a> ShareScan<'a> {
                 for i in items {
                     self.expr(i, place, returned);
                 }
+            }
+            // So does an array or `Vec` literal; a repeat's count is an
+            // integer, a read wherever it sits.
+            HirExprKind::Array(gossamer_hir::HirArrayExpr::List(items)) => {
+                for i in items {
+                    self.expr(i, place, returned);
+                }
+            }
+            HirExprKind::Array(gossamer_hir::HirArrayExpr::Repeat { value, count }) => {
+                self.expr(value, place, returned);
+                self.expr(count, true, false);
             }
             // An early exit answers the function wherever the answer's type
             // can hold the parameter.

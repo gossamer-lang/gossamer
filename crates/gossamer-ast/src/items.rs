@@ -494,6 +494,15 @@ pub struct StructDecl {
     pub where_clause: WhereClause,
     /// Shape of the struct's body.
     pub body: StructBody,
+    /// Traits listed after the name (`struct S: Bench + Display`), which
+    /// the functions in the body implement.
+    #[serde(default)]
+    pub traits: Vec<TraitBound>,
+    /// Functions, associated types, and constants written in the body after
+    /// the fields. The front end moves them into the `impl` blocks they
+    /// stand for before resolution.
+    #[serde(default)]
+    pub items: Vec<ImplItem>,
 }
 
 /// Body shape of a struct declaration.
@@ -518,7 +527,116 @@ pub struct StructField {
     pub name: Ident,
     /// Field type.
     pub ty: Type,
+    /// Default written `name: T = expr`. A struct literal that leaves the
+    /// field out has a copy of the expression spliced in its place, so the
+    /// value is built afresh at every construction.
+    #[serde(default)]
+    pub default: Option<Box<Expr>>,
 }
+
+/// The attribute on a field default's function, naming the sibling fields
+/// the default may not read.
+pub const FIELD_DEFAULT_ATTR: &str = "gos_field_default";
+
+/// The name of the function that evaluates the default of `field` on
+/// `owner` (and `variant`, for an enum's struct variant). The parser writes
+/// one beside the declaration for each defaulted field; a struct literal
+/// that leaves the field out calls it, and so does a decode of a document
+/// that leaves its key out.
+#[must_use]
+pub fn field_default_fn_name(owner: &str, variant: Option<&str>, field: &str) -> String {
+    match variant {
+        Some(variant) => format!("__gos_fd__{owner}__{variant}__{field}"),
+        None => format!("__gos_fd__{owner}__{field}"),
+    }
+}
+
+/// The items an `impl Iterator` block may define: its `Item` type, then the
+/// methods, `next` and every adapter and terminal it may override.
+pub const ITERATOR_ITEMS: &[&str] = &[
+    "Item",
+    "next",
+    "take",
+    "skip",
+    "step_by",
+    "enumerate",
+    "chain",
+    "zip",
+    "map",
+    "filter",
+    "filter_map",
+    "flat_map",
+    "scan",
+    "take_while",
+    "skip_while",
+    "rev",
+    "dedup",
+    "flatten",
+    "pairwise",
+    "windows",
+    "chunks",
+    "collect",
+    "count",
+    "sum",
+    "product",
+    "min",
+    "max",
+    "fold",
+    "any",
+    "all",
+    "find",
+    // Terminals and eager-only operations. An iterator argument is legal for
+    // these too: the eager ones drain it first, which is what a sequence
+    // operation over an iterator has to do anyway.
+    "find_map",
+    "for_each",
+    "position",
+    "reduce",
+    "partition",
+    "unzip",
+    "sort_by",
+    "sort_by_key",
+    "min_by",
+    "min_by_key",
+    "max_by",
+    "max_by_key",
+    "sum_by",
+    "product_by",
+    "chunk_by",
+    "count_by",
+];
+
+/// The items each trait the language knows declares, as an `impl` block of
+/// it spells them before the front end renames anything: which trait a
+/// function in a type's body implements. `gossamer-types` checks this table
+/// against its own catalog.
+pub const LANGUAGE_TRAIT_ITEMS: &[(&str, &[&str])] = &[
+    ("Display", &["fmt"]),
+    ("Debug", &["fmt"]),
+    ("PartialEq", &["eq", "ne"]),
+    ("Eq", &["eq", "ne"]),
+    ("PartialOrd", &["cmp", "partial_cmp"]),
+    ("Ord", &["cmp", "partial_cmp"]),
+    ("Clone", &["clone"]),
+    ("Default", &["default"]),
+    ("Iterator", ITERATOR_ITEMS),
+    ("From", &["from"]),
+    ("TryFrom", &["Error", "try_from"]),
+    ("Add", &["Output", "add"]),
+    ("Sub", &["Output", "sub"]),
+    ("Mul", &["Output", "mul"]),
+    ("Div", &["Output", "div"]),
+    ("Rem", &["Output", "rem"]),
+    ("Neg", &["Output", "neg"]),
+    ("Not", &["Output", "not"]),
+    ("BitAnd", &["Output", "bitand"]),
+    ("BitOr", &["Output", "bitor"]),
+    ("BitXor", &["Output", "bitxor"]),
+    ("Shl", &["Output", "shl"]),
+    ("Shr", &["Output", "shr"]),
+    ("Index", &["Output", "index"]),
+    ("IndexMut", &["Output", "index"]),
+];
 
 /// A positional field declaration in a tuple struct or tuple variant.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -598,6 +716,14 @@ pub struct EnumDecl {
     pub variants: Vec<EnumVariant>,
     /// How the discriminant is stored.
     pub repr: EnumRepr,
+    /// Traits listed after the name (`enum Shape: Area`), which the
+    /// functions after the variants implement.
+    #[serde(default)]
+    pub traits: Vec<TraitBound>,
+    /// Functions, associated types, and constants written after the
+    /// variants, moved into their `impl` blocks before resolution.
+    #[serde(default)]
+    pub items: Vec<ImplItem>,
 }
 
 /// A single enum variant.

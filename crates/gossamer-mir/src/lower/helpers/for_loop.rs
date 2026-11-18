@@ -150,12 +150,10 @@ pub(crate) fn aggr_size_bytes(tcx: &gossamer_types::TyCtxt, ty: Ty) -> i64 {
             // (16-byte) representation - two slots as an aggregate element.
             if def.local == u32::MAX || def.local == u32::MAX - 1 {
                 16
-            } else if let Some(field_tys) = tcx.struct_field_tys(*def) {
-                let total: i64 = field_tys
-                    .iter()
-                    .map(|t| aggr_size_bytes(tcx, *t).max(8) / 8)
-                    .sum();
-                total.max(1) * 8
+            } else if tcx.struct_field_tys(*def).is_some() {
+                // The struct's own layout, packed or a word per field, which
+                // is what its block was allocated with.
+                i64::from(tcx.slot_bytes(ty).max(8))
             } else {
                 // Other sentinel Adts: single heap-pointer slot.
                 8

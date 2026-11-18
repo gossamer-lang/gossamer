@@ -1,0 +1,11 @@
+// ERROR: GR0026
+
+struct Window {
+    width: i64 = 800
+    height: i64 = width / 2
+}
+
+fn main() {
+    let w = Window {}
+    println(w.height)
+}

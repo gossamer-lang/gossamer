@@ -256,16 +256,34 @@ pub(super) fn owner_blob_header(total: usize, zeroed: bool) -> *mut RcHeader {
     }
 }
 
-/// Walk the `(disc_word, payload_word)` pairs of an `RC_KIND_STRUCT_GUARDED`
-/// meta over the aggregate slots at `base`, calling `f` for each child that
-/// is live (negative disc word, or the disc word reads 0), non-null, and a
-/// copy blob with a validated owner. `base` may be a heap payload or a stack slot - the
-/// walk only reads the flat words the meta names.
-#[allow(
-    clippy::inline_always,
-    reason = "the per-node child walk of every guarded teardown: left to the heuristic, LLVM keeps it out of line, which callgrind measured as a call per node on a tree workload"
-)]
-#[inline(always)]
+thread_local! {
+    /// The layout `meta_names_map_child_cached` answered last, and its answer.
+    static LAST_MAP_CHILD_ANSWER: std::cell::Cell<(usize, bool)> =
+        const { std::cell::Cell::new((0, false)) };
+}
+
+/// [`meta_names_map_child`], answered from the last layout asked about when
+/// it is asked again. A layout is a constant the compiler emitted, so its
+/// answer never changes, and a run of allocations nearly always repeats one.
+///
+/// # Safety
+/// `meta` must be null or a well-formed RC meta blob.
+#[inline]
+unsafe fn meta_names_map_child_cached(meta: *const i64) -> bool {
+    if meta.is_null() {
+        return false;
+    }
+    let key = meta as usize;
+    let (last, answer) = LAST_MAP_CHILD_ANSWER.with(std::cell::Cell::get);
+    if last == key {
+        return answer;
+    }
+    // SAFETY: `meta` is a well-formed meta blob (this `unsafe fn`'s contract).
+    let answer = unsafe { meta_names_map_child(meta) };
+    LAST_MAP_CHILD_ANSWER.with(|cell| cell.set((key, answer)));
+    answer
+}
+
 /// Whether a structural `meta` names a `Map` child. A blob whose words name one
 /// cannot take the region's no-owner shortcut: its copy clones the map into a
 /// table of its own, which the copy's release has to free.
@@ -343,6 +361,16 @@ unsafe fn meta_names_map_child(meta: *const i64) -> bool {
     false
 }
 
+/// Walk the `(disc_word, payload_word)` pairs of an `RC_KIND_STRUCT_GUARDED`
+/// meta over the aggregate slots at `base`, calling `f` for each child that
+/// is live (negative disc word, or the disc word reads 0), non-null, and a
+/// copy blob with a validated owner. `base` may be a heap payload or a stack slot - the
+/// walk only reads the flat words the meta names.
+#[allow(
+    clippy::inline_always,
+    reason = "the per-node child walk of every guarded teardown: left to the heuristic, LLVM keeps it out of line, which callgrind measured as a call per node on a tree workload"
+)]
+#[inline(always)]
 pub(super) unsafe fn visit_guarded_children(
     base: *mut u8,
     meta: *const i64,
@@ -458,9 +486,9 @@ unsafe fn rc_alloc_from(
     retain_children: bool,
 ) -> *mut u8 {
     let in_region = region_active();
-    // SAFETY: this `unsafe fn`'s caller passes `meta` live or null, which `meta_names_map_child`
-    // accepts.
-    if in_region && !unsafe { meta_names_map_child(meta) } {
+    // SAFETY: this `unsafe fn`'s caller passes `meta` live or null, which
+    // `meta_names_map_child_cached` accepts.
+    if in_region && !unsafe { meta_names_map_child_cached(meta) } {
         // SAFETY: `meta` is not passed, so the allocation carries no children; `src` is null or
         // holds `size` bytes (this `unsafe fn`'s caller).
         return unsafe { rc_alloc_payload(size, std::ptr::null(), src) };

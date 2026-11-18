@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GP0069]: A function in a type's body has a name more than one of the traits - here
+--- framed ---
+error[GP0069]: A function in a type's body has a name more than one of the traits
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

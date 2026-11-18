@@ -230,3 +230,43 @@ fn a_closure_answering_a_captured_vector_gives_the_caller_a_copy() {
         "the capture stays the environment's, so the answer takes a vector of its own"
     );
 }
+
+#[test]
+fn a_closure_built_each_iteration_is_released_when_its_call_returns() {
+    let (mut bodies, tcx) = lower(
+        "fn note(s: String) { println(s) }\nfn walk(n: i64) -> i64 {\n let mut order: Vec<i64> = #[0; n]\n for i in 0..n { order[i] = (i * 7919) % n }\n let mut total = 0\n let mut k = 0\n while k < 3 {\n let mut keys: Vec<i64> = Vec::with_capacity(n)\n for i in 0..n { keys.push(i + k) }\n note(\"filled\")\n order.sort_by(|a, b| keys[a] - keys[b])\n total += order[0]\n k += 1\n }\n total\n}\nfn main() { println(walk(10)) }\n",
+    );
+    for body in &mut bodies {
+        gossamer_mir::optimise(body, &tcx);
+    }
+    let walk = body(&bodies, "walk");
+    let (env, next) = walk
+        .blocks
+        .iter()
+        .find_map(|block| match &block.terminator {
+            Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                args,
+                target: Some(next),
+                ..
+            } if name.starts_with("gos_rt_vec_sort_by") => match args.get(1) {
+                Some(Operand::Copy(env)) => Some((env.local, *next)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("the sort call and its closure");
+    // The environment holds a share of `keys`; giving it back as the sort
+    // returns lets each iteration's `keys` go at the iteration's end rather
+    // than when the next iteration's closure replaces it.
+    let released = walk.blocks[next.0 as usize].stmts.iter().any(|stmt| {
+        matches!(&stmt.kind, StatementKind::Assign {
+            rvalue: Rvalue::CallIntrinsic { name: "gos_rt_rc_release", args },
+            ..
+        } if matches!(args.first(), Some(Operand::Copy(p)) if p.local == env))
+    });
+    assert!(
+        released,
+        "the closure should be released as the sort returns"
+    );
+}

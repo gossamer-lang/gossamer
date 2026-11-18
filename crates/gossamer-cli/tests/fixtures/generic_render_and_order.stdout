@@ -1,0 +1,16 @@
+150
+Pair { a: 1, v: "x" }
+Pair { a: 1, v: "x" }
+#[Pair { a: 1, v: "x" }]
+Some(Pair { a: 2, v: 'c' })
+Pair { a: 3, v: 7 }
+Pair { a: 4, v: Inner { k: 9 } }
+Pair { a: 5, v: #["a", "b"] }
+Wrap("w", 1)
+One("e")
+Two { x: 'q', n: 2 }
+Two { x: 'q', n: 2 }
+43
+#[Pair { a: 1, v: "a" }, Pair { a: 2, v: "b" }, Pair { a: 3, v: "c" }]
+#[Pair { a: 1, v: 30 }, Pair { a: 2, v: 10 }, Pair { a: 2, v: 20 }]
+true

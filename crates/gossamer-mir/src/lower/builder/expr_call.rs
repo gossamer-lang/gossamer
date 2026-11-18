@@ -226,6 +226,37 @@ impl<'a> Builder<'a> {
         ty: Ty,
         span: Span,
     ) -> Option<Local> {
+        // A synthesized `fmt` / `to_string` renders a field typed by one of
+        // its own type parameters through `__gos_field_debug` /
+        // `__gos_field_display`. This instantiation knows the field's type: a
+        // `String` or `char` reads quoted, as a field declared so does, and
+        // anything else renders through the channel the placeholder names.
+        if let HirExprKind::Path {
+            segments,
+            def: None,
+        } = &callee.kind
+            && let [only] = segments.as_slice()
+            && matches!(
+                only.name.as_str(),
+                "__gos_field_debug" | "__gos_field_display"
+            )
+            && let [value] = args
+        {
+            let quoted = matches!(
+                self.tcx.kind_of(self.peel_ref_ty(value.ty)),
+                gossamer_types::TyKind::String | gossamer_types::TyKind::Char
+            );
+            let target = match (quoted, only.name.as_str()) {
+                (true, _) => "__gos_debug_quote",
+                (false, "__gos_field_debug") => "__debug",
+                (false, _) => "__concat",
+            };
+            let mut renamed = callee.clone();
+            if let HirExprKind::Path { segments, .. } = &mut renamed.kind {
+                segments[0] = gossamer_ast::Ident::new(target);
+            }
+            return self.lower_call(call, &renamed, args, ty, span);
+        }
         if let HirExprKind::Path {
             segments,
             def: None,
@@ -1256,6 +1287,7 @@ impl<'a> Builder<'a> {
             } else {
                 local
             };
+
             // Wrap when the source MIR local holds a raw code
             // address (named fn item, lifted closure name, or a
             // `let f = some_fn`). Capturing closures registered

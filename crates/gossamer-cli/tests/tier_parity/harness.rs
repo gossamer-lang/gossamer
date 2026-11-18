@@ -2341,6 +2341,24 @@ const SPECS: &[Spec] = &[
     // functions, resolved where the function is declared.
     spec("feature-testing-examples/data_parameter_defaults.gos"),
     spec("feature-testing-examples/data_parameter_defaults_on_methods.gos"),
+    // Field defaults: omitted fields built per construction, overrides,
+    // `T {}` and `T::default()`, struct-variant defaults, generic structs,
+    // defaults resolved in the declaring module, and serde decode defaults.
+    spec("feature-testing-examples/struct_field_defaults.gos"),
+    // Methods and trait impls in a type's body: listed traits, inherent
+    // functions, enum and tuple-struct bodies, a generic iterator, and a
+    // trait default method reached through a bound.
+    spec("feature-testing-examples/type_body_methods.gos"),
+    // Grouped `use`: paths, an alias, a path list, a nested group, and
+    // entries on their own lines in one declaration.
+    spec("feature-testing-examples/use_groups.gos"),
+    // Narrow fields packed beside handles, a nested packed struct, and an
+    // Option: stored, sorted, keyed, copied, sent, and encoded.
+    spec("feature-testing-examples/packed_handle_structs.gos"),
+    // Generic types render, order, and match by each instantiation's
+    // arguments: quoted parameter fields, sorted generic vectors, and
+    // struct-variant literals that infer their enum's arguments.
+    spec("feature-testing-examples/generic_render_and_order.gos"),
     // Associated consts in modules read from their own module.
     spec("feature-testing-examples/associated_consts_in_modules.gos"),
     // Single-name patterns decided by what the name resolves to, and

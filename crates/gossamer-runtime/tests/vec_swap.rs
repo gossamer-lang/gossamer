@@ -1,5 +1,6 @@
 //! Vec scalar swap runtime tests.
 
+use gossamer_runtime::c_abi::iter::{gos_rt_lazy_iter_drop_i64, gos_rt_lazy_iter_from_vec_i64};
 use gossamer_runtime::c_abi::vec::{GosVec, vec_owner_generation};
 use gossamer_runtime::c_abi::{
     gos_rt_vec_free, gos_rt_vec_get_i64, gos_rt_vec_new, gos_rt_vec_push, gos_rt_vec_push_i64,
@@ -84,15 +85,22 @@ fn vec_owner_generation_is_distinct_from_the_header_address() {
     // SAFETY: every pointer argument is a value this test built above and still holds live; a
     // null one is accepted by the callee.
     unsafe {
+        // A vector takes an identity when something first watches it for
+        // mutations, as a lazy iterator over it does.
         let first = gos_rt_vec_new(8);
+        assert_eq!(vec_owner_generation(&*first), 0);
+        let iter = gos_rt_lazy_iter_from_vec_i64(first);
         let first_generation = vec_owner_generation(&*first);
         assert_ne!(first_generation, 0);
+        gos_rt_lazy_iter_drop_i64(iter);
         gos_rt_vec_free(first);
 
         let second = gos_rt_vec_new(8);
+        let iter = gos_rt_lazy_iter_from_vec_i64(second);
         let second_generation = vec_owner_generation(&*second);
         assert_ne!(second_generation, 0);
         assert_ne!(first_generation, second_generation);
+        gos_rt_lazy_iter_drop_i64(iter);
         gos_rt_vec_free(second);
     }
 }
@@ -102,12 +110,14 @@ fn vec_prefix_is_pinned_and_primitive_vec_needs_no_owner_carrier() {
     assert_eq!(std::mem::offset_of!(GosVec, len), 0);
     assert_eq!(std::mem::offset_of!(GosVec, cap), 8);
     assert_eq!(std::mem::offset_of!(GosVec, elem_bytes), 16);
+    assert_eq!(std::mem::offset_of!(GosVec, elem_kind), 20);
     assert_eq!(std::mem::offset_of!(GosVec, ptr), 24);
-    assert_eq!(std::mem::offset_of!(GosVec, generation), 32);
-    assert_eq!(std::mem::offset_of!(GosVec, elem_meta), 40);
-    assert_eq!(std::mem::offset_of!(GosVec, owner), 48);
-    assert_eq!(std::mem::offset_of!(GosVec, mutation_generation), 56);
-    assert_eq!(std::mem::size_of::<GosVec>(), 64);
+    assert_eq!(std::mem::offset_of!(GosVec, elem_meta), 32);
+    assert_eq!(
+        std::mem::offset_of!(GosVec, owner) as u64,
+        gossamer_abi::VEC_OWNER_OFFSET
+    );
+    assert_eq!(std::mem::size_of::<GosVec>(), 48);
 
     // SAFETY: every pointer argument is a value this test built above and still holds live; a
     // null one is accepted by the callee.

@@ -676,6 +676,9 @@ fn acquire_slab(slab_size: usize) -> *mut u8 {
         if let Some(s) = FREE_SLABS.with(|p| p.borrow_mut().pop()) {
             return s;
         }
+        if let Some((base, _)) = RETIRING_SLABS.lock().pop() {
+            return base as *mut u8;
+        }
     }
     // Slabs come exclusively from the reserved arena so `in_region_arena`
     // can identify region memory without touching the object. Null
@@ -848,6 +851,57 @@ fn region_alloc_slow(need: usize) -> *mut u8 {
 /// Region bump for an RC payload (counted against `RC_LIVE`).
 pub(super) fn region_alloc(total: usize) -> *mut u8 {
     region_alloc_inner(total, true)
+}
+
+/// Standard slabs closed regions handed back beyond what their thread keeps,
+/// still committed, each with when it was handed back, oldest first. A slab
+/// taken from here is reused without faulting its pages in again; one left
+/// here past the allocator's purge delay goes back to the kernel, the rule
+/// memory the allocator frees follows.
+static RETIRING_SLABS: parking_lot::Mutex<Vec<(usize, std::time::Instant)>> =
+    parking_lot::const_mutex(Vec::new());
+
+/// Hands a standard slab no region holds to the retiring pool, or straight
+/// back to the kernel when freed memory is returned at once.
+///
+/// # Safety
+/// `base` is a standard slab of the reservation that no region holds.
+unsafe fn retire_after_delay(base: *mut u8) {
+    let delay = crate::allocator_purge_delay();
+    if delay.is_zero() || arena_poison() {
+        // SAFETY: `base` is a standard slab nothing holds (contract).
+        unsafe { arena_retire(base, REGION_SLAB_BYTES) };
+        return;
+    }
+    let mut pending = RETIRING_SLABS.lock();
+    expire_retiring(&mut pending, delay);
+    pending.push((base as usize, std::time::Instant::now()));
+    drop(pending);
+    crate::c_abi::vec::ensure_memory_purger(delay);
+}
+
+/// Returns to the kernel each retiring slab whose delay has passed.
+fn expire_retiring(pending: &mut Vec<(usize, std::time::Instant)>, delay: std::time::Duration) {
+    let now = std::time::Instant::now();
+    pending.retain(|&(base, at)| {
+        if now.duration_since(at) < delay {
+            return true;
+        }
+        // SAFETY: a retiring slab is a standard slab no region holds.
+        unsafe { arena_retire(base as *mut u8, REGION_SLAB_BYTES) };
+        false
+    });
+}
+
+/// Returns to the kernel the retiring slabs whose purge delay has passed.
+pub(crate) fn purge_retiring_slabs() {
+    let mut pending = RETIRING_SLABS.lock();
+    expire_retiring(&mut pending, crate::allocator_purge_delay());
+}
+
+/// Whether any slab waits in the retiring pool.
+pub(crate) fn retiring_slabs_pending() -> bool {
+    !RETIRING_SLABS.lock().is_empty()
 }
 
 /// Open a new arena region. Allocations until the matching
@@ -1142,6 +1196,9 @@ pub extern "C" fn gos_rt_arena_pop() {
             if kept {
                 continue;
             }
+            // SAFETY: `base` is a standard slab this region acquired and no longer uses.
+            unsafe { retire_after_delay(base) };
+            continue;
         }
         // SAFETY: `base` is the slab this region acquired, `size` bytes long, which the region no
         // longer uses.

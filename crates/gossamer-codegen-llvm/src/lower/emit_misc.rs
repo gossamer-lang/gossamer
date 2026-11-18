@@ -562,6 +562,7 @@ impl<'a> Lowerer<'a> {
                 .and_then(|w| crate::emit::operand_const_int(self.body, w))
                 == Some(crate::emit::SPAWN_RET_TWO_WORDS);
         let mut arg_text = String::new();
+        let mut arg_values: Vec<Option<String>> = vec![None; args.len()];
         let mut arg_tys_for_decl: Vec<String> = Vec::new();
         for (i, arg) in args.iter().enumerate() {
             if i > 0 {
@@ -593,6 +594,7 @@ impl<'a> Lowerer<'a> {
                 };
                 let _ = write!(arg_text, "ptr {addr}");
                 arg_tys_for_decl.push("ptr".to_string());
+                arg_values[i] = Some(addr);
                 continue;
             }
             // A `get_or` default of a two-word value is answered by address,
@@ -784,6 +786,7 @@ impl<'a> Lowerer<'a> {
                 if &a_ty != want_ty {
                     let coerced = self.runtime_word_arg(&a_v, &a_ty, want_ty);
                     let _ = write!(arg_text, "{want_ty} {coerced}");
+                    arg_values[i] = Some(coerced);
                     a_ty.clone_from(want_ty);
                     let _ = a_ty;
                     continue;
@@ -804,7 +807,14 @@ impl<'a> Lowerer<'a> {
             }
             arg_tys_for_decl.push(a_ty.clone());
             let _ = write!(arg_text, "{a_ty} {a_v}");
+            arg_values[i] = Some(a_v);
         }
+        // A heap push or pop over whole words is written in place, from the
+        // vec and element (or answer slot) the call was handed.
+        let heap_inline = super::heap_inline::HeapInline::of(symbol, args).and_then(|heap| {
+            let (vec, slot) = heap.operand_indices();
+            Some((heap, arg_values[vec].clone()?, arg_values[slot].clone()?))
+        });
         let dest_ty_mir = self.body.local_ty(destination.local);
         let dest_ty = render_ty(self.tcx, dest_ty_mir);
 
@@ -911,7 +921,12 @@ impl<'a> Lowerer<'a> {
             // non-unit but the helper returns void, fill the
             // slot with a zero of the dest's shape so any
             // accidental read doesn't see undefined memory.
-            writeln!(self.out, "  call void @\"{symbol}\"({arg_text})").unwrap();
+            let call = format!("call void @\"{symbol}\"({arg_text})");
+            if let Some((heap, vec, slot)) = &heap_inline {
+                self.emit_heap_inline(*heap, vec, slot, &call);
+            } else {
+                writeln!(self.out, "  {call}").unwrap();
+            }
             self.release_minted_blob(minted_blob.as_deref());
             if !dest_is_void {
                 self.store_zero_to_place(destination, &dest_ty);
@@ -961,16 +976,22 @@ impl<'a> Lowerer<'a> {
             } else {
                 &call_ret_ty
             };
-            if sret_slot.is_some() {
+            let tmp = if sret_slot.is_some() {
                 // The answer is the destination's slot itself.
                 writeln!(self.out, "  call void @\"{symbol}\"({arg_text})").unwrap();
+                tmp
+            } else if let Some((heap, vec, slot)) = &heap_inline {
+                let call = format!("call {wire_ret_ty} @\"{symbol}\"({arg_text})");
+                self.emit_heap_inline(*heap, vec, slot, &call)
+                    .unwrap_or(tmp)
             } else {
                 writeln!(
                     self.out,
                     "  {tmp} = call {wire_ret_ty} @\"{symbol}\"({arg_text})"
                 )
                 .unwrap();
-            }
+                tmp
+            };
             self.release_minted_blob(minted_blob.as_deref());
             let tmp = if win_fat_ret {
                 let unwrapped = self.fresh();

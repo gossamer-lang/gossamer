@@ -118,30 +118,101 @@ pub unsafe extern "C" fn gos_rt_csv_read(input: *const c_char) -> i128 {
     })
 }
 
-/// The records of a CSV document as offsets into one copy of its text, for a
-/// program that reads `csv::read`'s answer only by indexing it.
+/// The records of a CSV document as offsets into its text, for a program
+/// that reads `csv::read`'s answer only by indexing it.
 ///
+/// The table holds a share of the program's string rather than a copy of it.
 /// A field with no quote is a span of the text; a quoted one is unescaped
 /// once into `unquoted`. A field becomes a `String` only when the program
 /// reads one as text, and then only for the length of the call reading it.
 pub struct CsvTable {
-    text: Box<str>,
+    text: TableText,
     unquoted: String,
-    /// Each field's span: in `text`, or in `unquoted` when the flag is set.
-    fields: Vec<(u32, u32, bool)>,
+    /// Each field's span: in the text, or in `unquoted` when it is quoted.
+    fields: Vec<FieldSpan>,
     /// Index of each record's first field, then one past the last field.
     records: Vec<u32>,
     /// The field string the last text read answered, freed by the next.
     current: *mut c_char,
 }
 
+/// The document a table reads: a share of the program's string, or a copy
+/// of text a share cannot keep alive.
+enum TableText {
+    /// The string body, whose share the table gives back when it is dropped.
+    Shared(*const c_char),
+    Owned(Box<str>),
+}
+
+/// A field's place: its start and, above the low bit, its length; the low bit
+/// says the span is in the table's unescaped text rather than the document.
+#[derive(Clone, Copy)]
+struct FieldSpan {
+    start: u32,
+    len_and_quoted: u32,
+}
+
+impl FieldSpan {
+    fn new(start: usize, end: usize, quoted: bool) -> Self {
+        Self {
+            start: start as u32,
+            len_and_quoted: ((end - start) as u32) << 1 | u32::from(quoted),
+        }
+    }
+
+    fn range(self) -> std::ops::Range<usize> {
+        let start = self.start as usize;
+        start..start + (self.len_and_quoted >> 1) as usize
+    }
+
+    fn quoted(self) -> bool {
+        self.len_and_quoted & 1 == 1
+    }
+}
+
+/// The most fields `input` can hold: every field but a document's last ends
+/// at a `,` or a line break, and a quoted one only adds separators.
+fn field_bound(input: &str) -> usize {
+    // A byte-wide count per chunk keeps the scan vectorized.
+    let separators: usize = input
+        .as_bytes()
+        .chunks(usize::from(u8::MAX))
+        .map(|chunk| {
+            usize::from(
+                chunk
+                    .iter()
+                    .fold(0u8, |n, &b| n + u8::from(matches!(b, b',' | b'\n'))),
+            )
+        })
+        .sum();
+    separators + 1
+}
+
 impl CsvTable {
-    fn read(input: &str) -> Result<Self, String> {
+    /// The table of `input`, the text of the string body `body`.
+    ///
+    /// # Safety
+    /// `body` is null or the live string body `input` borrows.
+    unsafe fn read(body: *const c_char, input: &str) -> Result<Self, String> {
         let base = input.as_ptr() as usize;
+        // A typed heap or static body outlives the table through a share; text
+        // in an arena region could be reclaimed under it, and a foreign string
+        // has no count to share, so those are copied.
+        // SAFETY: `body` is null or a live string body (contract).
+        let shareable = !body.is_null()
+            && !crate::c_abi::rc::in_region_arena(body.cast())
+            && unsafe { crate::c_abi::string::typed_str_cap(body) }.is_some();
+        let text = if shareable {
+            // SAFETY: `body` is a live typed string body, checked above.
+            unsafe { crate::c_abi::string::gos_rt_str_retain_typed(body) };
+            TableText::Shared(body)
+        } else {
+            TableText::Owned(input.into())
+        };
         let mut table = Self {
-            text: input.into(),
+            text,
             unquoted: String::new(),
-            fields: Vec::new(),
+            fields: Vec::with_capacity(field_bound(input)),
             records: vec![0],
             current: std::ptr::null_mut(),
         };
@@ -152,11 +223,11 @@ impl CsvTable {
                 // An unquoted field is a run of the input itself; a quoted
                 // one was assembled in the walk's scratch buffer.
                 let span = if at <= input.len() && at + field.len() <= input.len() {
-                    (at as u32, (at + field.len()) as u32, false)
+                    FieldSpan::new(at, at + field.len(), false)
                 } else {
                     let start = table.unquoted.len();
                     table.unquoted.push_str(field);
-                    (start as u32, table.unquoted.len() as u32, true)
+                    FieldSpan::new(start, table.unquoted.len(), true)
                 };
                 table.fields.push(span);
             }
@@ -169,8 +240,18 @@ impl CsvTable {
         self.records.len() - 1
     }
 
+    /// The document's text.
+    fn text(&self) -> &str {
+        match &self.text {
+            // SAFETY: the table holds a share of the body, which keeps it live
+            // and unchanged, and `read` borrowed it as text.
+            TableText::Shared(body) => unsafe { cstr(*body) },
+            TableText::Owned(text) => text,
+        }
+    }
+
     /// The field spans of record `record`, which the caller has checked.
-    fn record(&self, record: usize) -> &[(u32, u32, bool)] {
+    fn record(&self, record: usize) -> &[FieldSpan] {
         &self.fields[self.records[record] as usize..self.records[record + 1] as usize]
     }
 
@@ -186,13 +267,13 @@ impl CsvTable {
         if field < 0 || field >= count {
             crate::c_abi::panic::panic_oob_text("vec index", field, count);
         }
-        let (start, end, unquoted) = spans[field as usize];
+        let span = spans[field as usize];
         // A field ends only at an ASCII separator or quote of the text, so
         // its span lies on character boundaries.
-        if unquoted {
-            &self.unquoted[start as usize..end as usize]
+        if span.quoted() {
+            &self.unquoted[span.range()]
         } else {
-            &self.text[start as usize..end as usize]
+            &self.text()[span.range()]
         }
     }
 }
@@ -201,6 +282,10 @@ impl Drop for CsvTable {
     fn drop(&mut self) {
         // SAFETY: `current` is null or the string this table made and still owns.
         unsafe { crate::c_abi::string::gos_rt_str_free(self.current) };
+        if let TableText::Shared(body) = self.text {
+            // SAFETY: the table took this share of the body in `read`.
+            unsafe { crate::c_abi::string::gos_rt_str_free_typed(body.cast_mut()) };
+        }
     }
 }
 
@@ -221,7 +306,8 @@ pub unsafe extern "C" fn gos_rt_csv_table(input: *const c_char) -> i128 {
     ffi_entry!({
         // SAFETY: `input` is this shim's argument, null or a live string body for the call (C-ABI
         // contract), which `cstr` accepts.
-        match CsvTable::read(unsafe { cstr(input) }) {
+        // SAFETY: `input` is this shim's string argument, live for the call.
+        match unsafe { CsvTable::read(input, cstr(input)) } {
             Ok(table) => gos_rt_result_new(0, Box::into_raw(Box::new(table)) as i64),
             Err(msg) => {
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
@@ -240,7 +326,7 @@ pub extern "C" fn gos_rt_csv_table_unwrap_or_empty(r: i128) -> i64 {
             return crate::c_abi::result::gos_rt_result_payload(r);
         }
         let empty = CsvTable {
-            text: Box::default(),
+            text: TableText::Owned(Box::default()),
             unquoted: String::new(),
             fields: Vec::new(),
             records: vec![0],

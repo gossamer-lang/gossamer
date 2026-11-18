@@ -74,6 +74,7 @@ fn struct_decl_renders_named_fields_with_trailing_commas() {
                 span(),
                 TypeKind::Path(TypePath::single("String")),
             ),
+            default: None,
         },
         StructField {
             attrs: Attrs::default(),
@@ -84,6 +85,7 @@ fn struct_decl_renders_named_fields_with_trailing_commas() {
                 span(),
                 TypeKind::Path(TypePath::single("u64")),
             ),
+            default: None,
         },
     ];
     let decl = StructDecl {
@@ -91,6 +93,8 @@ fn struct_decl_renders_named_fields_with_trailing_commas() {
         generics: Generics::default(),
         where_clause: WhereClause::default(),
         body: StructBody::Named(fields),
+        traits: Vec::new(),
+        items: Vec::new(),
     };
     let item = public_item(ItemKind::Struct(decl));
     let source = source_file(vec![], vec![item]);
@@ -123,6 +127,7 @@ fn struct_decl_aligns_three_field_colons_in_column() {
             visibility: Visibility::Inherited,
             name: Ident::new(*n),
             ty: Type::new(NodeId::DUMMY, span(), TypeKind::Path(TypePath::single(*t))),
+            default: None,
         })
         .collect();
     let decl = StructDecl {
@@ -130,6 +135,8 @@ fn struct_decl_aligns_three_field_colons_in_column() {
         generics: Generics::default(),
         where_clause: WhereClause::default(),
         body: StructBody::Named(fields),
+        traits: Vec::new(),
+        items: Vec::new(),
     };
     let item = public_item(ItemKind::Struct(decl));
     let source = source_file(vec![], vec![item]);
@@ -194,6 +201,8 @@ fn enum_decl_with_unit_variants_renders_block() {
         generics: Generics::default(),
         where_clause: WhereClause::default(),
         repr: gossamer_ast::EnumRepr::default(),
+        traits: Vec::new(),
+        items: Vec::new(),
         variants: vec![
             EnumVariant {
                 attrs: Attrs::default(),

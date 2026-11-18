@@ -11,6 +11,7 @@ use thiserror::Error;
 
 mod scan;
 pub mod typed;
+mod walk;
 
 /// Default cap on parser nesting depth, as `serde_json`'s recursion limit -
 /// guards the recursive descent against stack exhaustion from adversarial
@@ -385,22 +386,53 @@ pub fn validate_to_tape(bytes: &[u8]) -> Result<(&str, Option<Tape>), Error> {
         validate_source(source, None)?;
         return Ok((source, None));
     }
+    tape_of(source).map(|tape| (source, Some(tape)))
+}
+
+/// [`validate_to_tape`] for a document already known to be UTF-8: its tape,
+/// or `None`, without validating it, for a document longer than
+/// [`TAPE_MAX_LEN`], which the caller reads another way.
+///
+/// # Errors
+///
+/// The error [`validate`] reports, apart from an encoding one.
+pub fn validate_str_to_tape(source: &str) -> Result<Option<Tape>, Error> {
+    check_size(source.as_bytes())?;
+    if source.len() > TAPE_MAX_LEN {
+        return Ok(None);
+    }
+    tape_of(source).map(Some)
+}
+
+/// The tape of `source`, which fits one. The loop in [`walk`] reads a
+/// well-formed document; one it stops short in is read again by the checking
+/// walk, which reports the error at the byte that makes it.
+fn tape_of(source: &str) -> Result<Tape, Error> {
+    // Sized once from a bound neither walk exceeds: growing a tape copies
+    // every node it holds while the old block is still live.
+    let capacity = tape_bound(source.as_bytes());
+    match walk::tape(source, max_depth(), capacity) {
+        Some(tape) => Ok(tape),
+        None => checked_tape(source, capacity),
+    }
+}
+
+/// The tape the checking walk reads `source` into.
+fn checked_tape(source: &str, capacity: usize) -> Result<Tape, Error> {
     let mut parser = Parser::new(source);
     parser.build = false;
-    // Sized once from a bound the walk never exceeds: growing a tape copies
-    // every node it holds while the old block is still live.
     parser.tape = Some(Tape {
-        nodes: Vec::with_capacity(tape_bound(source.as_bytes())),
+        nodes: Vec::with_capacity(capacity),
         objects: Vec::new(),
         arrays: Vec::new(),
     });
     parser.skip_whitespace();
-    parser.parse_value()?;
+    parser.check_value()?;
     parser.skip_whitespace();
     if parser.cursor < parser.bytes.len() {
         return Err(parser.error("trailing input"));
     }
-    Ok((source, parser.tape))
+    Ok(parser.tape.unwrap_or_default())
 }
 
 /// The most slots a [`Tape`] of `bytes` holds: every value and key but the
@@ -503,7 +535,7 @@ fn validate_source(
     parser.build = false;
     parser.containers = containers;
     parser.skip_whitespace();
-    parser.parse_value()?;
+    parser.check_value()?;
     parser.skip_whitespace();
     if parser.cursor < parser.bytes.len() {
         return Err(parser.error("trailing input"));
@@ -682,6 +714,115 @@ impl<'a> Parser<'a> {
             let node = tape.nodes[slot];
             tape.nodes[slot] = TapeNode::new(node.kind(), node.start, end - node.start);
             tape.nodes[slot + 1] = TapeNode::from_word(extent | (u64::from(count) << 32));
+        }
+    }
+
+    /// Checks the value at the cursor against the grammar and steps past it,
+    /// with every error, container record, and tape node
+    /// [`Self::parse_value`] makes, keeping no value. A walk that only
+    /// validates, or only reads a tape, has no value to hand back, so it does
+    /// not build one at every step.
+    fn check_value(&mut self) -> Result<(), Error> {
+        debug_assert!(!self.build);
+        self.skip_whitespace();
+        let start = self.cursor;
+        match self
+            .peek()
+            .ok_or_else(|| self.error("unexpected end of input"))?
+        {
+            b'{' => self.check_object(),
+            b'[' => self.check_array(),
+            b'"' => {
+                self.parse_string()?;
+                self.record_string(start);
+                Ok(())
+            }
+            b't' | b'f' => {
+                let kind = if self.parse_bool()? == Value::Bool(true) {
+                    TapeKind::True
+                } else {
+                    TapeKind::False
+                };
+                self.record(kind, start, 0);
+                Ok(())
+            }
+            b'n' => {
+                self.parse_null()?;
+                self.record(TapeKind::Null, start, 0);
+                Ok(())
+            }
+            b'-' | b'0'..=b'9' => self.parse_number().map(drop),
+            other => Err(self.error(format!("unexpected byte {other:#x}"))),
+        }
+    }
+
+    fn check_object(&mut self) -> Result<(), Error> {
+        self.enter()?;
+        let recorded = self.open_container();
+        let slot = self.record(TapeKind::Object, self.cursor, 0);
+        self.bump();
+        let mut count = 0u32;
+        self.skip_whitespace();
+        if self.peek() == Some(b'}') {
+            self.bump();
+            self.close_container(recorded);
+            self.close_recorded(slot, count);
+            self.leave();
+            return Ok(());
+        }
+        loop {
+            self.skip_whitespace();
+            let key_start = self.cursor;
+            self.parse_string()?;
+            self.record_string(key_start);
+            self.skip_whitespace();
+            if self.bump() != Some(b':') {
+                return Err(self.error("expected `:`"));
+            }
+            self.check_value()?;
+            count += 1;
+            self.skip_whitespace();
+            match self.bump() {
+                Some(b',') => {}
+                Some(b'}') => {
+                    self.close_container(recorded);
+                    self.close_recorded(slot, count);
+                    self.leave();
+                    return Ok(());
+                }
+                _ => return Err(self.error("expected `,` or `}` in object")),
+            }
+        }
+    }
+
+    fn check_array(&mut self) -> Result<(), Error> {
+        self.enter()?;
+        let recorded = self.open_container();
+        let slot = self.record(TapeKind::Array, self.cursor, 0);
+        self.bump();
+        let mut count = 0u32;
+        self.skip_whitespace();
+        if self.peek() == Some(b']') {
+            self.bump();
+            self.close_container(recorded);
+            self.close_recorded(slot, count);
+            self.leave();
+            return Ok(());
+        }
+        loop {
+            self.check_value()?;
+            count += 1;
+            self.skip_whitespace();
+            match self.bump() {
+                Some(b',') => {}
+                Some(b']') => {
+                    self.close_container(recorded);
+                    self.close_recorded(slot, count);
+                    self.leave();
+                    return Ok(());
+                }
+                _ => return Err(self.error("expected `,` or `]` in array")),
+            }
         }
     }
 

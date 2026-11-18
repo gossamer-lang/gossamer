@@ -216,6 +216,11 @@ pub struct TyCtxt {
     #[serde(skip)]
     #[serde(serialize_with = "gossamer_ast::ordered::set")]
     word_field_structs: std::collections::HashSet<gossamer_resolve::DefId>,
+    /// Concrete instantiations of generic structs whose fields were recorded
+    /// before MIR lowering read any layout, and so may pack. One a lowering
+    /// first meets keeps one word per field, at every read.
+    #[serde(skip)]
+    packed_instances: std::collections::HashSet<Ty>,
 }
 
 /// Cached handles for the primitive types that every program uses. The
@@ -1126,9 +1131,11 @@ impl TyCtxt {
     }
 
     /// Bytes a scalar field occupies inside a packed struct, or `None` for a
-    /// field that is not a scalar. An `f32` is held as a double on every tier,
-    /// so it keeps a whole word.
-    fn packed_scalar_bytes(&self, ty: Ty) -> Option<u32> {
+    /// field that is not a scalar and so keeps whole words at a word
+    /// boundary. An `f32` is held as a double on every tier, so it keeps a
+    /// whole word.
+    #[must_use]
+    pub fn packed_scalar_bytes(&self, ty: Ty) -> Option<u32> {
         match self.kind_of(ty) {
             TyKind::Bool | TyKind::Int(IntTy::I8 | IntTy::U8) => Some(1),
             TyKind::Int(IntTy::I16 | IntTy::U16) => Some(2),
@@ -1170,27 +1177,64 @@ impl TyCtxt {
         let TyKind::Adt { def, substs } = self.kind_of(ty) else {
             return None;
         };
-        if !substs.as_slice().is_empty() || self.is_inline_enum_ty(ty) {
+        if self.is_inline_enum_ty(ty) {
             return None;
         }
-        self.packed_walk_def(*def, on_field)
+        if substs.as_slice().is_empty() {
+            return self.packed_walk_def(*def, on_field);
+        }
+        if def.local >= u32::MAX - 16 || self.word_field_structs.contains(def) {
+            return None;
+        }
+        // A generic struct whose fields name none of its parameters has one
+        // layout at every instantiation, the one its definition gives.
+        if !self
+            .struct_field_tys(*def)?
+            .iter()
+            .any(|field| self.ty_contains_param(*field))
+        {
+            return self.packed_walk_def(*def, on_field);
+        }
+        if !self.packed_instances.contains(&ty) {
+            return None;
+        }
+        let fields = self.struct_fields_inst.get(&(*def, substs.clone()))?;
+        self.packed_walk_fields(fields, on_field)
+    }
+
+    /// Every type interned so far.
+    pub fn interned_tys(&self) -> impl Iterator<Item = Ty> + '_ {
+        (0..self.kinds.len()).filter_map(|index| u32::try_from(index).ok().map(Ty))
+    }
+
+    /// Admits `instances`, concrete instantiations of generic structs whose
+    /// fields are recorded, to pack: see [`Self::packed_layout`]. Called once,
+    /// before any layout is read.
+    pub fn admit_packed_instances(&mut self, instances: impl IntoIterator<Item = Ty>) {
+        self.packed_instances.extend(instances);
     }
 
     /// [`Self::packed_walk`] for the non-generic struct `def`.
     fn packed_walk_def(
         &self,
         def: gossamer_resolve::DefId,
-        mut on_field: impl FnMut(u32, u32),
+        on_field: impl FnMut(u32, u32),
     ) -> Option<u32> {
         if def.local >= u32::MAX - 16 || self.word_field_structs.contains(&def) {
             return None;
         }
         let fields = self.struct_field_tys(def)?;
-        if !fields.iter().all(|field| {
-            self.packed_scalar_bytes(*field).is_some() || self.is_scalar_struct(*field, 1)
-        }) {
+        // A generic struct's declared fields name its parameters, which have
+        // no layout; each instantiation is laid out from its own fields.
+        if fields.iter().any(|field| self.ty_contains_param(*field)) {
             return None;
         }
+        self.packed_walk_fields(fields, on_field)
+    }
+
+    /// The packed layout of a struct with `fields`, handing each field's
+    /// offset and bytes to `on_field`: see [`Self::packed_walk`].
+    fn packed_walk_fields(&self, fields: &[Ty], mut on_field: impl FnMut(u32, u32)) -> Option<u32> {
         let mut offset = 0u32;
         let mut word_offset = 0u32;
         let mut changed = false;
@@ -1213,12 +1257,15 @@ impl TyCtxt {
     /// The layout of a struct whose fields narrower than a word sit at their
     /// own width, or `None` when the struct keeps one word per field.
     ///
-    /// A non-generic struct of scalars and structs of scalars qualifies. A
-    /// scalar field sits at its own size and alignment and a nested struct at
-    /// a word boundary, and the whole rounds up to a word, so a copy, an
+    /// Any non-generic struct qualifies, and an instantiation of a generic one
+    /// MIR lowering admitted before it read a layout. A scalar field sits at its own size
+    /// and alignment; every other field (a handle, a carrier, a nested
+    /// aggregate) keeps its whole words at a word boundary, so the word a
+    /// handle sits in is its byte offset over eight and ownership records
+    /// stay word-indexed. The whole rounds up to a word, so a copy, an
     /// element stride, and a slot count are still whole words. A struct this
-    /// would not change, or one a program borrows a narrow field of, answers
-    /// `None`.
+    /// would not change, or one a program borrows a narrow field of or hands
+    /// a binding, answers `None`.
     #[must_use]
     pub fn packed_layout(&self, ty: Ty) -> Option<PackedLayout> {
         let mut field_offsets = Vec::new();
@@ -1251,11 +1298,63 @@ impl TyCtxt {
         })
     }
 
-    /// Every scalar leaf of a packed struct with its byte offset in the value,
-    /// in field order, nested structs flattened.
+    /// Whether `ty` names a generic parameter anywhere in its structure.
+    #[must_use]
+    pub fn ty_contains_param(&self, ty: Ty) -> bool {
+        let substs_name_param = |substs: &crate::Substs| {
+            substs.as_slice().iter().any(|arg| match arg {
+                crate::GenericArg::Type(t) => self.ty_contains_param(*t),
+                crate::GenericArg::ConstParam(_) => true,
+                crate::GenericArg::Const(_) => false,
+            })
+        };
+        match self.kind_of(ty) {
+            TyKind::Param { .. } => true,
+            TyKind::Ref { inner, .. }
+            | TyKind::Vec(inner)
+            | TyKind::Slice(inner)
+            | TyKind::Sender(inner)
+            | TyKind::Receiver(inner)
+            | TyKind::JoinHandle(inner)
+            | TyKind::Iterator(inner) => self.ty_contains_param(*inner),
+            TyKind::Array { elem, .. } => self.ty_contains_param(*elem),
+            TyKind::Tuple(elems) => elems.iter().any(|t| self.ty_contains_param(*t)),
+            TyKind::HashMap { key, value, .. } => {
+                self.ty_contains_param(*key) || self.ty_contains_param(*value)
+            }
+            TyKind::Adt { substs, .. } | TyKind::Alias { substs, .. } => substs_name_param(substs),
+            TyKind::FnPtr(sig) | TyKind::FnTrait(sig) => {
+                sig.inputs.iter().any(|t| self.ty_contains_param(*t))
+                    || self.ty_contains_param(sig.output)
+            }
+            _ => false,
+        }
+    }
+
+    /// The word each field of a packed struct starts in, in declaration
+    /// order, or `None` for a struct that keeps one word per field. A field
+    /// other than a scalar starts at a word boundary, so this is where its
+    /// words lie.
+    #[must_use]
+    pub fn packed_field_words(&self, ty: Ty) -> Option<Vec<i64>> {
+        self.packed_layout(ty).map(|layout| {
+            layout
+                .field_offsets
+                .iter()
+                .map(|&offset| i64::from(offset / 8))
+                .collect()
+        })
+    }
+
+    /// Every scalar leaf of a packed struct of scalars with its byte offset in
+    /// the value, in field order, nested structs flattened; `None` for a
+    /// struct that keeps one word per field or holds anything but scalars.
     #[must_use]
     pub fn packed_leaves(&self, ty: Ty) -> Option<Vec<(u32, Ty)>> {
         self.packed_walk(ty, |_, _| {})?;
+        if !self.is_scalar_struct(ty, 0) {
+            return None;
+        }
         let mut leaves = Vec::new();
         self.push_scalar_leaves(ty, 0, &mut leaves);
         Some(leaves)
@@ -1331,14 +1430,17 @@ impl TyCtxt {
                         .iter()
                         .map(|t| self.slot_bytes(*t).max(8) / 8)
                         .sum();
-                    // A plain struct of word-wide fields already sits at the
-                    // offsets its natural layout gives it.
+                    // A plain struct whose fields are each one word, in its
+                    // natural layout and as a slot alike, already sits at the
+                    // offsets its natural layout gives it. A byte array is one
+                    // word in C but one word per byte as a slot.
                     debug_assert!(
                         self.plain_layout(ty).is_none_or(|layout| {
                             layout.align != 8
-                                || field_tys
-                                    .iter()
-                                    .any(|t| self.plain_layout(*t).is_none_or(|f| f.size != 8))
+                                || field_tys.iter().any(|t| {
+                                    self.plain_layout(*t).is_none_or(|f| f.size != 8)
+                                        || self.slot_bytes(*t) != 8
+                                })
                                 || layout.size == total_slots.max(1) * 8
                         }),
                         "slot layout and plain layout disagree for a word-field struct"

@@ -1,0 +1,32 @@
+505
+145
+#[Slot { a: 1, b: 7, v: "s2" }, Slot { a: 2, b: 200, v: "s1" }, Slot { a: 3, b: 7, v: "s0" }]
+1 4 deep
+10 false
+#[3, 6, 9]
+true false #[(0, 1)]
+false true #[(1, 2)]
+true false #[(2, 3), (9, 9)]
+false false #[(3, 4)]
+true false #[(4, 5)]
+#[(0, 1)] #[(0, 1), (7, 7)]
+#[Tagged { kind: 0, name: "n0", weight: 0, flag: true }, Tagged { kind: 1, name: "n1", weight: 3, flag: false }, Tagged { kind: 2, name: "n2", weight: 6, flag: true }, Tagged { kind: 3, name: "n3", weight: 9, flag: false }, Tagged { kind: 4, name: "n4", weight: 12, flag: true }, Tagged { kind: 5, name: "n5", weight: 15, flag: false }]
+#["n0", "n1", "n2", "n3", "n4", "n5"]
+true
+true
+Tagged { kind: 3, name: "n2!", weight: 5, flag: false }
+11
+2
+Tagged { kind: 1, name: "n8", weight: 100, flag: true }
+65000 Tagged { kind: 6, name: "n6", weight: 18, flag: true } 255 Some("x") Tagged { kind: 7, name: "n6!", weight: 17, flag: false } None
+dot n9 2
+pair 3 p true
+empty
+30
+0 w0 false
+1 w1 true
+2 w2 false
+6
+{"kind":4,"name":"n11","weight":33,"flag":false}
+true
+5

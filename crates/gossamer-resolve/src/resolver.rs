@@ -1992,6 +1992,7 @@ impl Resolver {
     fn resolve_fn(&mut self, decl: &FnDecl) {
         self.scopes.push();
         self.bind_generics(&decl.generics);
+        self.bind_field_default_placeholders(decl);
         for param in &decl.params {
             match param {
                 FnParam::Typed {
@@ -2143,6 +2144,30 @@ impl Resolver {
 
     fn resolve_struct_field(&mut self, field: &StructField) {
         self.resolve_type(&field.ty);
+    }
+
+    /// Binds, for the body of a field default's function, `self` and the
+    /// struct's own field names to a placeholder local, which
+    /// `fill_field_defaults` reports: a default is evaluated before the value
+    /// it fills exists. A field name that also names an item in scope (a
+    /// function the default calls) keeps meaning that item.
+    fn bind_field_default_placeholders(&mut self, decl: &FnDecl) {
+        let Some(siblings) = decl
+            .attrs
+            .outer
+            .iter()
+            .find(|attr| attr.is_named(gossamer_ast::FIELD_DEFAULT_ATTR))
+            .and_then(|attr| attr.tokens.clone())
+        else {
+            return;
+        };
+        let placeholder = || Binding::local(NodeId::DUMMY);
+        self.scopes.top_mut().shadow_value("self", placeholder());
+        for name in siblings.split(',').filter(|name| !name.is_empty()) {
+            if self.lookup_value_here(name).is_none() {
+                self.scopes.top_mut().shadow_value(name, placeholder());
+            }
+        }
     }
 
     fn resolve_tuple_field(&mut self, field: &TupleField) {

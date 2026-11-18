@@ -146,10 +146,30 @@ unsafe fn desc_span_walk(tags: *const u8, cursor: &mut usize) -> usize {
             // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
             // caller), and the read stays inside the entry at `cursor`.
             let leaves = unsafe { *tags.add(*cursor + 1) } as usize;
-            *cursor += 2 + leaves * 3;
+            *cursor += 2;
+            // SAFETY: `cursor` addresses the entry's first leaf.
+            unsafe { skip_packed_leaves(tags, cursor, leaves) };
             words
         }
         _ => 1,
+    }
+}
+
+/// Advances `cursor`, at the first of `leaves` leaves of a `DESC_PACKED`
+/// entry, past them: three bytes each, and a nested leaf's own descriptor.
+///
+/// # Safety
+/// `tags` is a compiler-emitted ordering descriptor and `cursor` addresses
+/// `leaves` leaves of one of its packed entries.
+unsafe fn skip_packed_leaves(tags: *const u8, cursor: &mut usize, leaves: usize) {
+    for _ in 0..leaves {
+        // SAFETY: each leaf entry is three bytes inside the descriptor (contract).
+        let kind = unsafe { *tags.add(*cursor + 2) };
+        *cursor += 3;
+        if kind == gossamer_abi::packed_leaf::NESTED {
+            // SAFETY: a nested leaf is followed by a whole descriptor.
+            unsafe { skip_cmp_desc(tags, cursor) };
+        }
     }
 }
 
@@ -190,7 +210,9 @@ pub(crate) unsafe fn skip_cmp_desc(tags: *const u8, cursor: &mut usize) {
             // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
             // caller), and the read stays inside the entry at `cursor`.
             let leaves = unsafe { *tags.add(*cursor + 1) } as usize;
-            *cursor += 2 + leaves * 3;
+            *cursor += 2;
+            // SAFETY: `cursor` addresses the entry's first leaf.
+            unsafe { skip_packed_leaves(tags, cursor, leaves) };
         }
         gossamer_abi::DESC_ENUM => {
             *cursor += 1;
@@ -778,24 +800,42 @@ pub(crate) unsafe fn compare_desc_in(
             // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
             // caller), and the read stays inside the entry at `cursor`.
             let leaves = unsafe { *tags.add(*cursor + 2) } as usize;
-            let first = *cursor + 3;
-            *cursor = first + leaves * 3;
+            *cursor += 3;
             // SAFETY: this `unsafe fn`'s caller passes `a` and `b` values laid out as the entry
             // at `cursor` describes.
             let (base_a, base_b) = unsafe { inline_bases(a, b, storage) };
             for leaf in 0..leaves {
-                let at = first + leaf * 3;
+                let at = *cursor;
                 // SAFETY: each leaf entry is three bytes inside the descriptor.
                 let offset = usize::from(u16::from_le_bytes([unsafe { *tags.add(at) }, unsafe {
                     *tags.add(at + 1)
                 }]));
                 // SAFETY: each leaf entry is three bytes inside the descriptor.
                 let kind = unsafe { *tags.add(at + 2) };
-                // SAFETY: each leaf lies at its offset inside the packed value.
-                let ord = unsafe {
-                    compare_packed_leaf(mode, kind, base_a.add(offset), base_b.add(offset))
+                *cursor += 3;
+                let ord = if kind == gossamer_abi::packed_leaf::NESTED {
+                    // SAFETY: a nested leaf is followed by the descriptor of the words at its
+                    // offset inside the packed value.
+                    unsafe {
+                        compare_desc_in(
+                            mode,
+                            base_a.add(offset),
+                            base_b.add(offset),
+                            tags,
+                            cursor,
+                            CmpStorage::Inline,
+                            self_desc,
+                        )
+                    }
+                } else {
+                    // SAFETY: each leaf lies at its offset inside the packed value.
+                    unsafe {
+                        compare_packed_leaf(mode, kind, base_a.add(offset), base_b.add(offset))
+                    }
                 };
                 if ord != 0 {
+                    // SAFETY: `cursor` addresses the leaves after this one.
+                    unsafe { skip_packed_leaves(tags, cursor, leaves - leaf - 1) };
                     return ord;
                 }
             }
