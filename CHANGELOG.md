@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.81.2 - Faster array-to-Vec conversion for small elements
+
+- Turning an array of `u8`, `bool`, `u16`, `u32`, or another sub-word element into a `Vec` (`arr.to_vec()`, an array passed where a `Vec` is expected) copies it in bulk instead of one element at a time, on the native and JIT tiers. A program that builds byte buffers this way in a loop runs several times faster.
+
 ## 0.81.1 - Speed and memory regressions fixed, value-semantics fixes
 
 - `json::encode(v)` no longer deep-copies its argument before encoding it, writes floats straight into its output, and starts its buffer past the allocator's small size classes: encoding runs faster, and a program that encodes a large document in a loop no longer grows its memory with each pass.
