@@ -428,7 +428,8 @@ mod os {
 #[cfg(all(windows, not(any(tsan, miri, fuzzing))))]
 mod os {
     use windows_sys::Win32::System::Memory::{
-        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+        MEM_COMMIT, MEM_DECOMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc,
+        VirtualFree,
     };
 
     /// A fresh, zeroed, writable region of `len` bytes.
@@ -457,14 +458,23 @@ mod os {
         unsafe { VirtualFree(base.cast(), 0, MEM_RELEASE) };
     }
 
-    /// A reservation is released only whole, so a cached one keeps its
-    /// pages until it goes back entire.
+    /// Hands the pages past `keep` back to the system, answering the length
+    /// still committed. The reservation itself is released only whole, which
+    /// `unmap` does whatever length it is given.
     ///
     /// # Safety
     ///
-    /// `base` is a whole live mapping of `len` bytes.
-    pub(super) unsafe fn trim(_base: *mut u8, len: usize, _keep: usize) -> usize {
-        len
+    /// `base` is a whole live mapping of `len` bytes, `keep <= len` is a
+    /// whole number of pages, and nothing reads past `keep`.
+    pub(super) unsafe fn trim(base: *mut u8, len: usize, keep: usize) -> usize {
+        if keep == len {
+            return len;
+        }
+        // SAFETY: the tail is a whole-page range of committed pages inside
+        // the caller's reservation.
+        let decommitted =
+            unsafe { VirtualFree(base.add(keep).cast(), len - keep, MEM_DECOMMIT) } != 0;
+        if decommitted { keep } else { len }
     }
 
     /// Grows a region of `len` bytes to `need` through a fresh region,
