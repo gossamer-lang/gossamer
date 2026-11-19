@@ -25,6 +25,7 @@ mod lints;
 
 pub mod migrate;
 mod naming;
+mod type_forms;
 
 pub use explain::lint_explanation;
 pub use fix::{Fix, apply as apply_fixes, fixes};
@@ -174,6 +175,9 @@ pub const DAY_ONE_LINTS: &[&str] = &[
     // Batch 5 (conciseness nudges).
     "fill_loop",
     "substring_byte_scan",
+    // Field defaults: one spelling of a default.
+    "restated_field_default",
+    "redundant_default_derive",
     // Rust's naming conventions.
     "non_camel_case_types",
     "non_snake_case",
@@ -371,6 +375,8 @@ pub fn lint_code(id: &str) -> Code {
         "substring_byte_scan" => Code("GL0052"),
         "i64_only_container_family" => Code("GL0054"),
         "no_effect_statement" => Code("GL0056"),
+        "restated_field_default" => Code("GL0060"),
+        "redundant_default_derive" => Code("GL0061"),
         "non_camel_case_types" => Code("GL0057"),
         "non_snake_case" => Code("GL0058"),
         "non_upper_case_globals" => Code("GL0059"),

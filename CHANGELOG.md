@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.82.0 - Field defaults, methods in the type body, smaller and faster objects
+
+- `use {bench::Bench, config::Config, std::{fs, env}}` imports several paths in one declaration, as Rust's root `use { .. }` group does; `gos fmt` keeps a group as written.
+- A struct field may declare a default (`result: u32 = 0`, `rng: Rng = Rng::new()`), and a struct literal may leave such a field out. The default is evaluated at every construction, resolves where the struct is declared, and may call functions; a field without a default is still required. Enum struct variants take defaults too, a struct whose every field has one builds as `T {}` or `T::default()`, and a decode reads a missing key as the field's default.
+- A struct or enum may hold its methods, associated types, and constants in its own body and list the traits they implement after its name (`struct Sieve: Bench { limit: i64  fn run(&mut self, ..) { .. } }`). A body function implements the one listed trait that declares its name, or is inherent when none does; it is the same declaration as the type followed by its `impl` blocks.
+- `gos fix --rewriter impl-into-type-body` moves standalone `impl` blocks into their type's body, and `--rewriter type-body-into-impl` moves them back; `--rewriter fields-take-literal-defaults` gives a field the default every literal of its struct writes and drops that value from the literals.
+- The language server answers hover, go-to-definition, and references for methods and fields reached through a receiver (`s.run()`, `s.limit`), in either form of a type's declaration.
+- New lints: a struct-literal field that restates its declared default (`GL0060`), and `#[derive(Default)]` on a struct whose fields all have defaults (`GL0061`); `gos lint --fix` removes both.
+- New diagnostics: a field default that reads `self` or another field (`GR0026`), a body function two listed traits declare (`GP0069`), and a trait impl method whose receiver, parameters, or return type differ from the trait's declaration (`GT0127`), which was previously accepted.
+- A `Vec<Vec<T>>` filled push by push and then stored into a field (`self.graph = graph`) rebuilds each element small enough to share a block with its header, in index order, so a walk of it meets each element in one cache miss rather than two and runs faster; a large element keeps its header beside the others.
+- `arena { }` blocks wider than a thread's recycled slabs keep their extra slabs committed for the allocator's purge delay instead of returning them to the kernel at once, so an arena reopened at the same width no longer faults its pages in again.
+- A binary heap of integers or integer tuples pushes and pops with word moves and no generic element copy, and an arena allocation of an aggregate no longer walks its layout to decide where it goes.
+- `#[x; n]` with a value whose bytes differ fills the vector with word stores instead of repeated copies of its filled part.
+- `json::decode::<T>` and `json::parse` read a well-formed document in one loop that records each value as it passes, numbers included, and the typed reader walks that record instead of the text; only a malformed document is read a second time, to name its error. Typed decoding and parsing run faster.
+- `x.abs()` on an `i64` compiles to a few instructions in a release build instead of a runtime call, including on a computed value (`(a.0 - b.0).abs()`).
+- In a release build, `push` and `pop` on a `MinHeap` or `MaxHeap` of integers or integer tuples sift in place at the call, without a runtime call per operation.
+- Turning an ASCII `char` into a `String` (`c.to_string()`), or taking a one-character ASCII slice of a string, allocates nothing.
+- `json::encode` writes punctuation and keys without rechecking their encoding, decides whether a float needs a `.0` from its own digits, hands its buffer to the `String` it answers instead of copying the text out, and no longer re-sorts a map's keys, which `keys()` answers in order already.
+- Lints, `gos lint --fix`, and other tools that walk a file now read the methods written in a type's body, so a restated default inside one is reported (`GL0060`).
+- A function that only reads a collection parameter is handed the caller's collection without a copy when it sizes a repeat with it (`#[0.0; rows.len()]`), and when the goroutines it spawns inside its `cohort` only read it.
+- `for row in rows { out.push(row) }` over a vector of vectors that the loop alone reads, such as a `join()` result, moves each row into `out` instead of copying it.
+- A closure built inside a loop and handed to a call gives back what it captured as the call returns, so a loop that sorts by a freshly built key vector holds one vector at a time.
+- A freed large vector buffer reused for a smaller vector of known size returns the pages past that size to the system; a growing vector keeps them to grow into.
+- `gos build -g` keeps the frame pointer in every program function, as a build without `-g` does, so profilers walk its stacks.
+- A struct whose narrow fields sit beside handles packs them too: `struct Cell { alive: bool, next: bool, neighbors: Vec<(i64, i64)> }` takes 16 bytes instead of 24, in vectors, maps, and as a field, and still sorts, keys, prints, and encodes field by field.
+- A generic type's field typed by its parameter reads quoted when the parameter is a `String` or `char` (`Pair { a: 1, v: "x" }`), as a field declared `String` does, on every tier.
+- Sorting a `Vec` of a generic struct (`Vec<Pair<String>>`) compiles to a field-by-field sort instead of an integer sort that read past each element.
+- A struct-variant literal of a generic enum (`let e = Either::Two { x: 'q', n: 2 }`) infers the enum's arguments from its fields, and a struct-variant pattern binds its fields at the scrutinee's arguments, so either compiles natively.
+- Freeing a packed struct's heap copy names the size it was allocated with.
+- `gos check` rejects a member that `fmt`, `term`, `os::fd`, `panic`, `tls`, `database::sql`, or `http::{form, health, multipart, query, state}` does not export (`fmt::sprintf`) as `GR0001`, instead of the program failing at run time.
+- A generic function bound to a name and called through it (`let pick = larger; pick(3, 8)`) runs the instantiation its arguments fix on every tier, and one whose type arguments nothing fixes is `GT0128` at check time.
+- An argument-count error on a stdlib call names it as written (`term::is_terminal`), not by its internal wrapper.
+- A struct holds an `Option` of a struct or tuple in one word instead of two, `None` as zero, so nodes like `left: Option<Node>` take less memory and cache.
+- An object copied into `arena { }` storage carries no reference-count header.
+- Compiled code allocates an object inside `arena { }` by bumping the region's current slab inline, and a value whose layout holds no map, set, or other table takes a runtime entry that skips inspecting the layout everywhere else.
+- A struct literal spread over several lines takes a field name alone on its line as shorthand for the binding of that name (`Point {` / `x` / `y: 2` / `}`), as `Point { x, y: 2 }` does on one line.
+- Inside `arena { }`, a `Vec` keeps the heap values its elements hold (a struct with a `Map` field inside an `Option`, a string made before the block) alive until the block ends; such elements were freed while the `Vec` still held them, so later reads saw other elements' values.
+- A `Vec` from an outer `arena { }` that grows inside an inner one keeps its storage until the outer block ends, instead of losing it when the inner block closes.
+- On `gos run`, a `cohort(policy: Policy::Race)` whose children send to one unbuffered channel, with `main` taking the first value and joining, completes instead of intermittently stopping with a false `deadlock! (cohort join can never complete)`.
+- `gos check` rejects, as `GM0003`, a call inside `arena { }` that stores values it allocates into a place outliving the block (`fill(&mut outer)`, `outer_bag.add(..)`), including through functions that pass the place on.
+- Compiled code retains and releases a counted value inline when only its count changes, calling the runtime for a string, a shared or region object, the last reference, or a survivor a cycle can pass through, and whenever instrumentation is armed.
+- A vector's header is 48 bytes instead of 64: the identity and mutation count a lazy iterator checks move to a record only iterated or element-owning vectors carry.
+- A vector made with a known capacity small enough for the allocator's small-object pages (`Vec::with_capacity(n)`, a sized copy) holds its header and elements in one block.
+- A `csv::read` answer read only by index shares the document's text instead of copying it, and keeps each field's place in half the space.
+
 ## 0.81.2 - Faster array-to-Vec conversion for small elements
 
 - Turning an array of `u8`, `bool`, `u16`, `u32`, or another sub-word element into a `Vec` (`arr.to_vec()`, an array passed where a `Vec` is expected) copies it in bulk instead of one element at a time, on the native and JIT tiers. A program that builds byte buffers this way in a loop runs several times faster.

@@ -405,11 +405,22 @@ impl<'a> Lowerer<'a> {
         // name's last segment spells (`impl i64 { fn sqrt(&self) }`).
         let program_fn = self.param_tys_by_name.contains_key(&name);
         if !program_fn
-            && name.rsplit("::").next().is_some_and(|tail| tail == "abs")
+            && (name == "gos_rt_math_abs_i64"
+                || name.rsplit("::").next().is_some_and(|tail| tail == "abs"))
             && args.len() == 1
             && render_ty(self.tcx, self.body.local_ty(destination.local)) != "double"
         {
-            self.emit_named_call("gos_rt_math_abs_i64", args, destination, target)?;
+            let raw = self.lower_operand(&args[0])?;
+            let ty = self.operand_llvm_ty(&args[0]);
+            let word = self.coerce_llvm_value(&raw, &ty, "i64");
+            let abs = self.inline_saturating_abs_i64(&word);
+            let dest_ty_mir = self.place_leaf_ty(destination);
+            if !is_unit(self.tcx, dest_ty_mir) {
+                let dest_ty = render_ty(self.tcx, dest_ty_mir);
+                let value = self.coerce_llvm_value(&abs, "i64", &dest_ty);
+                self.store_value_to_place(destination, &dest_ty, &value);
+            }
+            emit_terminator_branch(&mut self.out, target);
             return Ok(());
         }
         // Counting trailing zeros is one instruction; `Mask::first_set`

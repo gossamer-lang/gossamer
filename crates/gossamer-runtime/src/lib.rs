@@ -329,6 +329,7 @@ pub fn allocator_purge_delay() -> std::time::Duration {
 pub fn purge_expired_allocator_memory() {
     collect_process_allocator(false);
     c_abi::vec::purge_mapped_buffers();
+    c_abi::rc::purge_retiring_slabs();
 }
 
 /// Hands the calling thread's freed allocator pages back to the kernel before

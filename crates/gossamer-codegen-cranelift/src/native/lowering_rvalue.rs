@@ -654,8 +654,17 @@ pub(super) fn lower_rvalue_into(
                 }
                 gossamer_mir::AggregateKind::Array => None,
             };
-            let packed = packed_def
-                .and_then(|def| tcx.packed_struct_layout(def).map(|layout| (def, layout)));
+            // An instantiation of a generic struct packs by its own type, so
+            // the destination's type, when known, names the layout.
+            let packed = packed_def.and_then(|def| {
+                dest_ty
+                    .filter(
+                        |ty| matches!(tcx.kind_of(*ty), TyKind::Adt { def: d, .. } if *d == def),
+                    )
+                    .and_then(|ty| tcx.packed_layout(ty))
+                    .or_else(|| tcx.packed_struct_layout(def))
+                    .map(|layout| (def, layout))
+            });
             let total_slots: u32 = match (&packed, kind) {
                 (Some((_, layout)), _) => layout.size / 8,
                 (None, gossamer_mir::AggregateKind::Array) => (operands.len() as u32) * elem_slots,

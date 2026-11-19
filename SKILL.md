@@ -35,13 +35,15 @@ is settled.
 ```gossamer
 const PI: f64 = 3.14159
 
-struct Point { x: f64, y: f64 }
+struct Point { x: f64, y: f64 = 0.0 }
 struct Pair(i64, i64)
-enum Shape { Circle(f64), Rect { w: f64, h: f64 } }
 
 trait Area { fn area(&self) -> f64 }
 
-impl Area for Shape {
+enum Shape: Area {
+    Circle(f64)
+    Rect { w: f64, h: f64 }
+
     fn area(&self) -> f64 {
         match self {
             Shape::Circle(r) => PI * r * r,
@@ -62,6 +64,8 @@ fn main() {
     println(label)
     let area = Shape::Circle(2.0).area()
     println(f"a circle of radius 2 covers {area:.2}")
+    let p = Point { x: 1.5 }
+    println(f"{p.x} {p.y}")
 }
 ```
 
@@ -113,13 +117,21 @@ extend(&mut items)     // items is now #[1, 2, 1]
 - Import everything you name: `use std::{env, fs}` before `env::args()`;
   `use util::add` for a sibling file; `use intcode` before any `intcode::`
   path of a `[dependencies]` package (a `-` in its name becomes `_`). Always
-  spell full std paths (`std::encoding::json`). Prelude types, collections,
-  variants, and builtin calls need no import.
-- Plain functions for free-standing logic; `impl` only when state belongs to
+  spell full std paths (`std::encoding::json`). One `use { .. }` groups
+  several paths: `use {util::add, std::{env, fs}}`. Prelude types,
+  collections, variants, and builtin calls need no import.
+- Plain functions for free-standing logic; methods only when state belongs to
   a type. A function that answers a value declares `-> T` (GL0055).
-- An `impl Trait for T` block holds the trait's items only (GT0072); one
-  block per `(trait, type)`. A type has one method per name across all its
-  impls (GT0096).
+- A type's own methods and traits go in its body, after its fields or
+  variants: `struct S: Bench + Display { limit: i64  fn run(&mut self) {..} }`.
+  A body function a listed trait declares implements it, any other is
+  inherent; a name two listed traits declare (`fmt` of `Display` and `Debug`)
+  is GP0069, so write one as a standalone `impl Debug for S`. A standalone
+  `impl` is the same thing, kept for a trait on a type declared elsewhere or
+  one that needs bounds of its own (`impl<T: Ord> Trait for S<T>`).
+- A trait impl holds the trait's items only (GT0072), with the trait's
+  signatures (GT0127); one block per `(trait, type)`. A type has one method
+  per name across all its impls (GT0096).
 
 **Bindings and control flow**
 - `let` by default, `let mut` near its one update site; `x += 1`, never
@@ -208,8 +220,12 @@ extend(&mut items)     // items is now #[1, 2, 1]
   Option<T> Result<T, E> &mut T`, user types, `Simd<T, N>`. No `i128`.
 - Structs build by their declared shape: `Unit`, `Pair(a, b)`,
   `Point { x: 1, y: 2 }`, and `Point { x, y }` fills each field from the
-  binding of its name. Structs, enums, tuples, and sequences compare and
-  order structurally; `impl` of `eq` / `cmp` overrides. Recursive enums work
+  binding of its name. A field may declare a default
+  (`result: u32 = 0`, `rng: Rng = Rng::new()`), which a literal that leaves
+  it out takes, built afresh per value; a default cannot read `self` or
+  another field (GR0026). A struct whose fields all have defaults builds as
+  `T {}` or `T::default()`, and a decode reads a missing key as the default.
+  Structs, enums, tuples, and sequences compare and order structurally; `impl` of `eq` / `cmp` overrides. Recursive enums work
   directly: `enum List { Cons(i64, List), Nil }`. Two enums may share a
   variant name (`Conn::Ready`, `Job::Ready`); write `Enum::Variant` where a
   bare name would be ambiguous (GR0009).
@@ -387,10 +403,12 @@ Discover signatures with `hover` / `gos doc std::<module>`. Areas:
   (`json::set_max_size(n)`).
 - Web: `net`, `http` (client `http::get`, server `http::serve(addr,
   handler)`, `http::router`), `http::websocket`, `html`, `mime`.
-- Terminal: `term` (`is_terminal`, `size`, `enter_raw`, `read_input`,
-  `resized`; each takes an optional `os::fd::Descriptor`: the `fs::File` of
-  an opened `/dev/tty` when stdin is piped, kept open while the call uses
-  it, or `term::STDIN` / `STDOUT` / `STDERR`), `os::fd` (`wait_readable`,
+- Terminal: `term` (`is_terminal(fd)` tests the descriptor it is given;
+  `size`, `enter_raw`, `read_input`, and `resized` take one optionally,
+  `STDOUT` for `size` / `resized` and `STDIN` otherwise). A descriptor is an
+  `os::fd::Descriptor`: the `fs::File` of an opened `/dev/tty` when stdin is
+  piped, kept open while the call uses it, or `term::STDIN` / `STDOUT` /
+  `STDERR`. `os::fd` (`wait_readable`,
   `wait_writable`, same argument; a descriptor a foreign call answered as an
   integer is `fs::File::from_raw(n)?`, owned and closed with the file, or
   `fd::Borrowed::from_raw(n)`, never closed), `os::signal`

@@ -199,13 +199,15 @@ pub fn parse_with_autoderive_from(
     program: Option<ParsedProgram>,
 ) -> (SourceFile, Vec<ParseDiagnostic>) {
     let (mut sf, mut diags) = match program {
-        Some(ParsedProgram { tree, len })
-            if tree.file == file && source.is_char_boundary(len) =>
-        {
+        Some(ParsedProgram { tree, len }) if tree.file == file && source.is_char_boundary(len) => {
             crate::parse_appended(source, file, tree, len)
         }
         _ => crate::parse_source_file(source, file),
     };
+    // A field default is a function of its own, and a type body is the
+    // `impl` blocks it stands for; every pass below reads those.
+    crate::synthesize_field_default_fns(&mut sf);
+    diags.extend(crate::desugar_type_bodies(&mut sf));
     // `augment_source` synthesizes nothing from a tree that did not parse, so
     // a missing serde codec there says nothing about the type it names.
     let parsed_cleanly = diags.is_empty();
@@ -791,6 +793,17 @@ fn mangled_stdlib_name(parent: &str, item: &str) -> Option<&'static str> {
         .iter()
         .find(|(p, i, _)| *p == parent && *i == item)
         .map(|(_, _, name)| *name)
+}
+
+/// The `parent::item` a program writes for the injected stdlib wrapper or
+/// type `mangled` (`term::is_terminal` for `__gos_term_is_terminal`), for a
+/// diagnostic that names it.
+#[must_use]
+pub fn stdlib_wrapper_spelling(mangled: &str) -> Option<String> {
+    MANGLED_STDLIB_NAMES
+        .iter()
+        .find(|(_, _, name)| *name == mangled)
+        .map(|(parent, item, _)| format!("{parent}::{item}"))
 }
 
 /// The spelling a program writes for the injected stdlib type `mangled`

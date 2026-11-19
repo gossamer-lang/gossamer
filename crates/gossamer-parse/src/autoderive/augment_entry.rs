@@ -21,6 +21,20 @@ pub fn augment_source(source: &str) -> String {
     augment(source).0
 }
 
+type Augmented = (String, Option<SourceFile>);
+
+/// The program as the front end reads it, when that differs from what it
+/// wrote: each field default a function of its own and each type body the
+/// `impl` blocks it stands for. Synthesis reads this copy; the tree handed on
+/// to the front end stays as written, which desugars it with the appended
+/// text in place, so a splice of the two numbers its nodes as one parse does.
+fn front_end_reading(parsed: Option<&SourceFile>) -> Option<SourceFile> {
+    let mut reading = parsed.filter(|tree| crate::has_front_end_sugar(tree))?.clone();
+    crate::synthesize_field_default_fns(&mut reading);
+    let _ = crate::desugar_type_bodies(&mut reading);
+    Some(reading)
+}
+
 /// A program's own text, parsed cleanly while autoderive read it, kept for
 /// [`parse_with_autoderive_from`] so the frontend parses only what
 /// autoderive appended.
@@ -43,11 +57,12 @@ pub fn augment_source_with_program(source: &str) -> (String, Option<ParsedProgra
     (augmented, program)
 }
 
-fn augment(source: &str) -> (String, Option<SourceFile>) {
+fn augment(source: &str) -> Augmented {
     // The `codegen(..)` splice's `comptime fn` backer.
     let validators = synthesize_validators(source);
     // Every synthesis below reads this one tree or this one token pass.
     let (mut parsed, lexed) = clean_parse_with_tokens(source);
+    let mut reading = front_end_reading(parsed.as_ref());
     // The parser's tokens are in the coordinates of the text after a byte
     // order mark, which every scan below slices by.
     let tokens = if source.starts_with('\u{feff}') {
@@ -66,7 +81,8 @@ fn augment(source: &str) -> (String, Option<SourceFile>) {
     // code compiles + runs on every tier. `rewrite_stdlib_struct_surface`
     // (in parse_with_autoderive) redirects the user's
     // `encoding::pem::*` call / literal / type sites onto these.
-    let mut stdlib_wrappers = synthesize_stdlib_wrappers(source, parsed.as_ref());
+    let mut stdlib_wrappers =
+        synthesize_stdlib_wrappers(source, reading.as_ref().or(parsed.as_ref()));
     // The wrappers' structs render, compare, and order like the program's
     // own, so they take the same synthesized methods, and a program type
     // holding one takes them on the same terms.
@@ -86,7 +102,7 @@ fn augment(source: &str) -> (String, Option<SourceFile>) {
         // derived from it would be reported against spans in the appended
         // text rather than anything the user wrote. The parse diagnostics
         // are the actionable report in that case.
-        let Some(tree) = parsed.as_mut() else {
+        let Some(tree) = reading.as_mut().or(parsed.as_mut()) else {
             return (source.to_string(), None);
         };
         // An item `#[cfg]` leaves out of this build is no item at all, so

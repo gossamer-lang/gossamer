@@ -354,7 +354,7 @@ fn builtin_serde_wr_raw(args: &[Value]) -> RuntimeResult<Value> {
 
 fn builtin_serde_wr_key(args: &[Value]) -> RuntimeResult<Value> {
     let text = serde_text(args, 1).to_owned();
-    with_writer(args, |out| json_std::typed::write_key(out, &text));
+    with_writer(args, |out| json_std::typed::write_key(out, text.as_bytes()));
     Ok(Value::Unit)
 }
 

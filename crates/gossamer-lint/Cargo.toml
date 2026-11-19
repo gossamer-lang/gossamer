@@ -15,6 +15,7 @@ workspace = true
 gossamer-ast = { workspace = true }
 gossamer-diagnostics = { workspace = true }
 gossamer-lex = { workspace = true }
+gossamer-parse = { workspace = true }
 
 [dev-dependencies]
 gossamer-parse = { workspace = true }

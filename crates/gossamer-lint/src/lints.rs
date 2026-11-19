@@ -38,6 +38,34 @@ pub(crate) fn run_lint(id: &str, sf: &SourceFile, src: &str) -> Vec<Finding> {
         "todo_macro" => lint_todo_macro(sf, src),
         "i64_only_container_family" => lint_i64_only_container_family(sf),
         "no_effect_statement" => lint_no_effect_statement(sf),
+        "restated_field_default" => crate::type_forms::restated_defaults(sf, src)
+            .into_iter()
+            .map(|found| {
+                (
+                    found.report,
+                    format!("`{}` restates its declared default", found.field),
+                    Some(format!(
+                        "the field declares this value as its default; leave `{}` out of the literal",
+                        found.field
+                    )),
+                )
+            })
+            .collect(),
+        "redundant_default_derive" => crate::type_forms::redundant_default_derives(sf, src)
+            .into_iter()
+            .map(|(span, _)| {
+                (
+                    span,
+                    "`#[derive(Default)]` on a struct whose every field declares a default"
+                        .to_string(),
+                    Some(
+                        "the struct's own defaults already give it `default()`; drop `Default` \
+                         from the derive"
+                            .to_string(),
+                    ),
+                )
+            })
+            .collect(),
         "bool_literal_in_condition" => lint_bool_literal_in_condition(sf),
         "let_and_return" => lint_let_and_return(sf),
         "collapsible_if" => lint_collapsible_if(sf),

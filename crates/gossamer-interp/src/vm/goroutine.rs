@@ -961,12 +961,15 @@ impl Drop for ChannelWait {
     fn drop(&mut self) {
         unpark_worker(self.parked);
         note_main_wait(None);
-        forget_waiting_cohort(self.cohort);
         if self.stuck {
             STUCK_WAITERS.fetch_sub(1, Ordering::AcqRel);
         }
         CHANNEL_WAITERS.fetch_sub(1, Ordering::AcqRel);
         note_progress();
+        // The cohort entry is what marks a cancelled waiter as able to move,
+        // so it is retired only after the count it vouches for, and after the
+        // epoch moves: a reading never sees this waiter counted without it.
+        forget_waiting_cohort(self.cohort);
     }
 }
 

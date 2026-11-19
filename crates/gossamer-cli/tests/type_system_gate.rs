@@ -974,3 +974,42 @@ fn every_declined_type_and_declaration_is_named_where_it_is_written() {
         ],
     );
 }
+
+#[test]
+fn an_arena_value_never_outlives_its_block_through_a_call() {
+    gate(
+        "arena escapes through calls",
+        &[
+            (
+                "a function that pushes a string it makes into an outer vec",
+                "fn fill(out: &mut Vec<String>, n: i64) { for i in 0..n { out.push(f\"x{i}\") } }\nfn main() { let mut kept = #[]\n arena { fill(&mut kept, 3) }\n println(kept.len()) }\n",
+                Expect::Reject("GM0003"),
+            ),
+            (
+                "the same function filling a vec the block owns",
+                "fn fill(out: &mut Vec<String>, n: i64) { for i in 0..n { out.push(f\"x{i}\") } }\nfn main() { arena { let mut kept = #[]\n fill(&mut kept, 3)\n println(kept.len()) } }\n",
+                Expect::Accept,
+            ),
+            (
+                "a function forwarding its parameter to one that fills it",
+                "fn fill(out: &mut Vec<String>, n: i64) { for i in 0..n { out.push(f\"x{i}\") } }\nfn twice(out: &mut Vec<String>) { fill(out, 1)\n fill(out, 2) }\nfn main() { let mut kept = #[]\n arena { twice(&mut kept) }\n println(kept.len()) }\n",
+                Expect::Reject("GM0003"),
+            ),
+            (
+                "a method storing a string it makes into an outer receiver",
+                "struct Bag { items: Vec<String> }\nimpl Bag { fn add(&mut self, i: i64) { self.items.push(f\"x{i}\") } }\nfn main() { let mut bag = Bag { items: #[] }\n arena { bag.add(1) }\n println(bag.items.len()) }\n",
+                Expect::Reject("GM0003"),
+            ),
+            (
+                "integers pushed into an outer vec through a call",
+                "fn fill(out: &mut Vec<i64>, n: i64) { for i in 0..n { out.push(i) } }\nfn main() { let mut kept = #[]\n arena { fill(&mut kept, 3) }\n println(kept.len()) }\n",
+                Expect::Accept,
+            ),
+            (
+                "a vec's own push stays a push for a type with an allocating push",
+                "struct Log { lines: Vec<String> }\nimpl Log { fn push(&mut self, i: i64) { self.lines.push(f\"l{i}\") } }\nfn main() { let mut counts = #[]\n arena { counts.push(1) }\n let mut log = Log { lines: #[] }\n log.push(2)\n println(counts.len() + log.lines.len()) }\n",
+                Expect::Accept,
+            ),
+        ],
+    );
+}

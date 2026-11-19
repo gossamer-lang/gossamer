@@ -97,6 +97,22 @@ pub const RC_HEADER_SIZE: usize = std::mem::size_of::<RcHeader>();
 // into the existing 8 bytes (see the field docs), never added on top.
 const _: () = assert!(RC_HEADER_SIZE == 8, "RcHeader must remain 8 bytes");
 
+// Compiled code reads the count word and the meta id at these offsets from a
+// payload when it takes a retain or release inline.
+const _: () = assert!(RC_HEADER_SIZE as i64 == gossamer_abi::rc::header::BYTES);
+const _: () = assert!(
+    std::mem::offset_of!(RcHeader, strong) as i64 - RC_HEADER_SIZE as i64
+        == gossamer_abi::rc::header::STRONG_OFFSET
+);
+const _: () = assert!(
+    std::mem::offset_of!(RcHeader, meta_id) as i64 - RC_HEADER_SIZE as i64
+        == gossamer_abi::rc::header::META_ID_OFFSET
+);
+// Compiled code indexes the acyclic table by 64-bit words; it runs on 64-bit
+// targets only.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(ACYCLIC_WORD_BITS as u32 == gossamer_abi::rc::header::ACYCLIC_WORD_BITS);
+
 // ---------------------------------------------------------------
 // Type-meta blob format (a flat, self-describing `[i64]`).
 // ---------------------------------------------------------------
@@ -335,7 +351,7 @@ fn rc_reuse_inc() {
 /// Low 27 bits of `strong`: the actual strong reference count (134M
 /// live refs is unreachable). Bit 27 is [`SHARED_BIT`]; bits 28-31 are
 /// the collector flags.
-const STRONG_COUNT_MASK: u32 = 0x07FF_FFFF;
+const STRONG_COUNT_MASK: u32 = gossamer_abi::rc::header::STRONG_COUNT_MASK;
 
 /// Bit 27: the object has escaped to another goroutine (sent on a
 /// channel, captured by a spawned goroutine, or passed to `go f(...)`).
@@ -349,25 +365,25 @@ const STRONG_COUNT_MASK: u32 = 0x07FF_FFFF;
 /// collector, the non-atomic accessors (`color_of`, `set_strong_count`,
 /// …) only ever run on thread-local (non-shared) objects, so they need
 /// no atomics.
-const SHARED_BIT: u32 = 1 << 27;
+const SHARED_BIT: u32 = gossamer_abi::rc::header::SHARED_BIT;
 
 /// Pinned strong count for process-immortal objects (unit-variant
 /// singletons). Retain and release skip the count entirely: inside an
 /// arena the balancing releases never run (bulk free, no walk), so a
 /// counted singleton would grow monotonically and overflow the 28-bit
 /// field into the collector flag bits on big workloads.
-const STRONG_IMMORTAL: u32 = STRONG_COUNT_MASK;
+const STRONG_IMMORTAL: u32 = gossamer_abi::rc::header::STRONG_IMMORTAL;
 /// Bit 31: the object sits in the cycle-collector candidate buffer.
-const BUFFERED_BIT: u32 = 1 << 31;
+const BUFFERED_BIT: u32 = gossamer_abi::rc::header::BUFFERED_BIT;
 /// Bits 28-29: trial-deletion color.
-const COLOR_SHIFT: u32 = 28;
+const COLOR_SHIFT: u32 = gossamer_abi::rc::header::COLOR_SHIFT;
 const COLOR_MASK: u32 = 0b11 << COLOR_SHIFT;
 /// Bit 30: the object was bump-allocated inside an arena region. Its
 /// lifetime is the region's, so retain/release are no-ops and it is freed
 /// wholesale (no per-node teardown walk) when the region is popped. This is
 /// the bit that lets a `region { … }` block sidestep RC's per-node
 /// reclamation cost on short-lived allocation churn.
-const REGION_BIT: u32 = 1 << 30;
+const REGION_BIT: u32 = gossamer_abi::rc::header::REGION_BIT;
 
 /// One-shot claim flag for reclaiming a DEAD shared block (bit 28, aliasing
 /// the low collector-color bit, which a shared object never uses: shared
@@ -1151,9 +1167,9 @@ fn rc_block_alloc_zeroed(total: usize) -> *mut u8 {
 }
 
 /// mimalloc's small-object ceiling (`MI_SMALL_SIZE_MAX`): a request at or
-/// below it may take the entry that skips the size-class dispatch.
-#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
-const MI_SMALL_SIZE_MAX: usize = 128 * std::mem::size_of::<usize>();
+/// below it may take the entry that skips the size-class dispatch, and is
+/// served from pages that hold many blocks of its class side by side.
+pub(crate) const MI_SMALL_SIZE_MAX: usize = 128 * std::mem::size_of::<usize>();
 
 /// Like [`rc_block_alloc_zeroed`] without the zero fill, for callers
 /// that provably write every byte.
@@ -1292,8 +1308,10 @@ pub(crate) fn finish_worker_cycles() {
 }
 
 /// Which interned metas carry [`gossamer_abi::rc::RC_KIND_ACYCLIC`], one bit
-/// per id, read on every surviving release.
-static META_ACYCLIC: [AtomicUsize; META_TABLE_CAP / ACYCLIC_WORD_BITS + 1] =
+/// per id, read on every surviving release, by compiled code's inline
+/// release as well as by the runtime's.
+#[unsafe(export_name = "gos_rt_meta_acyclic")]
+pub static META_ACYCLIC: [AtomicUsize; META_TABLE_CAP / ACYCLIC_WORD_BITS + 1] =
     [const { AtomicUsize::new(0) }; META_TABLE_CAP / ACYCLIC_WORD_BITS + 1];
 
 const ACYCLIC_WORD_BITS: usize = usize::BITS as usize;
@@ -1411,14 +1429,14 @@ unsafe fn header_ptr(payload: *mut u8) -> *mut RcHeader {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_rc_alloc_tagged(size: u64, meta: *const i64) -> *mut u8 {
     // Hot path: bump within the innermost region's current slab touching only
-    // the BUMP thread-local. `BUMP.base` is null whenever no region holds a
+    // the bump thread-local. Its `base` is null whenever no region holds a
     // slab (every `arena_pop` restores it), so a hit unambiguously means
     // "a region is active and has room" - no separate `REGION_DEPTH` probe is
     // needed on the allocation-heavy path. Tagged region nodes are headerless,
     // unzeroed (the constructor stores every slot), and not `RC_LIVE`-counted,
     // matching the prior `region_alloc_inner_unzeroed(.., false)`.
     let need = (size as usize + RC_ALIGN - 1) & !(RC_ALIGN - 1);
-    let hit = BUMP.with(|b| {
+    let hit = with_bump(|b| {
         let st = b.get();
         if !st.base.is_null() && st.cur + need <= st.end {
             // SAFETY: `st.cur + need <= st.end` (checked above), so the address lies inside the
@@ -1701,6 +1719,66 @@ pub(crate) unsafe fn rc_alloc_payload(size: u64, meta: *const i64, src: *const u
         rc_alloc_observed(size, base, in_region);
     }
     payload
+}
+
+/// A counted copy of the `size` bytes at `src` (zeros for a null `src`) bumped off the open region's
+/// current slab, or `None` when the slab cannot take it or instrumentation
+/// wants to see the allocation. A region copy carries no header: it is
+/// never counted, walked, or freed on its own, and every path that would read
+/// a header tells region storage by its address first.
+///
+/// # Safety
+/// `src` must be null or hold `size` readable bytes.
+#[inline]
+pub(crate) unsafe fn region_bump_copy(size: u64, src: *const u8) -> Option<*mut u8> {
+    if crate::c_abi::ledger::instrumentation_armed() {
+        return None;
+    }
+    let payload = region::region_bump_object((size as usize).max(RC_ALIGN))?;
+    // SAFETY: `payload` is a fresh region block of at least `size` bytes, which the copy fills.
+    unsafe { fill_region_blob(payload, size, src) };
+    rc_live_inc();
+    Some(payload)
+}
+
+/// A headerless region copy of the `size` bytes at `src` (zeros for a null
+/// `src`), for a region slab that cannot take it in place: see
+/// [`region_bump_copy`]. Null when the region cannot allocate.
+///
+/// # Safety
+/// A region must be open, and `src` null or holding `size` readable bytes.
+pub(crate) unsafe fn region_blob_copy(size: u64, src: *const u8) -> *mut u8 {
+    let bytes = (size as usize).max(RC_ALIGN);
+    let payload = region::region_alloc_inner_unzeroed(bytes, true);
+    if payload.is_null() {
+        return payload;
+    }
+    // SAFETY: `payload` is a fresh region block of at least `size` bytes.
+    unsafe { fill_region_blob(payload, size, src) };
+    rc_live_inc();
+    if crate::c_abi::vec::rc_trace_enabled() || crate::c_abi::ledger::instrumentation_armed() {
+        if crate::c_abi::vec::rc_trace_enabled() {
+            eprintln!("ALLOCZ {size} {payload:p}");
+        }
+        crate::c_abi::ledger::rc_alloc(size as usize, bytes, true, false);
+    }
+    payload
+}
+
+/// Fills a fresh region copy: the `size` bytes at `src`, or zeros.
+///
+/// # Safety
+/// `payload` holds `size` writable bytes, and `src` is null or holds `size`
+/// readable bytes.
+unsafe fn fill_region_blob(payload: *mut u8, size: u64, src: *const u8) {
+    if src.is_null() {
+        // SAFETY: `payload` is `size` fresh bytes.
+        unsafe { std::ptr::write_bytes(payload, 0, size as usize) };
+    } else {
+        // SAFETY: `payload` is `size` fresh bytes and `src` holds `size` bytes (this `unsafe
+        // fn`'s caller).
+        unsafe { copy_blob::copy_payload(src, payload, size as usize) };
+    }
 }
 
 /// The tracing and ledger accounting of one allocation, kept out of the
@@ -2512,7 +2590,9 @@ unsafe fn release_last_reference(root: *mut u8, h: *mut RcHeader, d: DecOutcome)
         // SAFETY: `h` is `root`'s header, and `root` is dead.
         unsafe { reclaim_dead(root, h, d.shared) };
         while let Some(payload) = worklist.pop() {
-            if payload.is_null() {
+            // A child in region storage is freed with its region and may
+            // carry no header.
+            if payload.is_null() || in_region_arena(payload) {
                 continue;
             }
             // SAFETY: `payload` is a live child node the release walk reached.
@@ -2732,6 +2812,10 @@ unsafe fn release_child_of_kind(kind: i64, child: *mut u8, worklist: &mut Vec<*m
     match kind {
         RC_CHILD_RC => {
             let c = untag_rc(child);
+            // A child in region storage is freed with its region.
+            if in_region_arena(c) {
+                return;
+            }
             // SAFETY: `c` is a non-null child word, a candidate the string probe accepts.
             if unsafe { crate::c_abi::string::is_gos_string(c.cast()) } {
                 // SAFETY: `c` is a live string body (the probe above), whose share the dead
@@ -3122,6 +3206,14 @@ unsafe fn visit_entries(payload: *mut u8, mut f: impl FnMut(i64, *mut u8)) {
 /// its own - [`gossamer_abi::rc::RC_CHILD_MAP`] - writes the new handle back
 /// through that address.
 unsafe fn visit_entry_slots(payload: *mut u8, mut f: impl FnMut(i64, *mut u8, *mut u8)) {
+    // A counted child in region storage is freed with its region and may
+    // carry no header, so no walk reaches it.
+    let mut f = |kind: i64, slot: *mut u8, child: *mut u8| {
+        if kind == gossamer_abi::rc::RC_CHILD_RC && in_region_arena(untag_rc(child)) {
+            return;
+        }
+        f(kind, slot, child);
+    };
     // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     let meta = unsafe { meta_of(header_ptr(payload)) };
     if meta.is_null() {

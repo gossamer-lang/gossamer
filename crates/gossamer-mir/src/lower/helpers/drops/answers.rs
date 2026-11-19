@@ -198,6 +198,39 @@ struct BlockMention {
     block: usize,
     last_stmt: Option<usize>,
     term: bool,
+    /// The block's first mention gives the local a new value without reading
+    /// the old one, so the old value is dead on entry to it.
+    rebinds_first: bool,
+}
+
+/// The locals statement `si` of `block` gives a new value without reading
+/// the one they hold: a whole assignment whose value does not mention the
+/// local, or a release of the local that the block's next mention of it
+/// overwrites (the release that precedes a rebinding, which reads only a
+/// value an earlier release has already given up and cleared).
+fn rebinds_at(block: &BasicBlock, si: usize, accounting: &impl Fn(&str) -> bool) -> Option<Local> {
+    let StatementKind::Assign { place, rvalue } = &block.stmts[si].kind else {
+        return None;
+    };
+    if let Rvalue::CallIntrinsic { name, args } = rvalue
+        && accounting(name)
+        && let Some(Operand::Copy(p)) = args.first()
+        && p.projection.is_empty()
+    {
+        let local = p.local;
+        let next = block.stmts[si + 1..]
+            .iter()
+            .find(|stmt| crate::opt::stmt_mentions_local(stmt, local))?;
+        return matches!(&next.kind, StatementKind::Assign { place, rvalue }
+            if place.local == local
+                && place.projection.is_empty()
+                && !crate::opt::rvalue_mentions_local(rvalue, local))
+        .then_some(local);
+    }
+    (place.projection.is_empty()
+        && !matches!(rvalue, Rvalue::Use(Operand::Const(_)))
+        && !crate::opt::rvalue_mentions_local(rvalue, place.local))
+    .then_some(place.local)
 }
 
 pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
@@ -333,26 +366,30 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
     // statement doing so, and whether the terminator does.
     let mut mentioned: Vec<Vec<BlockMention>> = vec![Vec::new(); n_locals];
     {
-        let mark =
-            |l: Local, bi: usize, si: Option<usize>, mentioned: &mut Vec<Vec<BlockMention>>| {
-                let Some(list) = mentioned.get_mut(l.0 as usize) else {
-                    return;
-                };
-                if list.last().is_none_or(|m| m.block != bi) {
-                    list.push(BlockMention {
-                        block: bi,
-                        last_stmt: None,
-                        term: false,
-                    });
-                }
-                let Some(entry) = list.last_mut() else {
-                    return;
-                };
-                match si {
-                    Some(si) => entry.last_stmt = Some(si),
-                    None => entry.term = true,
-                }
+        let mark = |l: Local,
+                    bi: usize,
+                    si: Option<usize>,
+                    rebinds: bool,
+                    mentioned: &mut Vec<Vec<BlockMention>>| {
+            let Some(list) = mentioned.get_mut(l.0 as usize) else {
+                return;
             };
+            if list.last().is_none_or(|m| m.block != bi) {
+                list.push(BlockMention {
+                    block: bi,
+                    last_stmt: None,
+                    term: false,
+                    rebinds_first: rebinds,
+                });
+            }
+            let Some(entry) = list.last_mut() else {
+                return;
+            };
+            match si {
+                Some(si) => entry.last_stmt = Some(si),
+                None => entry.term = true,
+            }
+        };
         let locals_in_operand = |op: &Operand, out: &mut Vec<Local>| {
             if let Operand::Copy(p) = op {
                 out.push(p.local);
@@ -369,7 +406,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                         continue;
                     }
                     StatementKind::SetDiscriminant { place, .. } => {
-                        mark(place.local, bi, Some(si), &mut mentioned);
+                        mark(place.local, bi, Some(si), false, &mut mentioned);
                         continue;
                     }
                     StatementKind::StaticStore { value, .. } => {
@@ -377,7 +414,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                         let mut ls: Vec<Local> = Vec::new();
                         locals_in_operand(value, &mut ls);
                         for l in ls {
-                            mark(l, bi, Some(si), &mut mentioned);
+                            mark(l, bi, Some(si), false, &mut mentioned);
                         }
                         continue;
                     }
@@ -386,7 +423,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                         locals_in_operand(source, &mut ls);
                         ls.push(dst.local);
                         for l in ls {
-                            mark(l, bi, Some(si), &mut mentioned);
+                            mark(l, bi, Some(si), false, &mut mentioned);
                         }
                         continue;
                     }
@@ -401,7 +438,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                             locals_in_operand(arg, &mut ls);
                         }
                         for l in ls {
-                            mark(l, bi, Some(si), &mut mentioned);
+                            mark(l, bi, Some(si), false, &mut mentioned);
                         }
                         continue;
                     }
@@ -410,8 +447,8 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                         iter_place,
                         ..
                     } => {
-                        mark(dst_option.local, bi, Some(si), &mut mentioned);
-                        mark(iter_place.local, bi, Some(si), &mut mentioned);
+                        mark(dst_option.local, bi, Some(si), false, &mut mentioned);
+                        mark(iter_place.local, bi, Some(si), false, &mut mentioned);
                         continue;
                     }
                 };
@@ -485,8 +522,9 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                         ls.push(place.local);
                     }
                 }
+                let rebound = rebinds_at(block, si, &accounting);
                 for l in ls {
-                    mark(l, bi, Some(si), &mut mentioned);
+                    mark(l, bi, Some(si), rebound == Some(l), &mut mentioned);
                 }
             }
             let mut ls: Vec<Local> = Vec::new();
@@ -521,8 +559,23 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                 }
                 _ => {}
             }
+            let rebound = match &block.terminator {
+                Terminator::Call {
+                    callee,
+                    args,
+                    destination,
+                    ..
+                } if destination.projection.is_empty()
+                    && !std::iter::once(callee).chain(args).any(
+                        |op| matches!(op, Operand::Copy(p) if p.local == destination.local),
+                    ) =>
+                {
+                    Some(destination.local)
+                }
+                _ => None,
+            };
             for l in ls {
-                mark(l, bi, None, &mut mentioned);
+                mark(l, bi, None, rebound == Some(l), &mut mentioned);
             }
         }
     }
@@ -570,15 +623,27 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
         }
         stamp += 1;
         stack.clear();
+        // A block that rebinds the local before reading it ends the old
+        // value's life, so the walk neither starts at it nor passes back
+        // through it.
+        let rebinds_first = |bi: usize| {
+            mentioned[li]
+                .iter()
+                .any(|m| m.block == bi && m.rebinds_first)
+        };
         for m in &mentioned[li] {
-            stack.extend(preds[m.block].iter().copied());
+            if !m.rebinds_first {
+                stack.extend(preds[m.block].iter().copied());
+            }
         }
         while let Some(bi) = stack.pop() {
             if reach_stamp[bi] == stamp {
                 continue;
             }
             reach_stamp[bi] = stamp;
-            stack.extend(preds[bi].iter().copied());
+            if !rebinds_first(bi) {
+                stack.extend(preds[bi].iter().copied());
+            }
         }
         for m in &mentioned[li] {
             let bi = m.block;

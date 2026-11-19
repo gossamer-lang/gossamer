@@ -119,6 +119,17 @@ pub enum ParseError {
         /// The field's type as written.
         field_ty: String,
     },
+    /// A function in a type's body whose name more than one of the traits
+    /// the type lists declares, so the body cannot say which it implements.
+    #[error("`{name}` is declared by more than one trait `{ty}` lists")]
+    TypeBodyAmbiguousItem {
+        /// The type whose body holds the function.
+        ty: String,
+        /// The function's name.
+        name: String,
+        /// The listed traits declaring it, in listed order.
+        traits: Vec<String>,
+    },
     /// A feature the language declines (SPEC §17.5), written where it would
     /// start.
     #[error("{feature} are not part of Gossamer")]
@@ -826,6 +837,22 @@ impl ParseError {
     #[allow(clippy::too_many_lines, reason = "one arm per diagnostic code")]
     fn code_title_help_syntax(&self) -> (&'static str, String, Option<String>) {
         match self {
+            ParseError::TypeBodyAmbiguousItem { ty, name, traits } => (
+                "GP0069",
+                format!(
+                    "`{name}` in the body of `{ty}` is declared by more than one listed trait: {}",
+                    traits
+                        .iter()
+                        .map(|t| format!("`{t}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                Some(format!(
+                    "a body function implements the one listed trait that declares its name; \
+                     move this one into a standalone `impl {} for {ty} {{ fn {name}(..) }}`",
+                    traits.last().map_or("Trait", String::as_str)
+                )),
+            ),
             ParseError::DeriveDefaultField {
                 ty,
                 field,

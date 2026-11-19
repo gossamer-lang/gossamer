@@ -1,0 +1,22 @@
+// A grouped `use` imports several paths in one declaration: plain paths,
+// an alias, a path's own list, a nested group, and entries on their own
+// lines. Each entry means what it would as a `use` of its own.
+use {std::math, std::strings as text, std::{path}}
+use {
+    std::collections::{BTreeMap}
+    {std::sort}
+}
+
+fn main() {
+    println(math::abs(-4.5))
+    println(text::repeat("ab", 3))
+    println(path::join("dir", "file.txt"))
+    let mut m: BTreeMap<String, i64> = BTreeMap::new()
+    m.insert("b", 2)
+    m.insert("a", 1)
+    for (k, v) in m {
+        println(f"{k}={v}")
+    }
+    println(sort::sort_stable(#[3, 1, 2]))
+    println(sort::binary_search(#[1, 3, 5], 3))
+}

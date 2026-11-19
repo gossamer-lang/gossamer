@@ -368,6 +368,13 @@ impl Lowerer<'_> {
                             &f.attrs,
                             &f.name.name,
                             container.rename_all,
+                            f.default.as_ref().map(|_| {
+                                gossamer_ast::field_default_fn_name(
+                                    &decl.name.name,
+                                    None,
+                                    &f.name.name,
+                                )
+                            }),
                         )
                     })
                     .collect(),
@@ -401,7 +408,20 @@ impl Lowerer<'_> {
                     fields: match &variant.body {
                         gossamer_ast::StructBody::Named(fields) => fields
                             .iter()
-                            .map(|f| crate::serde::HirSerdeField::of(&f.attrs, &f.name.name, None))
+                            .map(|f| {
+                                crate::serde::HirSerdeField::of(
+                                    &f.attrs,
+                                    &f.name.name,
+                                    None,
+                                    f.default.as_ref().map(|_| {
+                                        gossamer_ast::field_default_fn_name(
+                                            &decl.name.name,
+                                            Some(&variant.name.name),
+                                            &f.name.name,
+                                        )
+                                    }),
+                                )
+                            })
                             .collect(),
                         _ => Vec::new(),
                     },

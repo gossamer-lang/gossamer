@@ -314,6 +314,20 @@ pub const REGISTRY: &[(&str, &str)] = &[
             a new name. A foreign static keeps its C spelling.",
     ),
     (
+        "GL0060",
+        "A struct literal writes a field with exactly the value the field\n\
+            declares as its default. A literal that leaves the field out takes\n\
+            the default, so the written value says nothing; leave it out.\n\
+            `gos lint --fix` drops it.",
+    ),
+    (
+        "GL0061",
+        "`#[derive(Default)]` on a struct whose every field declares a\n\
+            default. Such a struct already answers `T::default()` and `T {}`\n\
+            from its own defaults. `gos lint --fix` drops `Default` from the\n\
+            derive.",
+    ),
+    (
         "GM0001",
         "Generic monomorphization received a type substitution that the\n\
                      compiler does not yet support - typically a generic parameter\n\
@@ -770,6 +784,15 @@ pub const REGISTRY: &[(&str, &str)] = &[
             variants written under one name are also reported.",
     ),
     (
+        "GP0069",
+        "A function in a type's body has a name more than one of the traits\n\
+            the type lists declares. A body function implements the one listed\n\
+            trait that declares its name, so with two the declaration does not\n\
+            say which; the compiler never picks. `Display` and `Debug` both\n\
+            declare `fmt`: list one on the type and write the other as a\n\
+            standalone `impl Debug for T { fn fmt(&self) -> String { .. } }`.",
+    ),
+    (
         "GR0001",
         "A name used in source could not be resolved to a declaration.\n\
                      Check the spelling, whether a `use` brings the name into scope,\n\
@@ -956,6 +979,16 @@ pub const REGISTRY: &[(&str, &str)] = &[
             alternative binds and another does not would be unbound when that\n\
             other one matched. Bind the name in every alternative, or match the\n\
             alternatives in separate arms.",
+    ),
+    (
+        "GR0026",
+        "A field default reads `self` or another field of its struct. A\n\
+            default is evaluated when a literal leaves its field out, before the\n\
+            value it belongs to exists, so there is no `self` and no other field\n\
+            to read: `struct S { a: i64 = 1, b: i64 = a + 1 }` has no `a` when\n\
+            `b`'s default runs. A default may call functions and build values of\n\
+            its own; a value that depends on other fields is computed where the\n\
+            struct is built, or by a constructor function.",
     ),
     (
         "GT0001",
@@ -1882,6 +1915,28 @@ pub const REGISTRY: &[(&str, &str)] = &[
             concrete type, as `json::encode::<T>` does, so `fn text<T>(v: T) {\n\
             json::encode(v) }` has no walk to run. Call the encoder where the\n\
             type is concrete, in the caller that names it, and pass the text in.",
+    ),
+    (
+        "GT0127",
+        "A method of a trait impl does not match the trait's declaration of\n\
+            it: its receiver (`self`, `&self`, `&mut self`, or none), its\n\
+            parameter count, a parameter's type, or its return type differs. A\n\
+            call through the trait passes and expects what the trait declares,\n\
+            so the impl's method has to take and answer exactly that, with\n\
+            `Self` meaning the implementing type. This holds the same for a\n\
+            method written in a type's body (`struct S: Trait { fn m(..) }`):\n\
+            a body function whose name a listed trait declares implements it,\n\
+            and never falls back to an inherent method.",
+    ),
+    (
+        "GT0128",
+        "A generic function is named as a value, or called, with a type\n\
+            argument nothing in the program fixes: `let f = id` with `f` never\n\
+            called, or `fn none<T>() -> Option<T>` called where its answer is\n\
+            never used. Every tier runs one instantiation of the function, so\n\
+            each type argument has to be known. Name it with `id::<i64>`, give\n\
+            the binding a function type (`let f: fn(i64) -> i64 = id`), or use\n\
+            the value where its type is fixed.",
     ),
     (
         "GX0001",

@@ -254,6 +254,19 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
             `#[export]` function and a `#[repr(C)]` struct's fields keep their C\n\
             spelling."
         }
+        "restated_field_default" => {
+            "A struct literal writes a field with exactly the value the field\n\
+            declares as its default (`result: 0` where the struct says\n\
+            `result: u32 = 0`). A literal that leaves the field out takes the\n\
+            default, so the written value says nothing; leave it out, and the\n\
+            literal changes when the default does. `gos lint --fix` drops it."
+        }
+        "redundant_default_derive" => {
+            "`#[derive(Default)]` on a struct whose every field declares a\n\
+            default. Such a struct already answers `T::default()` and `T {}`\n\
+            from its own defaults, so the derive says nothing.\n\
+            `gos lint --fix` drops `Default` from the derive."
+        }
         "non_upper_case_globals" => {
             "A const or static whose name is not `SCREAMING_SNAKE_CASE`, as Rust\n\
             spells them. A single name in a pattern matches the const it names,\n\

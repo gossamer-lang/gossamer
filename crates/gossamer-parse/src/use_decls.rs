@@ -9,10 +9,47 @@ use crate::diagnostic::ParseError;
 use crate::parser::Parser;
 
 impl Parser<'_> {
-    /// Parses a single `use` declaration after the `use` keyword has been seen.
-    pub(crate) fn parse_use_decl(&mut self) -> UseDecl {
+    /// Parses a `use` declaration at the `use` keyword. A grouped
+    /// `use { a::B, c::{d, e} }` answers one declaration per entry, each
+    /// numbered with the group it was written in.
+    pub(crate) fn parse_use_decls(&mut self) -> Vec<UseDecl> {
         let start_span = self.peek_span();
         self.bump();
+        if !self.at_punct(Punct::LBrace) {
+            let decl = self.parse_use_body(start_span);
+            self.reject_trailing_semicolon();
+            return vec![decl];
+        }
+        let group = self.use_groups;
+        self.use_groups += 1;
+        let mut decls = Vec::new();
+        self.parse_use_group(group, &mut decls);
+        self.reject_trailing_semicolon();
+        decls
+    }
+
+    /// Parses a brace group of `use` entries at its `{`, each nested group
+    /// adding its entries to the same `group`.
+    fn parse_use_group(&mut self, group: u32, decls: &mut Vec<UseDecl>) {
+        self.bump();
+        while !self.at_punct(Punct::RBrace) && !self.at_eof() {
+            if self.at_punct(Punct::LBrace) {
+                self.parse_use_group(group, decls);
+            } else {
+                let mut decl = self.parse_use_body(self.peek_span());
+                decl.group = Some(group);
+                decls.push(decl);
+            }
+            if !self.eat_list_separator() {
+                break;
+            }
+        }
+        self.expect_punct(Punct::RBrace, "to close `use` group");
+    }
+
+    /// Parses what follows `use` in a single declaration, or one entry of
+    /// a group, starting at `start_span`.
+    fn parse_use_body(&mut self, start_span: gossamer_lex::Span) -> UseDecl {
         let target = if matches!(self.peek().kind, TokenKind::StringLit) {
             self.parse_project_use_target()
         } else {
@@ -23,10 +60,12 @@ impl Parser<'_> {
         } else {
             None
         };
+        let mut list_follows = false;
         if self.at_punct(Punct::ColonColon)
             && matches!(self.peek_nth(1).kind, TokenKind::Punct(Punct::LBrace))
         {
             self.bump();
+            list_follows = true;
         }
         let glob = self.at_punct(Punct::ColonColon)
             && matches!(self.peek_nth(1).kind, TokenKind::Punct(Punct::Star));
@@ -34,12 +73,14 @@ impl Parser<'_> {
             self.bump();
             self.bump();
         }
-        let list = if self.at_punct(Punct::LBrace) {
+        // A `{` on a later line without `::` opens the next entry of an
+        // enclosing group, not this path's list.
+        let list = if self.at_punct(Punct::LBrace) && (list_follows || !self.newline_before_peek())
+        {
             Some(self.parse_use_list())
         } else {
             None
         };
-        self.reject_trailing_semicolon();
         let end_span = self.last_span();
         let span = self.join(start_span, end_span);
         let id = self.alloc_id();
@@ -52,6 +93,7 @@ impl Parser<'_> {
             module: self.mod_stack.clone(),
             cfg: None,
             glob,
+            group: None,
         }
     }
 
@@ -80,10 +122,10 @@ impl Parser<'_> {
         saw_attribute && matches!(self.peek_nth(index).kind, TokenKind::Keyword(Keyword::Use))
     }
 
-    /// `#[cfg(..)] use ..`: the declaration with the conjunction of its
+    /// `#[cfg(..)] use ..`: the declarations with the conjunction of its
     /// `cfg` attributes. Other attributes on an import mean nothing and are
     /// dropped.
-    pub(crate) fn parse_attributed_use(&mut self) -> UseDecl {
+    pub(crate) fn parse_attributed_use(&mut self) -> Vec<UseDecl> {
         let attrs = self.parse_attrs();
         let conditions: Vec<String> = attrs
             .outer
@@ -91,13 +133,16 @@ impl Parser<'_> {
             .filter(|attr| attr.is_named("cfg"))
             .filter_map(|attr| attr.tokens.clone())
             .collect();
-        let mut decl = self.parse_use_decl();
-        decl.cfg = match conditions.as_slice() {
+        let cfg = match conditions.as_slice() {
             [] => None,
             [one] => Some(one.clone()),
             many => Some(format!("all({})", many.join(", "))),
         };
-        decl
+        let mut decls = self.parse_use_decls();
+        for decl in &mut decls {
+            decl.cfg.clone_from(&cfg);
+        }
+        decls
     }
 
     fn parse_project_use_target(&mut self) -> UseTarget {

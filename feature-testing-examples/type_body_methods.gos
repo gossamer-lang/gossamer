@@ -1,0 +1,83 @@
+// A type's methods and trait implementations may sit in its declaration: a
+// body function whose name one listed trait declares implements that trait,
+// and any other is an inherent method. The two forms are one declaration.
+
+trait Bench {
+    fn run(&mut self, iteration: i64)
+    fn checksum(&self) -> u32
+    fn name(&self) -> String { "bench" }
+}
+
+trait Area { fn area(&self) -> f64 }
+
+pub struct Sieve: Bench {
+    limit: i64
+    result: u32 = 0
+
+    fn run(&mut self, iteration: i64) { self.result +%= (self.limit + iteration) as u32 }
+    fn checksum(&self) -> u32 { self.result }
+    fn doubled(&self) -> i64 { self.limit * 2 }
+}
+
+enum Shape: Area + Display {
+    Circle(f64)
+    Rect { w: f64, h: f64 }
+
+    fn area(&self) -> f64 {
+        match self {
+            Shape::Circle(r) => 3.0 * r * r
+            Shape::Rect { w, h } => w * h
+        }
+    }
+
+    fn fmt(&self) -> String {
+        match self {
+            Shape::Circle(r) => f"circle({r})"
+            Shape::Rect { w, h } => f"rect({w}x{h})"
+        }
+    }
+}
+
+struct Pair(i64, i64): Display {
+    fn fmt(&self) -> String { f"<{self.0}, {self.1}>" }
+}
+
+struct Countdown<T>: Iterator {
+    items: Vec<T>
+    type Item = T
+    fn next(&mut self) -> Option<T> { self.items.pop() }
+}
+
+struct Marker: Display {
+    fn fmt(&self) -> String { "marker" }
+}
+
+// Associated functions and methods over scalars, written in the body, are
+// what a compiled tier lowers like any other.
+struct Step {
+    fn next(i: i64) -> i64 { (i * 7 + 3) % 11 }
+    fn spin(n: i64) -> i64 {
+        let mut sum = 0
+        for i in 0..n { sum += Step::next(i) }
+        sum
+    }
+}
+
+fn total<B: Bench>(b: &mut B) -> u32 {
+    b.run(1)
+    b.checksum()
+}
+
+fn main() {
+    let mut s = Sieve { limit: 5 }
+    s.run(0)
+    println(f"{s.checksum()} {s.doubled()} {s.name()} {total(&mut s)}")
+    let shapes = #[Shape::Circle(2.0), Shape::Rect { w: 2.0, h: 3.0 }]
+    for shape in shapes { println(f"{shape} {shape.area()}") }
+    println(f"{Pair(1, 2)} {Marker {}}")
+    let down = Countdown { items: #[1, 2, 3] }
+    let mut seen: Vec<i64> = #[]
+    for x in down { seen.push(x) }
+    println(seen)
+    println(Step::spin(1000))
+}

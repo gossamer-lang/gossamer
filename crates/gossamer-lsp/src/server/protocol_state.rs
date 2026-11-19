@@ -1083,6 +1083,14 @@ impl ServerState {
                 .def(*def)
                 .map_or(Value::Null, |info| self.unit_location(doc, info.name_span)),
             Locate::Binding { name_span, .. } => self.unit_location(doc, *name_span),
+            Locate::Field { name, owner_id, .. } => {
+                crate::members::receiver_type(doc, *owner_id)
+                    .and_then(|ty| crate::members::member_of(doc, &ty, name))
+                    .map_or_else(
+                        || self.definition_by_name(doc, offset),
+                        |member| self.unit_location(doc, member.name_span),
+                    )
+            }
             _ => self.definition_by_name(doc, offset),
         }
     }
@@ -1496,6 +1504,17 @@ impl ServerState {
     }
 
     fn references_spans(&self, doc: &DocumentAnalysis, offset: u32) -> Vec<Span> {
+        // A method or field: named through receivers of its type.
+        let member = match self.cursor(doc, offset) {
+            Some(Locate::Field { name, owner_id, .. }) => {
+                crate::members::receiver_type(doc, owner_id).map(|ty| (ty, name))
+            }
+            Some(_) => None,
+            None => crate::members::declared_member_at(doc, offset),
+        };
+        if let Some((ty, name)) = member {
+            return crate::members::member_references(doc, &ty, &name);
+        }
         let Some(loc) = self.cursor(doc, offset) else {
             return Vec::new();
         };

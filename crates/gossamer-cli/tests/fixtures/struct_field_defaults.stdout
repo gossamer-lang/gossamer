@@ -1,0 +1,9 @@
+10 0 228 sieve #[3]
+20 7 7 custom #[]
+80 false #["a", "b"] 80 120 #["a", "b"]
+rect 3 1
+rect 2 4
+circle 1
+#["x"] 1
+1.5 2.5 none 1 9 set
+Sieve { limit: 10, result: 0, rng: Rng { state: 228 }, label: "sieve", seen: #[3] }

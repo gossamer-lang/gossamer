@@ -979,17 +979,14 @@ pub(super) fn lower_statement(
                         };
                         // A packed struct spans its packed size, which is what
                         // the rvalue lowering allocates for it.
+                        // A packed struct, a generic one's instantiation
+                        // included, is named by the destination's type.
+                        let dest_ty = resolve_place_ty(tcx, body, place);
                         let packed_words = match kind {
-                            gossamer_mir::AggregateKind::Adt { def, .. } => Some(*def),
-                            gossamer_mir::AggregateKind::Tuple => {
-                                match tcx.kind_of(body.local_ty(place.local)) {
-                                    TyKind::Adt { def, .. } => Some(*def),
-                                    _ => None,
-                                }
-                            }
+                            gossamer_mir::AggregateKind::Adt { .. }
+                            | gossamer_mir::AggregateKind::Tuple => tcx.packed_layout(dest_ty),
                             gossamer_mir::AggregateKind::Array => None,
                         }
-                        .and_then(|def| tcx.packed_struct_layout(def))
                         .map(|layout| layout.size / 8);
                         let total = match kind {
                             _ if packed_words.is_some() => packed_words.unwrap_or(1),

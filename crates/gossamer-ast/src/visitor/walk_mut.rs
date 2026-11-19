@@ -66,6 +66,7 @@ fn walk_fn_decl_mut<V: VisitorMut + ?Sized>(visitor: &mut V, decl: &mut FnDecl) 
 
 fn walk_struct_decl_mut<V: VisitorMut + ?Sized>(visitor: &mut V, decl: &mut StructDecl) {
     walk_struct_body_mut(visitor, &mut decl.body);
+    walk_impl_items_mut(visitor, &mut decl.items);
 }
 
 fn walk_struct_body_mut<V: VisitorMut + ?Sized>(visitor: &mut V, body: &mut StructBody) {
@@ -91,6 +92,7 @@ fn walk_enum_decl_mut<V: VisitorMut + ?Sized>(visitor: &mut V, decl: &mut EnumDe
             visitor.visit_expr(disc);
         }
     }
+    walk_impl_items_mut(visitor, &mut decl.items);
 }
 
 fn walk_trait_decl_mut<V: VisitorMut + ?Sized>(visitor: &mut V, decl: &mut TraitDecl) {
@@ -118,7 +120,13 @@ fn walk_trait_item_mut<V: VisitorMut + ?Sized>(visitor: &mut V, item: &mut Trait
 
 fn walk_impl_decl_mut<V: VisitorMut + ?Sized>(visitor: &mut V, decl: &mut ImplDecl) {
     visitor.visit_type(&mut decl.self_ty);
-    for item in &mut decl.items {
+    walk_impl_items_mut(visitor, &mut decl.items);
+}
+
+/// The items of an `impl` block, or of a type's body before its items move
+/// into the blocks they stand for.
+fn walk_impl_items_mut<V: VisitorMut + ?Sized>(visitor: &mut V, items: &mut [ImplItem]) {
+    for item in items {
         match item {
             ImplItem::Fn(fn_decl) => walk_fn_decl_mut(visitor, fn_decl),
             ImplItem::Type { ty, .. } => visitor.visit_type(ty),

@@ -18,6 +18,7 @@
 mod def_id;
 mod diagnostic;
 mod external;
+mod field_defaults;
 mod named_args;
 mod numeric_limits;
 mod patterns;
@@ -33,6 +34,7 @@ pub use gossamer_ast::cfg::{
 
 pub use def_id::{CrateId, DefId, DefIdGenerator, DefKind, ModId};
 pub use diagnostic::{ResolveDiagnostic, ResolveError};
+pub use field_defaults::fill_field_defaults;
 pub use named_args::{
     DeferredMethodCall, StdParam, StdParams, resolve_deferred_method_arguments,
     resolve_named_arguments,

@@ -1,0 +1,18 @@
+// ERROR: GM0003
+struct Bag {
+    items: Vec<String>
+}
+
+impl Bag {
+    fn add(&mut self, i: i64) {
+        self.items.push(f"item-{i}")
+    }
+}
+
+fn main() {
+    let mut bag = Bag { items: #[] }
+    arena {
+        bag.add(1)
+    }
+    println(bag.items.len())
+}

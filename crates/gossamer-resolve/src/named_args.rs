@@ -713,8 +713,25 @@ fn apply(
 /// a name in the default means what it means where the function is
 /// declared, whatever the call site has in scope.
 fn fresh_copy(expr: &Expr, ids: &mut NodeIdGenerator, resolutions: &mut Resolutions) -> Expr {
+    fresh_copy_with_labels(expr, ids, resolutions, None)
+}
+
+/// [`fresh_copy`], also giving each copied call the argument labels its
+/// original carries in `labels`, so the copy is rewritten like a call
+/// written where it lands.
+pub(crate) fn fresh_copy_with_labels(
+    expr: &Expr,
+    ids: &mut NodeIdGenerator,
+    resolutions: &mut Resolutions,
+    labels: Option<&mut HashMap<NodeId, Vec<gossamer_ast::NamedArg>>>,
+) -> Expr {
     let mut copy = expr.clone();
-    let mut renumber = Renumber { ids, resolutions };
+    let mut renumber = Renumber {
+        ids,
+        resolutions,
+        labels,
+        bindings: HashMap::new(),
+    };
     renumber.visit_expr(&mut copy);
     copy
 }
@@ -722,16 +739,40 @@ fn fresh_copy(expr: &Expr, ids: &mut NodeIdGenerator, resolutions: &mut Resoluti
 struct Renumber<'a> {
     ids: &'a mut NodeIdGenerator,
     resolutions: &'a mut Resolutions,
+    labels: Option<&'a mut HashMap<NodeId, Vec<gossamer_ast::NamedArg>>>,
+    /// Each pattern the copy binds through, by its original id, so a name
+    /// bound inside the copy reads the copy's own binding.
+    bindings: HashMap<NodeId, NodeId>,
 }
 
 impl VisitorMut for Renumber<'_> {
+    fn visit_pattern(&mut self, pattern: &mut gossamer_ast::Pattern) {
+        let copy = self.ids.next();
+        if let Some(resolution) = self.resolutions.get(pattern.id) {
+            self.resolutions.insert(copy, resolution);
+        }
+        self.bindings.insert(pattern.id, copy);
+        pattern.id = copy;
+        gossamer_ast::visitor::walk_pattern_mut(self, pattern);
+    }
+
     fn visit_expr(&mut self, expr: &mut Expr) {
         let copy = self.ids.next();
-        if let Some(resolution) = self.resolutions.get(expr.id) {
-            self.resolutions.insert(copy, resolution);
+        match self.resolutions.get(expr.id) {
+            Some(Resolution::Local(binding)) if self.bindings.contains_key(&binding) => {
+                self.resolutions
+                    .insert(copy, Resolution::Local(self.bindings[&binding]));
+            }
+            Some(resolution) => self.resolutions.insert(copy, resolution),
+            None => {}
         }
         if let Some(def) = self.resolutions.import_def(expr.id) {
             self.resolutions.insert_import_def(copy, def);
+        }
+        if let Some(labels) = self.labels.as_deref_mut()
+            && let Some(written) = labels.get(&expr.id).cloned()
+        {
+            labels.insert(copy, written);
         }
         if let ExprKind::Path(path) | ExprKind::Struct { path, .. } = &mut expr.kind {
             spell_from_root(path, expr.id, self.resolutions);
@@ -1240,7 +1281,7 @@ impl DefaultScope<'_> {
 }
 
 /// The definition the path at `node` names, through an import if need be.
-fn target_def(node: NodeId, resolutions: &Resolutions) -> Option<DefId> {
+pub(crate) fn target_def(node: NodeId, resolutions: &Resolutions) -> Option<DefId> {
     match resolutions.get(node)? {
         Resolution::Def { def, .. } => Some(def),
         Resolution::Import { .. } => resolutions.import_def(node),
@@ -1322,7 +1363,7 @@ fn binding_name(pattern: &gossamer_ast::Pattern) -> String {
 
 /// The head name of an `impl` block's self type, used to match a
 /// `Type::assoc(..)` path against the impl that declares it.
-fn type_head_name(ty: &Type) -> String {
+pub(crate) fn type_head_name(ty: &Type) -> String {
     match &ty.kind {
         TypeKind::Path(path) => path
             .segments

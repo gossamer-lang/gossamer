@@ -2574,10 +2574,12 @@ impl<'a> Builder<'a> {
         use gossamer_types::TyKind;
         match self.tcx.kind_of(ty) {
             TyKind::Tuple(elems) => Some(elems.clone()),
-            TyKind::Adt { def, .. }
+            // An instantiation's own fields: a generic struct's declared ones
+            // name its parameters, which no descriptor describes.
+            TyKind::Adt { def, substs }
                 if def.local < u32::MAX - 16 && !self.tcx.is_inline_enum_ty(ty) =>
             {
-                self.tcx.struct_field_tys(*def).map(<[Ty]>::to_vec)
+                self.tcx.adt_field_tys(*def, substs).map(<[Ty]>::to_vec)
             }
             _ => None,
         }
@@ -2586,10 +2588,22 @@ impl<'a> Builder<'a> {
     /// The [`gossamer_abi::DESC_PACKED`] ordering descriptor of a packed
     /// struct, or `None` for a type that keeps one word per field.
     pub(crate) fn packed_ordering_stream(&self, ty: Ty) -> Option<Vec<u8>> {
-        use gossamer_abi::packed_leaf;
-        use gossamer_types::{IntTy, TyKind};
+        self.packed_ordering_stream_in(ty, &[], 0, 0)
+    }
+
+    /// [`Self::packed_ordering_stream`] for a descriptor that begins at byte
+    /// `at` of the whole stream, `depth` deep inside the `enclosing` enums.
+    fn packed_ordering_stream_in(
+        &self,
+        ty: Ty,
+        enclosing: &[Enclosing],
+        at: usize,
+        depth: u32,
+    ) -> Option<Vec<u8>> {
         let layout = self.tcx.packed_layout(ty)?;
-        let leaves = self.tcx.packed_leaves(ty)?;
+        let Some(leaves) = self.tcx.packed_leaves(ty) else {
+            return self.packed_ordering_stream_with_nested(ty, &layout, enclosing, at, depth);
+        };
         let mut out = vec![
             gossamer_abi::DESC_PACKED,
             u8::try_from(layout.size / 8).ok()?,
@@ -2597,21 +2611,71 @@ impl<'a> Builder<'a> {
         ];
         for (offset, leaf) in leaves {
             out.extend(u16::try_from(offset).ok()?.to_le_bytes());
-            out.push(match self.tcx.kind_of(leaf) {
-                TyKind::Bool => packed_leaf::BOOL,
-                TyKind::Char => packed_leaf::CHAR,
-                TyKind::Float(_) => packed_leaf::FLOAT,
-                TyKind::Int(IntTy::I8) => packed_leaf::I8,
-                TyKind::Int(IntTy::U8) => packed_leaf::U8,
-                TyKind::Int(IntTy::I16) => packed_leaf::I16,
-                TyKind::Int(IntTy::U16) => packed_leaf::U16,
-                TyKind::Int(IntTy::I32) => packed_leaf::I32,
-                TyKind::Int(IntTy::U32) => packed_leaf::U32,
-                TyKind::Int(IntTy::U64 | IntTy::Usize) => packed_leaf::U64,
-                _ => packed_leaf::I64,
-            });
+            out.push(self.packed_leaf_kind(leaf));
         }
         Some(out)
+    }
+
+    /// The [`gossamer_abi::DESC_PACKED`] descriptor of a packed struct that
+    /// holds more than scalars: its scalar fields as leaves at their offsets,
+    /// every other field as a nested leaf carrying the field's own
+    /// descriptor, in declaration order.
+    fn packed_ordering_stream_with_nested(
+        &self,
+        ty: Ty,
+        layout: &gossamer_types::PackedLayout,
+        enclosing: &[Enclosing],
+        at: usize,
+        depth: u32,
+    ) -> Option<Vec<u8>> {
+        let gossamer_types::TyKind::Adt { def, substs } = self.tcx.kind_of(ty) else {
+            return None;
+        };
+        let fields = self.tcx.adt_field_tys(*def, substs)?.to_vec();
+        let mut out = vec![
+            gossamer_abi::DESC_PACKED,
+            u8::try_from(layout.size / 8).ok()?,
+            u8::try_from(fields.len()).ok()?,
+        ];
+        for (index, (field, offset)) in fields.iter().zip(&layout.field_offsets).enumerate() {
+            out.extend(u16::try_from(*offset).ok()?.to_le_bytes());
+            if self.tcx.packed_scalar_bytes(*field).is_some() {
+                out.push(self.packed_leaf_kind(*field));
+            } else {
+                // The field's own descriptor, placed where it begins in the
+                // whole stream, so a type that reaches itself refers back to
+                // its enclosing entry or meets the depth bound. An `Option`
+                // held in one word names the carrier it stands for.
+                out.push(if self.tcx.is_niche_field(ty, index) {
+                    gossamer_abi::packed_leaf::NICHE
+                } else {
+                    gossamer_abi::packed_leaf::NESTED
+                });
+                let nested =
+                    self.ordering_stream_inner(*field, enclosing, at + out.len(), depth + 1)?;
+                out.extend(nested);
+            }
+        }
+        Some(out)
+    }
+
+    /// How a scalar leaf of a packed struct is stored and ordered.
+    fn packed_leaf_kind(&self, leaf: Ty) -> u8 {
+        use gossamer_abi::packed_leaf;
+        use gossamer_types::{IntTy, TyKind};
+        match self.tcx.kind_of(leaf) {
+            TyKind::Bool => packed_leaf::BOOL,
+            TyKind::Char => packed_leaf::CHAR,
+            TyKind::Float(_) => packed_leaf::FLOAT,
+            TyKind::Int(IntTy::I8) => packed_leaf::I8,
+            TyKind::Int(IntTy::U8) => packed_leaf::U8,
+            TyKind::Int(IntTy::I16) => packed_leaf::I16,
+            TyKind::Int(IntTy::U16) => packed_leaf::U16,
+            TyKind::Int(IntTy::I32) => packed_leaf::I32,
+            TyKind::Int(IntTy::U32) => packed_leaf::U32,
+            TyKind::Int(IntTy::U64 | IntTy::Usize) => packed_leaf::U64,
+            _ => packed_leaf::I64,
+        }
     }
 
     pub(crate) fn tuple_stream_tags(&self, ty: Ty) -> Option<Vec<u8>> {
@@ -2806,7 +2870,7 @@ impl<'a> Builder<'a> {
                     });
                     return self.flat_enum_ordering_stream(&layout, &inner, at, depth);
                 }
-                if let Some(stream) = self.packed_ordering_stream(peeled) {
+                if let Some(stream) = self.packed_ordering_stream_in(peeled, enclosing, at, depth) {
                     return Some(stream);
                 }
                 if let Some(fields) = self.tcx.adt_field_tys(def, &substs) {

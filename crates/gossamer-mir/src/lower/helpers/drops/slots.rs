@@ -180,11 +180,23 @@ pub(super) fn collect_slot_rc_children(
         }
         _ => return,
     };
-    let mut word = base_word;
-    for fty in field_tys {
+    let packed = tcx.packed_field_words(ty);
+    let mut next = base_word;
+    for (index, fty) in field_tys.into_iter().enumerate() {
         let fwords = i64::from(tcx.slot_bytes(fty).max(8) / 8);
+        // A packed struct places each field other than a scalar at a
+        // word of its own layout.
+        let word = packed
+            .as_ref()
+            .and_then(|words| words.get(index))
+            .map_or(next, |at| base_word + at);
+        next += fwords;
+        // An `Option` held in one word is its `Some` payload's blob, or null.
+        if tcx.is_niche_field(ty, index) {
+            out.push((-1, 0, word, SLOT_KIND_RC_NODE));
+            continue;
+        }
         collect_field_rc(tcx, fty, word, depth, out, has_direct);
-        word += fwords;
     }
 }
 

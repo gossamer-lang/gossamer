@@ -43,3 +43,34 @@ pub fn names() -> impl ExactSizeIterator<Item = &'static str> {
 pub fn entries() -> impl ExactSizeIterator<Item = (&'static str, *const ())> {
     GENERATED.iter().map(|entry| (entry.name, entry.addr.0))
 }
+
+/// Every runtime data symbol compiled code reads, with its address: the
+/// preemption request byte each loop poll tests, and the state an inline
+/// retain or release reads before it touches a header (see
+/// [`gossamer_abi::rc::header`]).
+#[must_use]
+pub fn data_entries() -> [(&'static str, *const u8); 5] {
+    use gossamer_abi::rc::header;
+    [
+        (
+            "gos_rt_preempt_requested",
+            std::ptr::from_ref(&crate::preempt::PREEMPT_REQUESTED).cast(),
+        ),
+        (
+            header::INSTRUMENTATION_SYMBOL,
+            std::ptr::from_ref(&crate::c_abi::ledger::INSTRUMENTATION).cast(),
+        ),
+        (
+            header::REGION_ARENA_BASE_SYMBOL,
+            std::ptr::from_ref(&crate::c_abi::rc::region::REGION_ARENA_BASE).cast(),
+        ),
+        (
+            header::REGION_ARENA_LEN_SYMBOL,
+            std::ptr::from_ref(&crate::c_abi::rc::region::REGION_ARENA_LEN).cast(),
+        ),
+        (
+            header::META_ACYCLIC_SYMBOL,
+            std::ptr::from_ref(&crate::c_abi::rc::META_ACYCLIC).cast(),
+        ),
+    ]
+}

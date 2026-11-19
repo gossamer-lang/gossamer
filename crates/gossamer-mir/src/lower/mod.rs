@@ -157,6 +157,35 @@ fn field_fits_inline(tcx: &TyCtxt, ty: gossamer_types::Ty) -> bool {
     )
 }
 
+/// Records the fields of every concrete generic struct type the front end
+/// named and admits each to pack. Every layout read after this sees the same
+/// answer for them; an instantiation lowering first meets later keeps one
+/// word per field throughout.
+fn admit_packed_instances(tcx: &mut TyCtxt) {
+    let instances: Vec<(Ty, gossamer_resolve::DefId, gossamer_types::Substs)> = tcx
+        .interned_tys()
+        .filter_map(|ty| match tcx.kind_of(ty) {
+            gossamer_types::TyKind::Adt { def, substs }
+                if !substs.as_slice().is_empty()
+                    && def.local < u32::MAX - 16
+                    && tcx.struct_field_tys(*def).is_some()
+                    && !tcx.ty_contains_param(ty) =>
+            {
+                Some((ty, *def, substs.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    let admitted: Vec<Ty> = instances
+        .into_iter()
+        .filter(|(_, def, substs)| {
+            crate::monomorph::instance_field_tys(tcx, *def, substs).is_some()
+        })
+        .map(|(ty, _, _)| ty)
+        .collect();
+    tcx.admit_packed_instances(admitted);
+}
+
 /// Lower an entire HIR program to MIR `Body`s, one per top-level function.
 pub fn lower_program(program: &HirProgram, tcx: &mut TyCtxt) -> Vec<Body> {
     // A struct holding a generic instantiation (`n: InlineVec<i64, 8>`) is
@@ -164,6 +193,7 @@ pub fn lower_program(program: &HirProgram, tcx: &mut TyCtxt) -> Vec<Body> {
     // names is recorded before any layout is read.
     let roots = tcx.declared_field_tys();
     crate::monomorph::register_type_instantiations(tcx, roots);
+    admit_packed_instances(tcx);
     crate::opt::intern_row_table_types(tcx);
     let tables = ProgramTables::collect(program, tcx);
     let mut bodies = Vec::new();
@@ -273,6 +303,7 @@ fn keep_word_fields_where_required(
 }
 
 /// What a `&mut <place>.field` borrow says about the struct holding the field.
+/// A narrow scalar and an `Option` held in one word both answer for it.
 enum NarrowBorrow {
     /// The expression borrows no narrow field.
     None,
@@ -305,7 +336,7 @@ fn narrow_field_borrow(expr: &HirExpr, tcx: &TyCtxt) -> NarrowBorrow {
             )
             | TyKind::Var(_)
             | TyKind::Error
-    );
+    ) || tcx.is_niche_option(operand.ty);
     if !narrow {
         return NarrowBorrow::None;
     }
@@ -818,6 +849,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut Vec<Body>, start: usize, tcx: &
         crate::opt::elide_vec_clone_in_three_way_swaps(body);
         crate::opt::elide_vec_clone_of_fresh_temporary(body, tcx);
         crate::opt::elide_vec_clone_of_dead_aggregate_source(body, &user_fn_names);
+        crate::opt::compact_nested_vecs_on_outliving_store(body, tcx);
         crate::opt::move_vec_clone_of_dead_local(body, tcx, &user_fn_names);
         crate::opt::share_read_only_vec_bindings(body, tcx);
         // Follows the drop passes, so the carrier releases they place are part
@@ -911,6 +943,11 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut Vec<Body>, start: usize, tcx: &
         tcx,
         crate::opt::narrow_slot_calls_to_blob_arms,
     );
+    // After every pass that reads or writes a struct's fields as carriers,
+    // so each of them sees an `Option` field as the carrier it stands for.
+    for body in &mut bodies[start..] {
+        niche_fields::encode_niche_fields(body, tcx);
+    }
     // Last, so a closure it copies is copied whole and finished.
     address_params::mark_carrier_address_params(bodies, start, tcx);
     #[cfg(debug_assertions)]
@@ -925,6 +962,7 @@ pub(crate) mod flat_carriers;
 pub(crate) mod flat_enums;
 pub mod helpers;
 pub(crate) mod instantiate;
+mod niche_fields;
 
 pub(crate) use builder::Builder;
 pub use helpers::*;

@@ -1647,27 +1647,29 @@ impl TypeChecker<'_> {
     }
 
     /// Declared field types of the enum struct-variant `path` names on the
-    /// `resolved` scrutinee enum, or `None` when the pattern is a plain
-    /// struct pattern. Generic enums are excluded: their stored field types
-    /// mention un-substituted parameters.
+    /// `resolved` scrutinee enum, at the scrutinee's type arguments, or
+    /// `None` when the pattern is a plain struct pattern.
     pub(super) fn struct_variant_field_tys(
         &mut self,
         path: &gossamer_ast::Path,
         resolved: Ty,
     ) -> Option<HashMap<String, Ty>> {
-        let TyKind::Adt { def, substs } = self.tcx.kind(resolved)? else {
+        let TyKind::Adt { def, substs } = self.tcx.kind(resolved)?.clone() else {
             return None;
         };
-        if !substs.types().is_empty() {
-            return None;
-        }
-        let enum_name = self.tcx.def_name(*def)?.to_string();
+        let enum_name = self.tcx.def_name(def)?.to_string();
         let variant = path.segments.last()?.name.name.clone();
         let fields = self
             .enum_variant_named_payloads
             .get(&(enum_name, variant))?
             .clone();
-        Some(fields.into_iter().collect())
+        let args = substs.types();
+        Some(
+            fields
+                .into_iter()
+                .map(|(name, ty)| (name, self.subst_params_in_ty(ty, &args)))
+                .collect(),
+        )
     }
 
     /// Type a payload field binds at when it is reached through a reference

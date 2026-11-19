@@ -882,29 +882,7 @@ fn substs_contain_param(tcx: &TyCtxt, substs: &Substs) -> bool {
 
 /// `true` if `ty` mentions a generic `Param` anywhere in its structure.
 fn ty_contains_param(tcx: &TyCtxt, ty: Ty) -> bool {
-    match tcx.kind_of(ty) {
-        TyKind::Param { .. } => true,
-        TyKind::Ref { inner, .. }
-        | TyKind::Vec(inner)
-        | TyKind::Slice(inner)
-        | TyKind::Sender(inner)
-        | TyKind::Receiver(inner)
-        | TyKind::JoinHandle(inner) => ty_contains_param(tcx, *inner),
-        TyKind::Array { elem, .. } => ty_contains_param(tcx, *elem),
-        TyKind::Tuple(elems) => elems.iter().any(|t| ty_contains_param(tcx, *t)),
-        TyKind::HashMap { key, value, .. } => {
-            ty_contains_param(tcx, *key) || ty_contains_param(tcx, *value)
-        }
-        TyKind::Adt { substs, .. } | TyKind::Alias { substs, .. } => {
-            substs_contain_param(tcx, substs)
-        }
-        TyKind::Iterator(inner) => ty_contains_param(tcx, *inner),
-        TyKind::FnPtr(sig) | TyKind::FnTrait(sig) => {
-            sig.inputs.iter().any(|t| ty_contains_param(tcx, *t))
-                || ty_contains_param(tcx, sig.output)
-        }
-        _ => false,
-    }
+    tcx.ty_contains_param(ty)
 }
 
 /// Binds every type parameter `template` names to the type `actual` holds in

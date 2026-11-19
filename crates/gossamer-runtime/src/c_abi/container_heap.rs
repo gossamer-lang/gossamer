@@ -1101,9 +1101,109 @@ unsafe fn heap_sift_down_desc(v: &GosVec, len: usize, start: usize, tags: *const
     sift_under_plan!(tags, sift_down_by(v, len, start, max));
 }
 
+/// The words an element of `vec` takes when the heap orders it as one to
+/// four whole signed words and it owns nothing, so it moves as plain words:
+/// `None` for any other element.
+///
+/// # Safety
+/// `tags` is null or a compiler-emitted ordering descriptor.
+unsafe fn plain_int_words(vec: &GosVec, tags: *const u8) -> Option<usize> {
+    use crate::c_abi::desc_cmp::CmpPlan;
+    // SAFETY: `tags` is null or a descriptor (contract), which `plan_cmp` accepts.
+    let words = match unsafe { crate::c_abi::desc_cmp::plan_cmp(tags) } {
+        CmpPlan::IntWord => 1,
+        CmpPlan::IntTuple(n) => n,
+        _ => return None,
+    };
+    let plain = matches!(
+        vec.elem_kind,
+        crate::c_abi::vec::vec_elem_kind::PRIMITIVE | crate::c_abi::vec::vec_elem_kind::SIGNED
+    );
+    (plain && (1..=4).contains(&words) && vec.elem_bytes as usize == words * 8).then_some(words)
+}
+
+/// Pushes `elem` into spare capacity and sifts it up, as whole words.
+/// Answers false, leaving the heap as it was, when the buffer is full.
+///
+/// # Safety
+/// `vec` holds `W`-word plain elements, and `elem` addresses one.
+unsafe fn push_int_words<const W: usize, const MAX: bool>(
+    vec: &mut GosVec,
+    elem: *const u8,
+) -> bool {
+    if vec.len >= vec.cap || vec.ptr.is_null() {
+        return false;
+    }
+    crate::c_abi::vec::bump_vec_mutation_generation(vec);
+    let at = vec.len as usize;
+    // SAFETY: `at` is below the capacity, so the slot is inside the buffer; `elem` holds `W`
+    // words (contract).
+    unsafe {
+        vec.ptr
+            .add(at * W * 8)
+            .cast::<[i64; W]>()
+            .write_unaligned(elem.cast::<[i64; W]>().read_unaligned());
+    }
+    vec.len += 1;
+    // SAFETY: the vec holds `W`-word elements and `at` is its last one.
+    unsafe { sift_up_int_words::<W, MAX>(vec, at) };
+    true
+}
+
+/// Takes the root into `out`, moves the last element to the root, and sifts
+/// it down, as whole words.
+///
+/// # Safety
+/// `vec` holds at least one `W`-word plain element, and `out` addresses one.
+unsafe fn pop_int_words<const W: usize, const MAX: bool>(vec: &mut GosVec, out: *mut u8) {
+    crate::c_abi::vec::bump_vec_mutation_generation(vec);
+    let base = vec.ptr.as_ptr();
+    let last = (vec.len - 1) as usize;
+    // SAFETY: slots 0 and `last` are inside the heap, each `W` words.
+    let (root, tail) = unsafe {
+        (
+            base.cast::<[i64; W]>().read_unaligned(),
+            base.add(last * W * 8).cast::<[i64; W]>().read_unaligned(),
+        )
+    };
+    vec.len -= 1;
+    if last > 0 {
+        // SAFETY: slot 0 is inside the heap of `last` elements.
+        unsafe { base.cast::<[i64; W]>().write_unaligned(tail) };
+        // SAFETY: the heap holds `last` `W`-word elements.
+        unsafe { sift_down_int_words::<W, MAX>(vec, last, 0) };
+    }
+    // SAFETY: `out` addresses one element (contract).
+    unsafe { out.cast::<[i64; W]>().write_unaligned(root) };
+}
+
+/// Runs `$op::<W, MAX>($args)` for the word count and direction given.
+macro_rules! by_words {
+    ($words:expr, $max:expr, $op:ident ( $($arg:expr),* )) => {
+        match ($words, $max) {
+            (1, true) => $op::<1, true>($($arg),*),
+            (1, false) => $op::<1, false>($($arg),*),
+            (2, true) => $op::<2, true>($($arg),*),
+            (2, false) => $op::<2, false>($($arg),*),
+            (3, true) => $op::<3, true>($($arg),*),
+            (3, false) => $op::<3, false>($($arg),*),
+            (4, true) => $op::<4, true>($($arg),*),
+            _ => $op::<4, false>($($arg),*),
+        }
+    };
+}
+
 unsafe fn bheap_push_desc(v: *mut GosVec, elem: *const u8, tags: *const u8, max: bool) {
     if v.is_null() || elem.is_null() || tags.is_null() {
         return;
+    }
+    // SAFETY: `v` is non-null (checked above), and this `unsafe fn`'s caller passes a live `Vec`
+    // not otherwise accessed during the call; `tags` is its descriptor.
+    if let Some(words) = unsafe { plain_int_words(&*v, tags) } {
+        // SAFETY: the vec holds `words`-word plain elements, and `elem` is one (contract).
+        if unsafe { by_words!(words, max, push_int_words(&mut *v, elem)) } {
+            return;
+        }
     }
     // SAFETY: this `unsafe fn`'s caller passes `v`, `elem` live; each is checked above or
     // accepted null by `gos_rt_vec_push`.
@@ -1157,6 +1257,13 @@ unsafe fn bheap_pop_desc_into(v: *mut GosVec, tags: *const u8, out: *mut u8, max
     let vec = unsafe { &mut *v };
     if vec.len <= 0 || vec.ptr.is_null() {
         return 1;
+    }
+    // SAFETY: `tags` is the heap's descriptor (this `unsafe fn`'s caller).
+    if let Some(words) = unsafe { plain_int_words(vec, tags) } {
+        // SAFETY: the heap holds at least one `words`-word plain element, and `out` addresses
+        // one.
+        unsafe { by_words!(words, max, pop_int_words(vec, out)) };
+        return 0;
     }
     let last = (vec.len - 1) as usize;
     // SAFETY: `last` is below the vec's length.

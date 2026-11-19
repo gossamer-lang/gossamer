@@ -27,6 +27,15 @@ pub mod types;
 /// target, and room to spare on a 32-bit one.
 pub const VEC_HEADER_BYTES: usize = 64;
 
+/// Byte offset in a `GosVec` header of the pointer to its side record, null
+/// for a vector that has none, on the 64-bit targets compiled code runs on.
+pub const VEC_OWNER_OFFSET: u64 = 40;
+
+/// Byte offset in a vector's side record of its structural mutation count,
+/// which code that grows or shrinks a vector inline advances when the record
+/// exists.
+pub const VEC_OWNER_MUTATION_GENERATION_OFFSET: u64 = 8;
+
 /// Tag byte introducing a nested tuple in a `gos_rt_tuple_format` /
 /// `gos_rt_tuple_cmp` tag stream. The next byte is the nested tuple's
 /// element count, followed by that many tags, recursively. A nested
@@ -161,6 +170,13 @@ pub mod packed_leaf {
     pub const BOOL: u8 = 9;
     /// A `char` in four bytes.
     pub const CHAR: u8 = 10;
+    /// A field other than a scalar, at a word boundary: the leaf is followed
+    /// by the field's own descriptor, which orders the words at its offset.
+    pub const NESTED: u8 = 11;
+    /// An `Option` held in one word: zero for `None`, else the `Some`
+    /// payload. The leaf is followed by the `Option`'s own descriptor, which
+    /// orders the two-word carrier the word stands for.
+    pub const NICHE: u8 = 12;
 }
 
 /// Runtime shims that invoke a gossamer callback through

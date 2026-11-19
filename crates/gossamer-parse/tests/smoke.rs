@@ -613,6 +613,61 @@ fn use_brace_group_accepts_nested_groups() {
     );
 }
 
+/// `use {bench::Bench, config::{Config, Other as O}, helper}` - a group at
+/// the root, as Rust writes one - is one declaration per entry, each with
+/// its own path and all with the same group, written over two lines.
+#[test]
+fn use_group_at_the_root_is_one_declaration_per_entry() {
+    let source = "use {bench::Bench, config::{Config, Other as O},\n    helper}\nuse std::fs\nuse {\n    a\n    {b::C}\n}\n";
+    let mut map = SourceMap::new();
+    let file = map.add_file("root_group.gos", source.to_string());
+    let (sf, diags) = parse_source_file(source, file);
+    assert!(diags.is_empty(), "a root group must parse: {diags:?}");
+    let shapes: Vec<(String, Vec<&str>, Option<u32>)> = sf
+        .uses
+        .iter()
+        .map(|decl| {
+            let gossamer_ast::UseTarget::Module(path) = &decl.target else {
+                panic!("module target expected");
+            };
+            let target = path
+                .segments
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join("::");
+            let list = decl
+                .list
+                .iter()
+                .flatten()
+                .map(|e| e.alias.as_ref().unwrap_or(&e.name).name.as_str())
+                .collect();
+            (target, list, decl.group)
+        })
+        .collect();
+    assert_eq!(
+        shapes,
+        vec![
+            ("bench::Bench".to_string(), vec![], Some(0)),
+            ("config".to_string(), vec!["Config", "O"], Some(0)),
+            ("helper".to_string(), vec![], Some(0)),
+            ("std::fs".to_string(), vec![], None),
+            ("a".to_string(), vec![], Some(1)),
+            ("b::C".to_string(), vec![], Some(1)),
+        ]
+    );
+    let span_text =
+        |i: usize| &source[sf.uses[i].span.start as usize..sf.uses[i].span.end as usize];
+    assert_eq!(span_text(0), "bench::Bench");
+    assert_eq!(span_text(2), "helper");
+    let mut printer = gossamer_ast::Printer::new();
+    printer.print_source_file(&sf);
+    assert_eq!(
+        printer.finish(),
+        "use {bench::Bench, config::{Config, Other as O}, helper}\nuse std::fs\nuse {a, b::C}\n"
+    );
+}
+
 /// A closure step names the slot the piped value fills, including the
 /// non-trailing one that a bare callable cannot reach.
 #[test]
@@ -1358,7 +1413,7 @@ fn a_line_leading_range_in_a_multiline_struct_literal_is_its_base() {
 
 #[test]
 fn positional_and_named_struct_literal_entries_both_end_at_a_newline() {
-    let source = "fn f() -> P {\n    P {\n        a\n        b: 2\n    }\n}\n";
+    let source = "fn f() -> P {\n    P {\n        a + 1\n        b: 2\n        c\n    }\n}\n";
     let mut map = SourceMap::new();
     let file = map.add_file("struct_lines.gos", source.to_string());
     let (sf, diags) = parse_source_file(source, file);
@@ -1374,7 +1429,11 @@ fn positional_and_named_struct_literal_entries_both_end_at_a_newline() {
         panic!("expected a struct literal, got {:?}", tail.kind);
     };
     let names: Vec<&str> = fields.iter().map(|f| f.name.name.as_str()).collect();
-    assert_eq!(names, ["0", "b"]);
+    assert_eq!(names, ["0", "b", "c"]);
+    assert!(
+        fields[2].value.is_none(),
+        "a name alone on its line is shorthand for the binding of that name"
+    );
 }
 
 #[test]

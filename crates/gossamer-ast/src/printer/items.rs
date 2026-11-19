@@ -16,10 +16,34 @@ use super::Printer;
 impl Printer {
     /// Renders a `use` declaration.
     pub fn print_use_decl(&mut self, decl: &UseDecl) {
-        if let Some(cfg) = &decl.cfg {
+        self.print_use_group(std::slice::from_ref(decl));
+    }
+
+    /// Renders `decls` as one `use`: a single declaration as written, the
+    /// entries of one group inside `use { .. }`.
+    pub fn print_use_group(&mut self, decls: &[UseDecl]) {
+        let Some(first) = decls.first() else {
+            return;
+        };
+        if let Some(cfg) = &first.cfg {
             self.write(&format!("#[cfg({cfg})]\n"));
         }
         self.write("use ");
+        if first.group.is_none() {
+            self.write_use_body(first);
+            return;
+        }
+        self.write("{");
+        for (index, decl) in decls.iter().enumerate() {
+            if index > 0 {
+                self.write(", ");
+            }
+            self.write_use_body(decl);
+        }
+        self.write("}");
+    }
+
+    fn write_use_body(&mut self, decl: &UseDecl) {
         self.write_use_target(&decl.target);
         if decl.glob {
             self.write("::*");
@@ -322,6 +346,10 @@ impl Printer {
         }
         self.write(": ");
         self.print_type(&field.ty);
+        if let Some(default) = &field.default {
+            self.write(" = ");
+            self.print_expr(default);
+        }
     }
 
     fn print_tuple_field(&mut self, field: &TupleField) {

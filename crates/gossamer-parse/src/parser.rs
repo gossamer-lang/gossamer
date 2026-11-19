@@ -55,6 +55,9 @@ pub struct Parser<'src> {
     /// file-level `uses` slot, so a `use std::encoding::json` inside
     /// `mod chat { ... }` would otherwise be silently dropped.
     pub(crate) hoisted_uses: Vec<gossamer_ast::UseDecl>,
+    /// Grouped `use { .. }` declarations parsed so far in this file, which
+    /// numbers the next one.
+    pub(crate) use_groups: u32,
     /// The `#![..]` attributes leading the inline module body just parsed,
     /// which belong to the module's item rather than to the item after them.
     pub(crate) module_inner_attrs: Vec<gossamer_ast::Attribute>,
@@ -146,6 +149,7 @@ impl<'src> Parser<'src> {
             recursion_depth: 0,
             recursion_limit_reported: false,
             hoisted_uses: Vec::new(),
+            use_groups: 0,
             module_inner_attrs: Vec::new(),
             mod_stack: Vec::new(),
             named_args: std::collections::HashMap::new(),

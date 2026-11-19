@@ -1,0 +1,8 @@
+// ERROR: GT0128
+
+fn id<T>(x: T) -> T { x }
+
+fn main() {
+    let f = id
+    println(1)
+}

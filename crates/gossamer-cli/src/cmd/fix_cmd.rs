@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
-use gossamer_lint::migrate::{REWRITERS, Rewriter, migrations, rewriter};
+use gossamer_lint::migrate::{REWRITERS, RewriteContext, Rewriter, migrations, rewriter};
 
 use crate::paths::{collect_lint_targets, default_test_root, friendly_io_error, read_source};
 
@@ -34,6 +34,11 @@ pub(crate) fn dispatch(
             } else {
                 r.versions.join(", ")
             };
+            let versions = if r.explicit {
+                "only when named".to_string()
+            } else {
+                versions
+            };
             outln!("  {:<28} {} [{versions}]", r.id, r.summary);
         }
         return Ok(());
@@ -43,7 +48,9 @@ pub(crate) fn dispatch(
         Some(id) => vec![rewriter(id).ok_or_else(|| {
             anyhow!("unknown rewriter `{id}`; `gos fix --list` names the available ones")
         })?],
-        None => REWRITERS.iter().collect(),
+        // A rewrite between two spellings a program may keep runs only when
+        // named.
+        None => REWRITERS.iter().filter(|r| !r.explicit).collect(),
     };
 
     let resolved = match path {
@@ -59,10 +66,21 @@ pub(crate) fn dispatch(
         return Err(anyhow!("no `.gos` sources found"));
     }
 
+    // What each file's rewrite may know of the others: the traits they
+    // declare.
+    let trees: Vec<gossamer_ast::SourceFile> = files
+        .iter()
+        .filter_map(|file| {
+            read_source(file)
+                .ok()
+                .map(|source| parse_reporting(file, &source).0)
+        })
+        .collect();
+    let context = RewriteContext::of(&trees);
     let mut changed = 0usize;
     let mut edits = 0usize;
     for file in &files {
-        match rewrite_file(file, &selected, check)? {
+        match rewrite_file(file, &selected, &context, check)? {
             0 => {}
             n => {
                 changed += 1;
@@ -86,7 +104,12 @@ pub(crate) fn dispatch(
 }
 
 /// Rewrites one file, returning how many edits were kept.
-fn rewrite_file(file: &Path, selected: &[&Rewriter], check: bool) -> Result<usize> {
+fn rewrite_file(
+    file: &Path,
+    selected: &[&Rewriter],
+    context: &RewriteContext,
+    check: bool,
+) -> Result<usize> {
     let source = read_source(file)?;
     let (sf, parses) = parse_reporting(file, &source);
     // A file that does not parse gives a plain rewriter nothing it can safely
@@ -97,7 +120,7 @@ fn rewrite_file(file: &Path, selected: &[&Rewriter], check: bool) -> Result<usiz
         .copied()
         .filter(|r| parses || r.repair_only)
         .collect();
-    let (rewritten, kept) = apply_rewriters(file, &source, &sf, &selected);
+    let (rewritten, kept) = apply_rewriters(file, &source, &sf, context, &selected);
     if kept == 0 || rewritten == source {
         return Ok(0);
     }
@@ -110,7 +133,7 @@ fn rewrite_file(file: &Path, selected: &[&Rewriter], check: bool) -> Result<usiz
     // Idempotence is a property of each rewriter, and re-running the pass
     // over its own output is the cheapest place to notice a lapse.
     let (again, _) = parse_reporting(file, &rewritten);
-    if apply_rewriters(file, &rewritten, &again, &selected).1 > 0 {
+    if apply_rewriters(file, &rewritten, &again, context, &selected).1 > 0 {
         return Err(anyhow!(
             "a rewriter is not idempotent on {}; no file was written",
             file.display()
@@ -129,11 +152,12 @@ fn apply_rewriters(
     file: &Path,
     source: &str,
     sf: &gossamer_ast::SourceFile,
+    context: &RewriteContext,
     selected: &[&Rewriter],
 ) -> (String, usize) {
     let (repairs, plain): (Vec<&Rewriter>, Vec<&Rewriter>) =
         selected.iter().copied().partition(|r| r.repair_only);
-    let fixes = migrations(sf, source, &plain);
+    let fixes = migrations(sf, source, context, &plain);
     let mut kept = fixes.len();
     let mut current = if fixes.is_empty() {
         source.to_string()
@@ -149,7 +173,7 @@ fn apply_rewriters(
     let mut baseline = diagnostics_for(file, &current);
     loop {
         let (tree, _) = parse_reporting(file, &current);
-        let mut candidates = migrations(&tree, &current, &repairs);
+        let mut candidates = migrations(&tree, &current, context, &repairs);
         candidates.sort_by_key(|fix| std::cmp::Reverse(fix.span.start));
         let repaired = candidates.iter().find_map(|fix| {
             let candidate = gossamer_lint::apply_fixes(&current, std::slice::from_ref(fix));

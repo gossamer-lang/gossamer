@@ -516,10 +516,24 @@ pub unsafe extern "C" fn gos_rt_serde_rd_tagged(
 /// used page behind in each class it passes through, on every encode.
 pub const SERDE_WRITER_CAPACITY: usize = 64 * 1024;
 
+/// A writer's buffer holds its text after room for the header of the string
+/// it becomes, so finishing it hands the buffer over instead of copying the
+/// text out.
+const WRITER_PREFIX: usize = super::string::BODY_PREFIX_BYTES;
+
 /// Opens a writer.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_serde_wr_new() -> i64 {
-    ffi_entry!({ Box::into_raw(Box::new(Vec::<u8>::with_capacity(SERDE_WRITER_CAPACITY))) as i64 })
+    ffi_entry!({
+        let mut out = Vec::<u8>::with_capacity(SERDE_WRITER_CAPACITY);
+        out.resize(WRITER_PREFIX, 0);
+        Box::into_raw(Box::new(out)) as i64
+    })
+}
+
+/// The text a finished writer's buffer holds.
+fn written(bytes: &[u8]) -> &[u8] {
+    &bytes[WRITER_PREFIX..]
 }
 
 /// Releases a writer, answering the text written into it.
@@ -532,7 +546,7 @@ pub unsafe extern "C" fn gos_rt_serde_wr_finish(w: i64) -> *mut c_char {
         // SAFETY: the handle is the address `gos_rt_serde_wr_new` leaked,
         // released once.
         let bytes = unsafe { Box::from_raw(w as *mut Vec<u8>) };
-        alloc_cstring(&bytes)
+        super::string::string_from_prefixed(*bytes)
     })
 }
 
@@ -547,7 +561,7 @@ pub unsafe extern "C" fn gos_rt_serde_wr_finish_pretty(w: i64) -> *mut c_char {
         // SAFETY: the handle is the address `gos_rt_serde_wr_new` leaked,
         // released once.
         let bytes = unsafe { Box::from_raw(w as *mut Vec<u8>) };
-        let compact = String::from_utf8_lossy(&bytes);
+        let compact = String::from_utf8_lossy(written(&bytes));
         alloc_cstring(gossamer_core::json::typed::indent_text(&compact).as_bytes())
     })
 }
@@ -556,10 +570,11 @@ pub unsafe extern "C" fn gos_rt_serde_wr_finish_pretty(w: i64) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_serde_wr_raw(w: i64, text: *const c_char) {
     ffi_entry!({
-        // SAFETY: `text` is this shim's String argument.
-        let text = unsafe { text_arg(text) };
+        // SAFETY: `text` is this shim's String argument, appended byte for
+        // byte, so its encoding is the compiler's literal's own.
+        let text = unsafe { super::string::gos_str_arg_bytes(text) };
         // SAFETY: `w` is this shim's writer handle.
-        unsafe { with_writer(w, |out| out.extend_from_slice(text.as_bytes())) };
+        unsafe { with_writer(w, |out| out.extend_from_slice(text)) };
     });
 }
 
@@ -602,7 +617,7 @@ unsafe fn take_writer(w: i64) -> String {
     }
     // SAFETY: the caller's contract.
     let bytes = unsafe { Box::from_raw(w as *mut Vec<u8>) };
-    String::from_utf8_lossy(&bytes).into_owned()
+    String::from_utf8_lossy(written(&bytes)).into_owned()
 }
 
 /// A conversion's text as `Ok`, or its message as an `Err`.
@@ -622,7 +637,7 @@ fn converted_result(converted: Result<String, String>) -> i128 {
 pub unsafe extern "C" fn gos_rt_serde_wr_key(w: i64, text: *const c_char) {
     ffi_entry!({
         // SAFETY: `text` is this shim's String argument.
-        let text = unsafe { text_arg(text) };
+        let text = unsafe { super::string::gos_str_arg_bytes(text) };
         // SAFETY: `w` is this shim's writer handle.
         unsafe {
             with_writer(w, |out| {

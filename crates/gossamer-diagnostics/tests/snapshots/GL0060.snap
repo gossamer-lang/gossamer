@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GL0060]: A struct literal writes a field with exactly the value the field - here
+--- framed ---
+error[GL0060]: A struct literal writes a field with exactly the value the field
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

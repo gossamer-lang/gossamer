@@ -829,11 +829,15 @@ positionally is always accepted.
 
 ```
 StructDecl = [ "pub" ] "struct" Ident [ Generics ] [ StructBody ] [ WhereClause ]
-StructBody = "{" [ FieldList ] "}" | "(" [ TypeList ] ")"
+           | [ "pub" ] "struct" Ident [ Generics ] [ "(" [ TypeList ] ")" ]
+             ":" BoundList [ WhereClause ] TypeBody
+StructBody = "{" [ FieldList ] [ TypeItems ] "}" | "(" [ TypeList ] ")"
+TypeBody   = "{" [ FieldList ] [ TypeItems ] "}"
 FieldList  = SingleLineFields | MultiLineFields
 SingleLineFields = Field { "," Field }
 MultiLineFields  = newline Field { [ "," ] newline Field } [ "," ] newline
-Field      = [ "pub" ] Ident ":" Type
+Field      = [ "pub" ] Ident ":" Type [ "=" Expr ]
+TypeItems  = ImplItem { newline ImplItem }
 ```
 
 Struct values are allocated inline when they are local variables, but
@@ -855,6 +859,40 @@ Struct declarations follow Rust's three shapes. A missing body declares a unit
 struct, braces declare a named-field struct, and parentheses declare a tuple
 struct. Empty named structs use `struct Empty {}` and empty tuple structs use
 `struct EmptyTuple()`.
+
+**Field defaults.** A field may declare a default after its type. A struct
+literal may leave such a field out, and takes the default for it; it may
+also write the field, overriding the default. A field without a default is
+required in every literal, and a missing one is `GT0035` naming it.
+
+```
+struct Sieve {
+    limit: i64
+    result: u32 = 0
+    rng: Rng = Rng::new()
+}
+
+let s = Sieve { limit: 10 }
+let t = Sieve { limit: 10, result: 7 }
+```
+
+A default is any expression, calls included, and is evaluated at every
+construction that leaves the field out, so each value gets one of its own:
+two `Sieve { limit: 1 }` never share an `Rng`. Every name in a default
+means what it means where the struct is declared, whichever module the
+literal is in. A default cannot read `self` or another field of its
+struct, which do not exist yet when it runs (`GR0026`). A default is
+checked against the field's type once, at the declaration.
+
+A struct whose every field declares a default answers `T {}` and
+`T::default()`, both building it from those defaults; `#[derive(Default)]`
+on it is redundant (`GL0061`), and a derived `default()` on any struct
+builds a defaulted field from its default. Enum struct variants take field
+defaults the same way (`Rect { w: f64, h: f64 = 1.0 }`, then
+`Shape::Rect { w: 2.0 }`). A decode (`json::decode::<T>`, `yaml`, `toml`)
+reads a missing key as the field's default when the field carries no
+`#[default(..)]` of its own. Once built, a defaulted field is an ordinary
+field: printing, equality, ordering, and hashing do not see defaults.
 
 **Field-init shorthand.** A lone name in a struct literal fills the field of
 that name from the binding of that name, beside `name: value` fields:
@@ -884,8 +922,9 @@ cannot be constructed there.
 ### 3.7 Enums (sum types)
 
 ```
-EnumDecl = [ "pub" ] [ "packed" ] "enum" Ident [ Generics ] [ ":" UIntType ]
-           "{" VariantList "}" [ WhereClause ]
+EnumDecl = [ "pub" ] [ "packed" ] "enum" Ident [ Generics ]
+           [ ":" ( UIntType [ "+" BoundList ] | BoundList ) ]
+           "{" VariantList [ TypeItems ] "}" [ WhereClause ]
 VariantList = SingleLineVariants | MultiLineVariants
 SingleLineVariants = Variant { "," Variant }
 MultiLineVariants  = newline Variant { [ "," ] newline Variant } [ "," ] newline
@@ -1054,8 +1093,9 @@ ImplDeclTrait = "impl" [ Generics ] TraitRef "for" Type [ WhereClause ] "{" Impl
 
 Inherent impls attach methods/associated items to a type. Trait impls
 declare that a type satisfies a trait, and define exactly the items the trait
-declares: an item outside that contract is `GT0072`, and a `(trait, type)`
-pair implemented twice is `GT0073` (§3.13).
+declares: an item outside that contract is `GT0072`, a method whose receiver,
+parameters, or return differ from the trait's declaration is `GT0127`, and a
+`(trait, type)` pair implemented twice is `GT0073` (§3.13).
 
 Method receivers:
 
@@ -1067,6 +1107,53 @@ Method receivers:
 - `fn m(&mut self)` - writable access. Same runtime as `&self`; used by the
   type checker to forbid mutating method calls on non-writable places. It does
   not provide Rust lifetime or non-lexical-borrow analysis (§7.5).
+
+**Methods in the type's body.** A type may declare its conformances and its
+members in one place, as Swift and C# do, while traits and standalone `impl`
+blocks keep their Rust meaning. A struct or enum may hold its methods,
+associated types, and constants in its own body, after its fields or
+variants, and list the traits they implement after its name:
+
+```
+pub struct Sieve: Bench {
+    limit: i64
+    result: u32 = 0
+
+    fn run(&mut self, iteration_id: i64) { .. }
+    fn checksum(&self) -> u32 { self.result }
+    fn doubled(&self) -> i64 { self.limit * 2 }
+}
+
+enum Shape: Area {
+    Circle(f64)
+    Rect { w: f64, h: f64 }
+
+    fn area(&self) -> f64 { .. }
+}
+
+struct Pair(i64, i64): Display { fn fmt(&self) -> String { .. } }
+```
+
+This is the same declaration as the type followed by the `impl` blocks its
+body stands for, and the two spellings mean the same program in every way:
+the front end writes those blocks beside the type before anything resolves,
+with each item keeping its own spans. A body function whose name exactly one
+listed trait declares implements that trait; a name no listed trait declares
+is an inherent method; a name two or more listed traits declare is
+`GP0069` (`Display` and `Debug` both declare `fmt`: write one of them as a
+standalone `impl`). Associated types and constants follow the same rule.
+A function that matches a listed trait's name but not its signature is
+`GT0127` against that trait, never an inherent method. A trait listed on the
+type and also implemented by a standalone `impl` for the same type is
+`GT0073`, and a listed trait whose required items the body leaves out is
+`GT0058`, as for a standalone block. Only listed traits are implemented: a
+body function that shares a name with a trait the type does not list is
+inherent. A tuple struct takes a body only in the braced form after its
+fields; a generic type lists traits over its own parameters, and an `impl`
+that needs bounds of its own stays standalone. `gos fix --rewriter
+impl-into-type-body` moves standalone blocks into the body and
+`--rewriter type-body-into-impl` moves them back; `gos fmt` never moves
+code between the forms.
 
 ### 3.10 Generics
 
@@ -2281,7 +2368,9 @@ Properties:
 ### 6.6 `use` declarations
 
 ```
-UseDecl    = "use" UseTarget [ "as" Ident ] [ "{" UseList "}" | "::" "*" ]
+UseDecl    = "use" ( UseEntry | UseGroup )
+UseGroup   = "{" [ ( UseEntry | UseGroup ) { ( "," | LineBreak ) ( UseEntry | UseGroup ) } ] "}"
+UseEntry   = UseTarget [ "as" Ident ] [ "{" UseList "}" | "::" "*" ]
 UseTarget  = ProjectUse | ModulePath
 ProjectUse = StringLit [ "::" ModulePath ]
 ModulePath = Ident { "::" Ident }
@@ -2311,6 +2400,10 @@ use net::http::Server
 use std::io
 use std::sync::atomic::{AtomicU64, Ordering}
 use std::fmt
+
+// A group imports several paths in one declaration, as Rust's root
+// `use { .. }` does; each entry means what it would on a line of its own.
+use {bench::Bench, config::Config, std::{fs, strings}}
 ```
 
 Standard library modules require an explicit `use`. Writing a qualified
@@ -2633,8 +2726,8 @@ runtime. It yields at channel, `select`, lock, and `sleep` operations, and a
 watchdog asks a goroutine that holds its worker too long to yield at its next
 safepoint. Compiled code has a safepoint at the head of the outermost loop of
 each loop nest; a nest that is counted all the way down and calls none of the
-program's functions runs to completion first. The bytecode VM yields on every
-loop back edge. `spawn(|| expr)` starts one. Each goroutine owns a fixed-size
+program's functions runs to completion first. The bytecode VM polls every 1,024
+loop back edges. `spawn(|| expr)` starts one. Each goroutine owns a fixed-size
 mmap'd stack (default 1 MiB; override with `GOSSAMER_GOROUTINE_STACK`,
 clamped to a 32 KiB minimum). The operating system commits pages on demand.
 A byte-budget guard reports `GX0008` before the hardware guard page; the stack
@@ -4008,7 +4101,9 @@ A condensed top-level grammar:
 
 ```
 SourceFile   = { UseDecl } { Item }
-UseDecl      = "use" UseTarget [ "as" Ident ] [ "{" UseSpec "}" ]
+UseDecl      = "use" ( UseEntry | UseGroup )
+UseGroup     = "{" [ ( UseEntry | UseGroup ) { ( "," | LineBreak ) ( UseEntry | UseGroup ) } ] "}"
+UseEntry     = UseTarget [ "as" Ident ] [ "{" UseSpec "}" ]
 UseTarget    = ProjectUse | ModulePath
 ProjectUse   = StringLit [ "::" ModulePath ]
 ModulePath   = Ident { "::" Ident }

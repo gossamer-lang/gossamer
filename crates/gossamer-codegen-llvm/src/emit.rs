@@ -70,6 +70,7 @@ const LLVM_SPECIAL_DECLS: &[&str] = &[
     "declare i32 @gos_rt_main_exit_code(i64)",
     "declare i32 @gos_rt_main_exit_code_err(i64, i64)",
     "declare void @gos_rt_call_main(ptr, ptr)",
+    "declare void @gos_rt_region_bump_adopt(ptr)",
 ];
 
 /// What a program's `gos_main` answers, which the C `main` translates into an
@@ -112,9 +113,19 @@ fn render_main_entry(kind: MainReturn, init_bindings: bool) -> String {
     }
     writeln!(out, "  ret void").unwrap();
     writeln!(out, "}}").unwrap();
+    let block = gossamer_abi::rc::region_bump::PROGRAM_BLOCK_SYMBOL;
+    writeln!(out, "define internal ptr @gos_region_bump_block() {{").unwrap();
+    writeln!(out, "entry:").unwrap();
+    writeln!(out, "  ret ptr @\"{block}\"").unwrap();
+    writeln!(out, "}}").unwrap();
     writeln!(out, "define i32 @main(i32 %argc, ptr %argv) {{").unwrap();
     writeln!(out, "entry:").unwrap();
     writeln!(out, "  %slot = alloca i128, align 16").unwrap();
+    writeln!(
+        out,
+        "  call void @gos_rt_region_bump_adopt(ptr @gos_region_bump_block)"
+    )
+    .unwrap();
     writeln!(out, "  call void @gos_rt_program_start()").unwrap();
     // An instrumented build hands the runtime its profile writer, which every
     // exit path calls, rather than leaving the write to the profile runtime's
@@ -1253,24 +1264,7 @@ fn render_chunk_module(
         .map(|&idx| crate::lower::mangle_fn_name(&ctx.all_bodies[idx].name).into_owned())
         .collect();
 
-    let mut out = String::new();
-    writeln!(out, "; ModuleID = \"gossamer\"").unwrap();
-    if let Some(dl) = module_datalayout(ctx.triple) {
-        writeln!(out, "target datalayout = \"{dl}\"").unwrap();
-    }
-    writeln!(out, "target triple = \"{}\"", ctx.triple).unwrap();
-    writeln!(out).unwrap();
-    // Every generated body carries `#0`. A profiler samples an arbitrary
-    // instruction and has to walk out of it, and DWARF unwinding is not
-    // async-signal-safe, so the frame chain has to be there. This must be
-    // an IR attribute: `clang -x ir` ignores `-fno-omit-frame-pointer`,
-    // which only sets it when clang generates the IR itself.
-    writeln!(out, "attributes #0 = {{ \"frame-pointer\"=\"all\" }}").unwrap();
-    writeln!(out).unwrap();
-    for d in LLVM_SPECIAL_DECLS {
-        writeln!(out, "{d}").unwrap();
-    }
-    writeln!(out).unwrap();
+    let mut out = module_header(ctx.triple);
 
     // Extern declares for the bodies in other chunks this module calls, in
     // the order of the names they are emitted under.
@@ -2030,6 +2024,50 @@ pub fn compile_with_fallback_at_path(
 ///
 /// Returns an empty body list on success. `allow_fallback` is retained
 /// for API compatibility; lowering bugs always abort.
+/// The text every IR module opens with: its layout and triple, the function
+/// attributes its bodies name, and the intrinsics they may call.
+fn module_header(triple: &str) -> String {
+    let mut out = String::new();
+    writeln!(out, "; ModuleID = \"gossamer\"").unwrap();
+    if let Some(dl) = module_datalayout(triple) {
+        writeln!(out, "target datalayout = \"{dl}\"").unwrap();
+    }
+    writeln!(out, "target triple = \"{triple}\"").unwrap();
+    if want_reproducible() {
+        writeln!(out, "; reproducible-build = true").unwrap();
+    }
+    writeln!(out).unwrap();
+    // Every generated body carries `#0`. A profiler samples an arbitrary
+    // instruction and has to walk out of it, and DWARF unwinding is not
+    // async-signal-safe, so the frame chain has to be there. This must be
+    // an IR attribute: `clang -x ir` ignores `-fno-omit-frame-pointer`,
+    // which only sets it when clang generates the IR itself.
+    writeln!(out, "attributes #0 = {{ \"frame-pointer\"=\"all\" }}").unwrap();
+    writeln!(out).unwrap();
+    for d in LLVM_SPECIAL_DECLS {
+        writeln!(out, "{d}").unwrap();
+    }
+    // The per-thread block compiled code bumps region objects off. Every
+    // module defines it once-only, so a module that bumps links whatever else
+    // is in the program; only `main` hands it to the runtime, so in a library
+    // it stays empty and every bump takes the runtime's path.
+    let block = gossamer_abi::rc::region_bump::PROGRAM_BLOCK_SYMBOL;
+    let comdat = match coff_comdat_decl("linkonce_odr", block) {
+        Some(decl) => {
+            writeln!(out, "{decl}").unwrap();
+            ", comdat"
+        }
+        None => "",
+    };
+    writeln!(
+        out,
+        "@\"{block}\" = linkonce_odr hidden thread_local global [4 x i64] zeroinitializer{comdat}, align 8"
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    out
+}
+
 fn render_module_to_path(
     bodies: &[Body],
     tcx: &TyCtxt,
@@ -2210,19 +2248,7 @@ fn render_module_to_path(
         .with_context(|| format!("creating {}", ll_path.display()))?;
     let mut ll_w = BufWriter::with_capacity(64 * 1024, ll_file);
     let triple = llvm_target_triple_for(&host_triple());
-    writeln!(ll_w, "; ModuleID = \"gossamer\"")?;
-    if let Some(dl) = module_datalayout(&triple) {
-        writeln!(ll_w, "target datalayout = \"{dl}\"")?;
-    }
-    writeln!(ll_w, "target triple = \"{triple}\"")?;
-    if want_reproducible() {
-        writeln!(ll_w, "; reproducible-build = true")?;
-    }
-    writeln!(ll_w)?;
-    for d in LLVM_SPECIAL_DECLS {
-        writeln!(ll_w, "{d}")?;
-    }
-    writeln!(ll_w)?;
+    ll_w.write_all(module_header(&triple).as_bytes())?;
     // Shape-validate each accumulated global. The `runtime_refs`
     // BTreeSet inside `Lowerer` accepts arbitrary strings; a
     // malformed entry corrupts the IR string. Each entry must be

@@ -116,6 +116,10 @@ pub struct UseDecl {
     /// `path` names.
     #[serde(default)]
     pub glob: bool,
+    /// The grouped `use { .. }` this declaration was written in, numbered
+    /// within its file; every entry of one group carries the same number.
+    #[serde(default)]
+    pub group: Option<u32>,
 }
 
 impl UseDecl {
@@ -131,6 +135,7 @@ impl UseDecl {
             module: Vec::new(),
             cfg: None,
             glob: false,
+            group: None,
         }
     }
 }

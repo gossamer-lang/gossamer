@@ -575,7 +575,11 @@ fn update_stack(
                 BraceKind::DeclList
             } else if match_brace {
                 BraceKind::Match
-            } else if prev_sig == Some(TokenKind::Punct(Punct::ColonColon)) {
+            } else if prev_sig == Some(TokenKind::Punct(Punct::ColonColon))
+                || prev_sig == Some(TokenKind::Keyword(Keyword::Use))
+                // A `use` list holds paths and lists only, never a block.
+                || stack.last().is_some_and(|top| top.kind == BraceKind::UseList)
+            {
                 BraceKind::UseList
             } else {
                 BraceKind::Block
@@ -1250,6 +1254,14 @@ mod tests {
     fn use_list_braces_stay_tight() {
         let source = "use std::{iter, os, strings}\n\nfn main() { }\n";
         assert_eq!(fmt(source), source);
+    }
+
+    #[test]
+    fn root_use_group_braces_stay_tight() {
+        let source = "use {util::double, std::{fs, env}}\nuse {\n    std::path\n    {std::env}\n}\n\nfn main() { }\n";
+        assert_eq!(fmt(source), source);
+        let spaced = "use { util::double, std::{ fs } }\n\nfn main() { }\n";
+        assert_eq!(fmt(spaced), spaced);
     }
 
     #[test]

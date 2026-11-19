@@ -89,10 +89,22 @@ pub(crate) unsafe fn usable(p: *const u8) -> usize {
     len - HEADER
 }
 
-/// A mapped buffer of at least `bytes`.
+/// A mapped buffer of at least `bytes`, for a vector whose size is known: a
+/// larger cached mapping that serves it gives back the pages past `bytes`.
 pub(crate) fn map(bytes: usize) -> *mut u8 {
+    map_kept(bytes, false)
+}
+
+/// A mapped buffer of at least `bytes` for a vector growing geometrically. A
+/// larger cached mapping that serves it is kept whole, so the growth that
+/// follows stays in place, in pages already touched.
+pub(crate) fn map_growing(bytes: usize) -> *mut u8 {
+    map_kept(bytes, true)
+}
+
+fn map_kept(bytes: usize, keep_tail: bool) -> *mut u8 {
     let need = needed_len(bytes);
-    let (base, len) = take_cached(need).unwrap_or_else(|| (os::map(need), need));
+    let (base, len) = take_cached(need, keep_tail).unwrap_or_else(|| (os::map(need), need));
     // SAFETY: `base` is a writable mapping of `len` bytes.
     unsafe { buffer_in(base, len) }
 }
@@ -123,6 +135,12 @@ pub(crate) unsafe fn unmap(p: *mut u8) {
     ensure_purger(delay);
 }
 
+/// Whether freed memory waits for its purge delay: a cached mapping or a
+/// retiring arena slab.
+fn pending() -> bool {
+    !CACHE.lock().is_empty() || crate::c_abi::rc::retiring_slabs_pending()
+}
+
 /// Whether a purger thread is running.
 static PURGER_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -131,7 +149,7 @@ static PURGER_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 /// (on a sleep, a channel, or its input) makes no allocator call that would
 /// apply the delay, and the scheduler's watchdog runs only once goroutines
 /// do; this thread covers it, and exits once the cache is empty.
-fn ensure_purger(delay: std::time::Duration) {
+pub(crate) fn ensure_purger(delay: std::time::Duration) {
     use std::sync::atomic::Ordering;
     if PURGER_RUNNING.swap(true, Ordering::AcqRel) {
         return;
@@ -143,13 +161,13 @@ fn ensure_purger(delay: std::time::Duration) {
             loop {
                 std::thread::sleep(delay);
                 crate::purge_expired_allocator_memory();
-                if !CACHE.lock().is_empty() {
+                if pending() {
                     continue;
                 }
                 PURGER_RUNNING.store(false, Ordering::Release);
-                // A mapping cached between the check and the store saw a
-                // running purger and started none, so this one keeps going.
-                if CACHE.lock().is_empty() || PURGER_RUNNING.swap(true, Ordering::AcqRel) {
+                // Memory freed between the check and the store saw a running
+                // purger and started none, so this one keeps going.
+                if !pending() || PURGER_RUNNING.swap(true, Ordering::AcqRel) {
                     return;
                 }
             }
@@ -229,14 +247,26 @@ fn expire(cache: &mut Cache, delay: std::time::Duration) {
 }
 
 /// A cached mapping of at least `need` bytes: the smallest that fits, or the
-/// largest grown to fit.
+/// largest grown to fit. Unless `keep_tail`, a fitting mapping gives back its
+/// pages past `need`: a buffer of known size would otherwise carry the pages
+/// an earlier buffer touched into its own peak, where a growing one reaches
+/// them anyway.
 ///
 /// Growing one means asking the kernel for pages while others sit cached, so
 /// first the oldest other cached mappings, together at least as large as the
 /// growth, go back: the cache never adds to a peak that a request it cannot
 /// serve has to raise anyway.
-fn take_cached(need: usize) -> Option<(*mut u8, usize)> {
-    let mut cache = CACHE.lock();
+fn take_cached(need: usize, keep_tail: bool) -> Option<(*mut u8, usize)> {
+    take_from(&CACHE, need, keep_tail)
+}
+
+/// [`take_cached`] from `cache`.
+fn take_from(
+    cache: &parking_lot::Mutex<Cache>,
+    need: usize,
+    keep_tail: bool,
+) -> Option<(*mut u8, usize)> {
+    let mut cache = cache.lock();
     expire(&mut cache, crate::allocator_purge_delay());
     let fits = cache
         .iter()
@@ -246,7 +276,14 @@ fn take_cached(need: usize) -> Option<(*mut u8, usize)> {
         .map(|(i, _)| i);
     if let Some(i) = fits {
         let entry = cache.remove(i);
-        return Some((entry.base, entry.len));
+        drop(cache);
+        if keep_tail {
+            return Some((entry.base, entry.len));
+        }
+        // SAFETY: the cached mapping is whole, live, and now owned here, and
+        // `need` is a whole number of pages no larger than it.
+        let len = unsafe { os::trim(entry.base, entry.len, need) };
+        return Some((entry.base, len));
     }
     let largest = cache
         .iter()
@@ -329,6 +366,19 @@ mod os {
         unsafe { libc::munmap(base.cast(), len) };
     }
 
+    /// Gives the pages of a mapping of `len` bytes past its first `keep`
+    /// back to the kernel, answering the mapping's length after.
+    ///
+    /// # Safety
+    ///
+    /// `base` is a whole live mapping of `len` bytes, `keep <= len` is a
+    /// whole number of pages, and nothing reads past `keep`.
+    pub(super) unsafe fn trim(base: *mut u8, len: usize, keep: usize) -> usize {
+        // SAFETY: the tail is a whole-page range inside the caller's mapping.
+        let unmapped = unsafe { libc::munmap(base.add(keep).cast(), len - keep) } == 0;
+        if unmapped { keep } else { len }
+    }
+
     /// Grows a mapping of `len` bytes to `need`, keeping its first `keep`
     /// bytes; the kernel moves the pages rather than copying them.
     ///
@@ -378,7 +428,8 @@ mod os {
 #[cfg(all(windows, not(any(tsan, miri, fuzzing))))]
 mod os {
     use windows_sys::Win32::System::Memory::{
-        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+        MEM_COMMIT, MEM_DECOMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc,
+        VirtualFree,
     };
 
     /// A fresh, zeroed, writable region of `len` bytes.
@@ -405,6 +456,25 @@ mod os {
     pub(super) unsafe fn unmap(base: *mut u8, _len: usize) {
         // SAFETY: `MEM_RELEASE` with size 0 frees the region `base` starts.
         unsafe { VirtualFree(base.cast(), 0, MEM_RELEASE) };
+    }
+
+    /// Hands the pages past `keep` back to the system, answering the length
+    /// still committed. The reservation itself is released only whole, which
+    /// `unmap` does whatever length it is given.
+    ///
+    /// # Safety
+    ///
+    /// `base` is a whole live mapping of `len` bytes, `keep <= len` is a
+    /// whole number of pages, and nothing reads past `keep`.
+    pub(super) unsafe fn trim(base: *mut u8, len: usize, keep: usize) -> usize {
+        if keep == len {
+            return len;
+        }
+        // SAFETY: the tail is a whole-page range of committed pages inside
+        // the caller's reservation.
+        let decommitted =
+            unsafe { VirtualFree(base.add(keep).cast(), len - keep, MEM_DECOMMIT) } != 0;
+        if decommitted { keep } else { len }
     }
 
     /// Grows a region of `len` bytes to `need` through a fresh region,
@@ -445,6 +515,13 @@ mod os {
     ///
     /// Never called: no buffer is mapped in this build.
     pub(super) unsafe fn unmap(_base: *mut u8, _len: usize) {}
+
+    /// # Safety
+    ///
+    /// Never called: no buffer is mapped in this build.
+    pub(super) unsafe fn trim(_base: *mut u8, len: usize, _keep: usize) -> usize {
+        len
+    }
 
     /// # Safety
     ///
@@ -499,5 +576,27 @@ mod tests {
         // SAFETY: `q` is a live buffer `map` answered, unused after.
         unsafe { unmap(q) };
         purge_expired();
+    }
+
+    #[test]
+    fn a_growing_buffer_keeps_a_larger_cached_mapping_whole_and_a_sized_one_trims_it() {
+        if MAPPED_BYTES == usize::MAX {
+            return;
+        }
+        let big = needed_len(MAPPED_BYTES * 4);
+        let need = needed_len(MAPPED_BYTES);
+        let cache = parking_lot::const_mutex(Cache(Vec::new()));
+        for (keep_tail, expected) in [(true, big), (false, need)] {
+            cache.lock().push(Cached {
+                base: os::map(big),
+                len: big,
+                freed_at: Instant::now(),
+            });
+            let (base, len) = take_from(&cache, need, keep_tail).expect("a cached mapping fits");
+            assert_eq!(len, expected);
+            assert!(cache.lock().is_empty());
+            // SAFETY: the mapping was taken whole from the private cache and is `len` bytes.
+            unsafe { os::unmap(base, len) };
+        }
     }
 }

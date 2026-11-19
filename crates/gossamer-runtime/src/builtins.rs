@@ -58,8 +58,11 @@ pub fn write_json_tree_float(out: &mut Vec<u8>, f: f64) {
         return;
     }
     let mut text = FloatText::new();
-    out.extend_from_slice(f64_display(f, &mut text));
-    if f.fract() == 0.0 {
+    let shown = f64_display(f, &mut text);
+    out.extend_from_slice(shown);
+    // `f64_display` writes plain decimals, so a whole value is exactly one
+    // written without a point.
+    if !shown.contains(&b'.') {
         out.extend_from_slice(b".0");
     }
 }

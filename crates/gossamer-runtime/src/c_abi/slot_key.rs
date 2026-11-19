@@ -94,7 +94,7 @@ pub(crate) fn boxed_blob_meta(desc: &[u8]) -> *const i64 {
             let child = match kind {
                 b'S' => vec_elem_kind::STRING,
                 b'V' => vec_elem_kind::VEC,
-                b'B' => vec_elem_kind::RC_NODE,
+                b'B' | b'N' => vec_elem_kind::RC_NODE,
                 _ => return None,
             };
             Some([-1, 0, word as i64, i64::from(child)])
@@ -146,7 +146,7 @@ pub(crate) fn counted_words(
         .filter_map(|(index, kind)| match kind {
             b'S' => Some((word_at(slots, index), CountedWord::Rc)),
             b'V' => Some((word_at(slots, index), CountedWord::Vec)),
-            b'B' => Some((word_at(slots, index), CountedWord::Blob)),
+            b'B' | b'N' => Some((word_at(slots, index), CountedWord::Blob)),
             _ => None,
         })
         .filter(|(word, _)| !word.is_null())

@@ -560,6 +560,7 @@ mod comptime_gate_tests {
             "__gos_debug_quote",
             "__gos_dyn_",
             "__gos_f32_",
+            "__gos_field_",
             "__gos_par_",
             "__gos_pem_",
             "__gos_serde_",

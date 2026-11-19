@@ -325,6 +325,8 @@ const PRELUDE_VALUES: &[&str] = &[
     "__gos_f32_debug",
     "__gos_dyn_display",
     "__gos_dyn_debug",
+    "__gos_field_display",
+    "__gos_field_debug",
     "__struct",
     // LCG jump-ahead: routes to `gos_rt_lcg_jump`. Callable
     // from user code as `lcg_jump(state, ia, ic, im, n)`.

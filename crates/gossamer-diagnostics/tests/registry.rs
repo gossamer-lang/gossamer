@@ -17,10 +17,10 @@ const EMITTED_CODES: &[&str] = &[
     "GP0040", "GP0041", "GP0042", "GP0043", "GP0044", "GP0045", "GP0046", "GP0047", "GP0048",
     "GP0049", "GP0050", "GP0051", "GP0052", "GP0053", "GP0054", "GP0055", "GP0056", "GP0057",
     "GP0058", "GP0059", "GP0060", "GP0061", "GP0062", "GP0063", "GP0064", "GP0065", "GP0066",
-    "GP0067", "GP0068", // Resolver (gossamer-resolve/src/diagnostic.rs).
+    "GP0067", "GP0068", "GP0069", // Resolver (gossamer-resolve/src/diagnostic.rs).
     "GR0001", "GR0002", "GR0003", "GR0004", "GR0005", "GR0006", "GR0007", "GR0008", "GR0009",
-    "GR0010", "GR0011", "GR0012", "GR0013", "GR0017", "GR0019", "GR0020", "GR0021",
-    "GR0014", // Type checker (gossamer-types/src/error.rs).
+    "GR0010", "GR0011", "GR0012", "GR0013", "GR0017", "GR0019", "GR0020", "GR0021", "GR0014",
+    "GR0026", // Type checker (gossamer-types/src/error.rs).
     "GT0001", "GT0002", "GT0003", "GT0004", "GT0005", "GT0006", "GT0007", "GT0008", "GT0009",
     "GT0010", "GT0011", "GT0012", "GT0013", "GT0014", "GT0015", "GT0016", "GT0017", "GT0018",
     "GT0019", "GT0021", "GT0022", "GT0023", "GT0024", "GT0025", "GT0027", "GT0028", "GT0029",
@@ -33,7 +33,7 @@ const EMITTED_CODES: &[&str] = &[
     "GT0092", "GT0097", "GT0098", "GT0099", "GT0100", "GT0101", "GT0102", "GT0103", "GT0104",
     "GT0105", "GT0106", "GT0107", "GT0108", "GT0109", "GT0110", "GT0111", "GT0112", "GT0113",
     "GT0116", "GT0117", "GT0118", "GT0119", "GT0120", "GT0121", "GT0122", "GT0123", "GT0124",
-    "GT0125", "GT0126", "GM0001",
+    "GT0125", "GT0126", "GT0127", "GT0128", "GM0001",
     "GM0002", // Arena-escape safety (gossamer-types/src/arena_escape.rs).
     "GM0003", // Runtime (gossamer-interp/src/value.rs).
     "GX0001", "GX0002", "GX0003", "GX0004", "GX0005", "GX0006", "GX0007", "GX0008", "GX0009",
@@ -44,7 +44,8 @@ const EMITTED_CODES: &[&str] = &[
     "GL0019", "GL0021", "GL0022", "GL0023", "GL0024", "GL0025", "GL0026", "GL0027", "GL0028",
     "GL0029", "GL0030", "GL0031", "GL0032", "GL0033", "GL0034", "GL0035", "GL0036", "GL0037",
     "GL0038", "GL0039", "GL0040", "GL0041", "GL0042", "GL0043", "GL0044", "GL0045", "GL0046",
-    "GL0047", "GL0048", "GL0049", "GL0050", "GL0051", "GL0052", "GL0055", "GL0056",
+    "GL0047", "GL0048", "GL0049", "GL0050", "GL0051", "GL0052", "GL0055", "GL0056", "GL0060",
+    "GL0061",
 ];
 
 #[test]

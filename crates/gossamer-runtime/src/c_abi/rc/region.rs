@@ -45,12 +45,14 @@ pub(super) const REGION_ARENA_BYTES: usize = 1 << 30;
 
 /// Base address of the reserved range. 0 = not yet initialised;
 /// `usize::MAX` = reservation failed (regions disabled).
-static REGION_ARENA_BASE: AtomicUsize = AtomicUsize::new(0);
+#[unsafe(export_name = "gos_rt_region_arena_base")]
+pub static REGION_ARENA_BASE: AtomicUsize = AtomicUsize::new(0);
 /// Bytes the reservation at `REGION_ARENA_BASE` spans: `REGION_ARENA_BYTES`,
 /// or less where the host limits address space (`RLIMIT_AS`, valgrind).
 /// Written before the base is published, so a reader that sees a base sees
 /// its length.
-static REGION_ARENA_LEN: AtomicUsize = AtomicUsize::new(0);
+#[unsafe(export_name = "gos_rt_region_arena_len")]
+pub static REGION_ARENA_LEN: AtomicUsize = AtomicUsize::new(0);
 /// The smallest reservation worth having; below it regions stay counted.
 const REGION_ARENA_MIN_BYTES: usize = 1 << 30;
 /// Bump offset of the next never-used slab within the reserve.
@@ -496,6 +498,16 @@ impl RegionSlabs {
             finalizers: Vec::new(),
         }
     }
+
+    /// Whether `addr` lies in this region's storage: one of its slabs or of
+    /// the vector buffers it owns.
+    fn holds(&self, addr: usize) -> bool {
+        let within = |&(base, len): &(*mut u8, usize)| {
+            let base = base as usize;
+            addr >= base && addr - base < len
+        };
+        self.slabs.iter().any(within) || self.buffers.iter().any(within)
+    }
 }
 
 /// Arena state owned by one running goroutine.
@@ -556,6 +568,7 @@ impl Drop for ArenaState {
 /// This is what makes a region allocation a handful of inline instructions
 /// (compare + add) rather than a `RefCell` borrow + `Vec` walk.
 #[derive(Clone, Copy)]
+#[repr(C)]
 pub(super) struct BumpState {
     pub(super) base: *mut u8,
     pub(super) cur: usize,
@@ -596,12 +609,101 @@ thread_local! {
     /// Nesting depth of active regions. `> 0` ⇒ a region is open; checked once
     /// per allocation (a `Cell` read) to route to the region bump.
     static REGION_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// Live bump state of the innermost region (see `BumpState`).
-    pub(super) static BUMP: std::cell::Cell<BumpState> = const { std::cell::Cell::new(BumpState::EMPTY) };
-    /// RC objects bump-allocated into the innermost region since it became
-    /// innermost (reconciled into `RegionSlabs::objs` at push, into `RC_LIVE`
-    /// at pop).
-    static BUMP_OBJS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static BUMP_CACHE: BumpCache = const {
+        BumpCache {
+            state: std::cell::Cell::new(BumpState::EMPTY),
+            objs: std::cell::Cell::new(0),
+        }
+    };
+    /// This thread's bump block once resolved: the program's own when it
+    /// adopted one, `BUMP_CACHE` otherwise.
+    static BUMP_BLOCK: std::cell::Cell<*const BumpCache> =
+        const { std::cell::Cell::new(std::ptr::null()) };
+}
+
+/// The program's per-thread bump block source, set by
+/// [`gos_rt_region_bump_adopt`].
+static BUMP_SOURCE: std::sync::OnceLock<extern "C" fn() -> *mut u8> = std::sync::OnceLock::new();
+
+/// The innermost region's live bump state (see `BumpState`) and the RC
+/// objects bumped into it since it became innermost (reconciled into
+/// `RegionSlabs::objs` at push, into `RC_LIVE` at pop). Compiled code bumps
+/// through it at the offsets `gossamer_abi::rc::region_bump` names.
+#[repr(C)]
+struct BumpCache {
+    state: std::cell::Cell<BumpState>,
+    objs: std::cell::Cell<usize>,
+}
+
+// Compiled code reads the block at these offsets on 64-bit targets only; a
+// 32-bit build (the wasm runtime the VM runs on) lays the pointer out narrower.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    use gossamer_abi::rc::region_bump;
+    assert!(
+        std::mem::offset_of!(BumpCache, state) as i64
+            + std::mem::offset_of!(BumpState, base) as i64
+            == region_bump::BASE_OFFSET
+    );
+    assert!(
+        std::mem::offset_of!(BumpCache, state) as i64 + std::mem::offset_of!(BumpState, cur) as i64
+            == region_bump::CUR_OFFSET
+    );
+    assert!(
+        std::mem::offset_of!(BumpCache, state) as i64 + std::mem::offset_of!(BumpState, end) as i64
+            == region_bump::END_OFFSET
+    );
+    assert!(std::mem::offset_of!(BumpCache, objs) as i64 == region_bump::OBJS_OFFSET);
+    assert!(RC_ALIGN as i64 == region_bump::ALIGN);
+};
+
+/// Runs `f` on this thread's bump block.
+#[inline]
+fn with_bump_cache<R>(f: impl FnOnce(&BumpCache) -> R) -> R {
+    let block = BUMP_BLOCK.with(std::cell::Cell::get);
+    let block = if block.is_null() {
+        resolve_bump_block()
+    } else {
+        block
+    };
+    // SAFETY: `block` is this thread's bump block, which lives as long as the thread and which
+    // only this thread reads or writes.
+    f(unsafe { &*block })
+}
+
+/// Resolves and records this thread's bump block.
+#[cold]
+#[inline(never)]
+fn resolve_bump_block() -> *const BumpCache {
+    let block = match BUMP_SOURCE.get() {
+        Some(source) => source().cast::<BumpCache>().cast_const(),
+        None => BUMP_CACHE.with(std::ptr::from_ref),
+    };
+    BUMP_BLOCK.with(|b| b.set(block));
+    block
+}
+
+/// Runs `f` on this thread's innermost-region bump state.
+pub(super) fn with_bump<R>(f: impl FnOnce(&std::cell::Cell<BumpState>) -> R) -> R {
+    with_bump_cache(|cache| f(&cache.state))
+}
+
+/// Runs `f` on this thread's count of objects bumped into the innermost region.
+fn with_bump_objs<R>(f: impl FnOnce(&std::cell::Cell<usize>) -> R) -> R {
+    with_bump_cache(|cache| f(&cache.objs))
+}
+
+/// Hands the runtime the program's own per-thread bump block, which compiled
+/// code bumps an open region's slab through without a call. `source` answers
+/// the calling thread's block, laid out as `gossamer_abi::rc::region_bump`
+/// describes and zeroed when the thread starts. The program calls this before
+/// anything else, so no region is open on any thread yet.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_region_bump_adopt(source: extern "C" fn() -> *mut u8) {
+    if BUMP_SOURCE.set(source).is_ok() {
+        debug_assert_eq!(region_depth(), 0);
+        BUMP_BLOCK.with(|b| b.set(std::ptr::null()));
+    }
 }
 
 /// Detaches the active arena from this worker at a coroutine yield boundary.
@@ -612,8 +714,8 @@ thread_local! {
 pub(crate) fn take_arena_state() -> ArenaState {
     let regions = REGIONS.with(|r| std::mem::take(&mut *r.borrow_mut()));
     let depth = REGION_DEPTH.with(|d| d.replace(0));
-    let bump = BUMP.with(|b| b.replace(BumpState::EMPTY));
-    let bump_objs = BUMP_OBJS.with(|o| o.replace(0));
+    let bump = with_bump(|b| b.replace(BumpState::EMPTY));
+    let bump_objs = with_bump_objs(|o| o.replace(0));
     ArenaState {
         regions,
         depth,
@@ -629,15 +731,15 @@ pub(crate) fn take_arena_state() -> ArenaState {
 pub(crate) fn install_arena_state(mut state: ArenaState) {
     debug_assert!(REGIONS.with(|r| r.borrow().is_empty()));
     debug_assert_eq!(REGION_DEPTH.with(std::cell::Cell::get), 0);
-    debug_assert!(BUMP.with(std::cell::Cell::get).base.is_null());
+    debug_assert!(with_bump(std::cell::Cell::get).base.is_null());
     let regions = std::mem::take(&mut state.regions);
     let depth = std::mem::replace(&mut state.depth, 0);
     let bump = std::mem::replace(&mut state.bump, BumpState::EMPTY);
     let bump_objs = std::mem::replace(&mut state.bump_objs, 0);
     REGIONS.with(|r| *r.borrow_mut() = regions);
     REGION_DEPTH.with(|d| d.set(depth));
-    BUMP.with(|b| b.set(bump));
-    BUMP_OBJS.with(|o| o.set(bump_objs));
+    with_bump(|b| b.set(bump));
+    with_bump_objs(|o| o.set(bump_objs));
 }
 
 /// Cleans up any arena regions a request opened but did not close. This guard
@@ -675,6 +777,9 @@ fn acquire_slab(slab_size: usize) -> *mut u8 {
     if slab_size == REGION_SLAB_BYTES {
         if let Some(s) = FREE_SLABS.with(|p| p.borrow_mut().pop()) {
             return s;
+        }
+        if let Some((base, _)) = RETIRING_SLABS.lock().pop() {
+            return base as *mut u8;
         }
     }
     // Slabs come exclusively from the reserved arena so `in_region_arena`
@@ -753,11 +858,12 @@ pub(super) fn region_alloc_inner_unzeroed(total: usize, count_obj: bool) -> *mut
     region_alloc_inner_impl(total, count_obj, false)
 }
 
-fn region_alloc_inner_impl(total: usize, count_obj: bool, zero: bool) -> *mut u8 {
-    let need = (total + RC_ALIGN - 1) & !(RC_ALIGN - 1);
-    // Hot path: bump within the innermost region's current slab - no RefCell,
-    // no Vec walk, just a compare and an add on a thread-local cache.
-    let ptr = BUMP.with(|b| {
+/// Bumps `need` bytes, a whole number of words, off the innermost region's
+/// current slab, or answers null when no region is open, the region has no
+/// slab yet, or the slab is full. No region open leaves `BUMP` empty.
+#[inline]
+fn bump_in_slab(need: usize) -> *mut u8 {
+    with_bump(|b| {
         let st = b.get();
         if !st.base.is_null() && st.cur + need <= st.end {
             // SAFETY: `st.cur + need <= st.end` (checked above), so the address lies inside the
@@ -771,7 +877,24 @@ fn region_alloc_inner_impl(total: usize, count_obj: bool, zero: bool) -> *mut u8
         } else {
             std::ptr::null_mut()
         }
-    });
+    })
+}
+
+/// One counted object of `total` bytes bumped off the current slab of the
+/// open region, unzeroed, or `None` when that takes the general path.
+#[inline]
+pub(super) fn region_bump_object(total: usize) -> Option<*mut u8> {
+    let ptr = bump_in_slab((total + RC_ALIGN - 1) & !(RC_ALIGN - 1));
+    if ptr.is_null() {
+        return None;
+    }
+    with_bump_objs(|o| o.set(o.get() + 1));
+    Some(ptr)
+}
+
+fn region_alloc_inner_impl(total: usize, count_obj: bool, zero: bool) -> *mut u8 {
+    let need = (total + RC_ALIGN - 1) & !(RC_ALIGN - 1);
+    let ptr = bump_in_slab(need);
     let ptr = if ptr.is_null() {
         let p = region_alloc_slow(need);
         if p.is_null() {
@@ -789,7 +912,7 @@ fn region_alloc_inner_impl(total: usize, count_obj: bool, zero: bool) -> *mut u8
         unsafe { zero_words(ptr, need) };
     }
     if count_obj {
-        BUMP_OBJS.with(|o| o.set(o.get() + 1));
+        with_bump_objs(|o| o.set(o.get() + 1));
     }
     ptr
 }
@@ -835,7 +958,7 @@ fn region_alloc_slow(need: usize) -> *mut u8 {
         return std::ptr::null_mut();
     }
     REGIONS.with(|r| innermost(&mut r.borrow_mut()).slabs.push((base, slab_size)));
-    BUMP.with(|b| {
+    with_bump(|b| {
         b.set(BumpState {
             base,
             cur: need,
@@ -848,6 +971,57 @@ fn region_alloc_slow(need: usize) -> *mut u8 {
 /// Region bump for an RC payload (counted against `RC_LIVE`).
 pub(super) fn region_alloc(total: usize) -> *mut u8 {
     region_alloc_inner(total, true)
+}
+
+/// Standard slabs closed regions handed back beyond what their thread keeps,
+/// still committed, each with when it was handed back, oldest first. A slab
+/// taken from here is reused without faulting its pages in again; one left
+/// here past the allocator's purge delay goes back to the kernel, the rule
+/// memory the allocator frees follows.
+static RETIRING_SLABS: parking_lot::Mutex<Vec<(usize, std::time::Instant)>> =
+    parking_lot::const_mutex(Vec::new());
+
+/// Hands a standard slab no region holds to the retiring pool, or straight
+/// back to the kernel when freed memory is returned at once.
+///
+/// # Safety
+/// `base` is a standard slab of the reservation that no region holds.
+unsafe fn retire_after_delay(base: *mut u8) {
+    let delay = crate::allocator_purge_delay();
+    if delay.is_zero() || arena_poison() {
+        // SAFETY: `base` is a standard slab nothing holds (contract).
+        unsafe { arena_retire(base, REGION_SLAB_BYTES) };
+        return;
+    }
+    let mut pending = RETIRING_SLABS.lock();
+    expire_retiring(&mut pending, delay);
+    pending.push((base as usize, std::time::Instant::now()));
+    drop(pending);
+    crate::c_abi::vec::ensure_memory_purger(delay);
+}
+
+/// Returns to the kernel each retiring slab whose delay has passed.
+fn expire_retiring(pending: &mut Vec<(usize, std::time::Instant)>, delay: std::time::Duration) {
+    let now = std::time::Instant::now();
+    pending.retain(|&(base, at)| {
+        if now.duration_since(at) < delay {
+            return true;
+        }
+        // SAFETY: a retiring slab is a standard slab no region holds.
+        unsafe { arena_retire(base as *mut u8, REGION_SLAB_BYTES) };
+        false
+    });
+}
+
+/// Returns to the kernel the retiring slabs whose purge delay has passed.
+pub(crate) fn purge_retiring_slabs() {
+    let mut pending = RETIRING_SLABS.lock();
+    expire_retiring(&mut pending, crate::allocator_purge_delay());
+}
+
+/// Whether any slab waits in the retiring pool.
+pub(crate) fn retiring_slabs_pending() -> bool {
+    !RETIRING_SLABS.lock().is_empty()
 }
 
 /// Open a new arena region. Allocations until the matching
@@ -865,8 +1039,8 @@ pub extern "C" fn gos_rt_arena_push() {
     // entry waits for its first use, and the suspended one needs an entry
     // only when it has a bump or objects to keep.
     let depth = region_depth();
-    let saved = BUMP.with(|b| b.replace(BumpState::EMPTY));
-    let pending_objs = BUMP_OBJS.with(|o| o.replace(0));
+    let saved = with_bump(|b| b.replace(BumpState::EMPTY));
+    let pending_objs = with_bump_objs(|o| o.replace(0));
     let live = !saved.base.is_null() || pending_objs != 0;
     REGIONS.with(|r| {
         let mut regions = r.borrow_mut();
@@ -945,6 +1119,137 @@ fn region_give_back_at_pop(value: *mut u8, give_back: Finalizer) {
     }
 }
 
+/// Runs `give_back` on `value` when the region whose storage holds `holder`
+/// pops - the innermost open region when none of them holds it - or now when
+/// no region is open. A holder an outer region owns keeps what it holds past
+/// the pop of a region opened inside that one.
+pub(crate) fn region_give_back_with(holder: *const u8, value: *mut u8, give_back: Finalizer) {
+    if !region_active() {
+        // SAFETY: `give_back` returns the one share of `value` its caller handed over.
+        unsafe { give_back(value) };
+        return;
+    }
+    let addr = holder as usize;
+    REGIONS.with(|r| {
+        let mut regions = r.borrow_mut();
+        match regions.iter().rposition(|region| region.holds(addr)) {
+            Some(owner) => regions[owner].finalizers.push((value, give_back)),
+            None => innermost(&mut regions).finalizers.push((value, give_back)),
+        }
+    });
+}
+
+/// Whether `holder` lives in the innermost open region's storage, or in no
+/// region's: either way what it holds may come from the innermost region. A
+/// holder an outer region owns outlives the innermost region's pop.
+pub(crate) fn region_holder_is_innermost(holder: *const u8) -> bool {
+    let depth = region_depth();
+    if depth <= 1 {
+        return true;
+    }
+    let addr = holder as usize;
+    REGIONS.with(|r| {
+        let regions = r.borrow();
+        regions
+            .iter()
+            .rposition(|region| region.holds(addr))
+            .is_none_or(|owner| regions[owner].depth == depth)
+    })
+}
+
+/// Records `buf`, an allocator buffer of `bytes`, as owned by the region whose
+/// storage holds `holder` (the innermost one when none does), to be freed at
+/// its pop.
+pub(crate) fn region_own_buffer_for(holder: *const u8, buf: *mut u8, bytes: usize) {
+    if !region_active() {
+        return;
+    }
+    let addr = holder as usize;
+    REGIONS.with(|r| {
+        let mut regions = r.borrow_mut();
+        match regions.iter().rposition(|region| region.holds(addr)) {
+            Some(owner) => regions[owner].buffers.push((buf, bytes)),
+            None => innermost(&mut regions).buffers.push((buf, bytes)),
+        }
+    });
+}
+
+/// Runs `f` with this thread's regions detached, so what it allocates comes
+/// from the heap rather than the innermost region.
+pub(crate) fn outside_regions<R>(f: impl FnOnce() -> R) -> R {
+    struct Reattach(Option<ArenaState>);
+    impl Drop for Reattach {
+        fn drop(&mut self) {
+            if let Some(state) = self.0.take() {
+                install_arena_state(state);
+            }
+        }
+    }
+    let _reattach = Reattach(Some(take_arena_state()));
+    f()
+}
+
+/// A heap child a region holder keeps alive, by how its share is counted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeldChild {
+    Str,
+    Vec,
+    Node,
+    Weak,
+}
+
+/// Takes a share of `child`, a heap value stored into `holder` in region
+/// storage, given back when the holder's region pops: region storage is
+/// freed without a walk of what it holds. A child in region storage itself
+/// needs no share.
+///
+/// # Safety
+/// `child` must be null or a live value of the kind `kind` names.
+pub(crate) unsafe fn region_hold(holder: *const u8, child: *mut u8, kind: HeldChild) {
+    unsafe fn give_back_str(s: *mut u8) {
+        // SAFETY: `s` is the string whose share `region_hold` took.
+        unsafe { crate::c_abi::string::gos_rt_str_free_typed(s.cast()) };
+    }
+    unsafe fn give_back_vec(v: *mut u8) {
+        // SAFETY: `v` is the vector whose share `region_hold` took.
+        unsafe { crate::c_abi::map::gos_rt_vec_free(v.cast()) };
+    }
+    unsafe fn give_back_node(node: *mut u8) {
+        // SAFETY: `node` is the counted node whose share `region_hold` took.
+        unsafe { gos_rt_rc_release(node) };
+    }
+    unsafe fn give_back_weak(node: *mut u8) {
+        // SAFETY: `node` is the counted node whose weak share `region_hold` took.
+        unsafe { gos_rt_rc_weak_release(node) };
+    }
+    if child.is_null() || in_region_arena(untag_rc(child)) {
+        return;
+    }
+    // SAFETY: `child` is non-null (checked above) and live, of the kind `kind` names (this
+    // `unsafe fn`'s caller).
+    let give_back: Finalizer = unsafe {
+        match kind {
+            HeldChild::Str => {
+                crate::c_abi::string::gos_rt_str_retain_typed(child.cast());
+                give_back_str
+            }
+            HeldChild::Vec => {
+                crate::c_abi::vec::gos_rt_vec_retain(child.cast());
+                give_back_vec
+            }
+            HeldChild::Node => {
+                gos_rt_rc_retain(child);
+                give_back_node
+            }
+            HeldChild::Weak => {
+                gos_rt_rc_weak_retain(child);
+                give_back_weak
+            }
+        }
+    };
+    region_give_back_with(holder, child, give_back);
+}
+
 /// Takes a share of `child` for `holder`, the node a store just placed it in.
 ///
 /// `kind` names the child: 1 a `String`, 2 a `Vec`, anything else a counted
@@ -983,7 +1288,7 @@ pub unsafe extern "C" fn gos_rt_retain_held(holder: *mut u8, child: *mut u8, kin
         }
     };
     if !child.is_null() && in_region_arena(untag_rc(holder)) && !in_region_arena(untag_rc(child)) {
-        region_give_back_at_pop(child, give_back);
+        region_give_back_with(untag_rc(holder), child, give_back);
     }
 }
 
@@ -994,17 +1299,9 @@ pub unsafe extern "C" fn gos_rt_retain_held(holder: *mut u8, child: *mut u8, kin
 const REGION_BUFFER_BYTES: usize = 64 << 10;
 
 /// Whether a region vector's buffer of `bytes` is one the region owns
-/// through [`region_own_buffer`] rather than bump-allocates.
+/// through [`region_own_buffer_for`] rather than bump-allocates.
 pub(crate) fn region_owns_buffers_of(bytes: usize) -> bool {
     bytes >= REGION_BUFFER_BYTES
-}
-
-/// Records `buf`, an allocator buffer of `bytes`, as owned by the innermost
-/// region, to be freed at its pop.
-pub(crate) fn region_own_buffer(buf: *mut u8, bytes: usize) {
-    if region_active() {
-        REGIONS.with(|r| innermost(&mut r.borrow_mut()).buffers.push((buf, bytes)));
-    }
 }
 
 /// Replaces `old`, a buffer an open region owns, with `new` of `bytes` in
@@ -1055,7 +1352,7 @@ pub extern "C" fn gos_rt_arena_pop() {
     if depth == 0 {
         return;
     }
-    let pending_objs = BUMP_OBJS.with(|o| o.replace(0));
+    let pending_objs = with_bump_objs(|o| o.replace(0));
     // Take the region out in one borrow. Everything the pop then does -
     // freeing the strings it owns, recycling or retiring its slabs - can
     // re-enter the allocator and open a region of its own, so none of it may
@@ -1079,7 +1376,7 @@ pub extern "C" fn gos_rt_arena_pop() {
             .filter(|top| top.depth == depth - 1)
             .map_or(BumpState::EMPTY, |top| top.saved)
     });
-    BUMP.with(|b| b.set(bump));
+    with_bump(|b| b.set(bump));
     REGION_DEPTH.with(|d| d.set(depth - 1));
     let Some(region) = region else {
         // Every bump allocation records the region's entry first.
@@ -1101,7 +1398,7 @@ pub extern "C" fn gos_rt_arena_pop() {
         unsafe { crate::c_abi::string::free_promoted_string(body) };
     }
     for (buf, bytes) in region.buffers {
-        // SAFETY: each buffer was recorded by `region_own_buffer` or
+        // SAFETY: each buffer was recorded by `region_own_buffer_for` or
         // `region_replace_buffer` with the size `alloc_vec_buffer` gave it,
         // belongs to a vector of this region that nothing reaches after the
         // pop, and is freed once, here.
@@ -1142,6 +1439,9 @@ pub extern "C" fn gos_rt_arena_pop() {
             if kept {
                 continue;
             }
+            // SAFETY: `base` is a standard slab this region acquired and no longer uses.
+            unsafe { retire_after_delay(base) };
+            continue;
         }
         // SAFETY: `base` is the slab this region acquired, `size` bytes long, which the region no
         // longer uses.

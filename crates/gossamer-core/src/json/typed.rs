@@ -1,9 +1,13 @@
 //! The typed reader `from_json::<T>` decodes through.
 //!
-//! The document is validated once, as [`super::parse`] would read it, and then
-//! walked by byte offset without building a tree: a struct records where each
-//! of its keys' values starts and reads them in declaration order, an array
-//! records where its elements start, and a scalar is parsed where it stands.
+//! The document is validated once, as [`super::parse`] would read it, by the
+//! walk that also reads it into a [`Tape`]: every value in document order,
+//! each container with the extent of what it holds and each number already
+//! converted. The reader then walks the tape without building a tree: a
+//! struct records where each of its keys' values sits and reads them in
+//! declaration order, an array records where its elements sit, and a scalar
+//! is read from its node. A document too long for a tape is walked by byte
+//! offset instead, over the spans of its containers.
 //! The values and failures match what `json::parse` followed by `json::get`
 //! and the `json::as_*` accessors report, because the scanning is the same
 //! parser and the conversions are the same rules.
@@ -14,16 +18,33 @@
 //! reached by, so a failure carries the path to the value it names
 //! (`current.items[2]`), spelled with the document's own keys.
 
-use super::{Error, Parser, Value, integral_i64, integral_u64, validate_str_with_containers};
+use super::{
+    ContainerSpans, Error, Parser, Tape, TapeKind, Value, integral_i64, integral_u64,
+    unescape_string, validate_str_to_tape, validate_str_with_containers,
+};
+
+/// What the reader walks a document by. A node is a tape index over a tape,
+/// and a byte offset over spans.
+#[derive(Debug)]
+enum Index {
+    /// The document's tape.
+    Tape(Tape),
+    /// Each object's and array's span, for a document too long for a tape.
+    Spans {
+        containers: ContainerSpans,
+        /// The slot in `containers` just past the last one looked up. A walk
+        /// steps over a container's members in document order, so the next
+        /// lookup is nearly always at or just after it.
+        cursor: std::cell::Cell<usize>,
+    },
+}
 
 /// A walk over one validated JSON document held as `T`: an owned `String`,
 /// or text a caller keeps alive for the walk.
 #[derive(Debug)]
 pub struct TypedReader<T = String> {
     text: T,
-    /// Every object and array: its opening offset and the offset just past
-    /// its close, in document order, so stepping over one is a lookup.
-    containers: Vec<(usize, usize)>,
+    index: Index,
     /// The values stepped into, the first `depth` of them live; the rest keep
     /// their buffers for the next step.
     frames: Vec<Frame>,
@@ -75,7 +96,15 @@ struct Frame {
     fields: Vec<Option<(usize, usize)>>,
     elems: Vec<usize>,
     /// Per map entry: its key, the key's offset, and the value's offset.
-    entries: Vec<(String, usize, usize)>,
+    entries: Vec<(MapKey, usize, usize)>,
+}
+
+/// A map entry's key: the span of the document that spells it, or its text
+/// with escapes resolved when it has any.
+#[derive(Debug)]
+enum MapKey {
+    Span(usize, usize),
+    Owned(String),
 }
 
 /// What kind of JSON value starts at an offset.
@@ -104,18 +133,26 @@ impl<T: AsRef<str>> TypedReader<T> {
     pub fn over(text: T) -> Self {
         let mut reader = Self {
             text,
-            containers: Vec::new(),
+            index: Index::Tape(Tape::default()),
             frames: Vec::with_capacity(8),
             depth: 0,
             error: None,
             table: String::new(),
             table_names: Vec::new(),
         };
-        match validate_str_with_containers(reader.text.as_ref()) {
-            Ok(containers) => {
-                reader.containers = containers;
-                let start = skip_ws(reader.text.as_ref().as_bytes(), 0);
-                reader.push(Some(start), Segment::None);
+        let indexed = match validate_str_to_tape(reader.text.as_ref()) {
+            Ok(Some(tape)) => Ok((Index::Tape(tape), 0)),
+            Ok(None) => validate_str_with_containers(reader.text.as_ref()).map(|containers| {
+                let root = skip_ws(reader.text.as_ref().as_bytes(), 0);
+                let cursor = std::cell::Cell::new(0);
+                (Index::Spans { containers, cursor }, root)
+            }),
+            Err(error) => Err(error),
+        };
+        match indexed {
+            Ok((index, root)) => {
+                reader.index = index;
+                reader.push(Some(root), Segment::None);
             }
             Err(error) => reader.reject(&error),
         }
@@ -128,7 +165,7 @@ impl<T: AsRef<str>> TypedReader<T> {
     pub fn rejected(text: T, error: &Error) -> Self {
         let mut reader = Self {
             text,
-            containers: Vec::new(),
+            index: Index::Tape(Tape::default()),
             frames: Vec::with_capacity(1),
             depth: 0,
             error: None,
@@ -145,7 +182,7 @@ impl<T: AsRef<str>> TypedReader<T> {
     pub fn failing(text: T, message: &str) -> Self {
         let mut reader = Self {
             text,
-            containers: Vec::new(),
+            index: Index::Tape(Tape::default()),
             frames: Vec::with_capacity(1),
             depth: 0,
             error: None,
@@ -249,8 +286,11 @@ impl<T: AsRef<str>> TypedReader<T> {
         path
     }
 
-    /// The key whose opening quote is at `offset`, escapes resolved.
+    /// The text of the key at node `offset`, escapes resolved.
     fn key_at(&self, offset: usize) -> std::borrow::Cow<'_, str> {
+        if let Index::Tape(tape) = &self.index {
+            return self.tape_string(tape, offset);
+        }
         let bytes = self.text().as_bytes();
         let end = string_end(bytes, offset);
         let raw = &self.text()[offset + 1..end.saturating_sub(1).max(offset + 1)];
@@ -295,11 +335,40 @@ impl<T: AsRef<str>> TypedReader<T> {
             if let Some(start) = self.object_start() {
                 let table = self.table.as_bytes();
                 let names = &self.table_names;
-                self.for_each_entry(start, |key, key_at, value| {
-                    if let Some(index) = names.iter().position(|&(a, b)| &table[a..b] == key) {
-                        fields[index] = Some((key_at, value));
+                let field_of = |key: &[u8], ordinal: usize| {
+                    // Members are usually written in declaration order, so
+                    // the name at the member's own position is tried first.
+                    match names.get(ordinal) {
+                        Some(&(a, b)) if &table[a..b] == key => Some(ordinal),
+                        _ => names.iter().position(|&(a, b)| &table[a..b] == key),
                     }
-                });
+                };
+                if let Index::Tape(tape) = &self.index {
+                    let bytes = self.text().as_bytes();
+                    let object = start as u32;
+                    let mut key = object + 2;
+                    for ordinal in 0..tape.count(object) as usize {
+                        let node = tape.node(key);
+                        let spelled = &bytes[node.start as usize + 1..node.end() as usize - 1];
+                        let index = if node.kind() == TapeKind::Str {
+                            field_of(spelled, ordinal)
+                        } else {
+                            field_of(self.tape_string(tape, key as usize).as_bytes(), ordinal)
+                        };
+                        if let Some(index) = index {
+                            fields[index] = Some((key as usize, key as usize + 1));
+                        }
+                        key = tape.extent(key + 1);
+                    }
+                } else {
+                    let mut ordinal = 0;
+                    self.for_each_entry(start, |key, key_at, value| {
+                        if let Some(index) = field_of(key, ordinal) {
+                            fields[index] = Some((key_at, value));
+                        }
+                        ordinal += 1;
+                    });
+                }
             } else {
                 self.top_mut().fields = fields;
                 self.fail_expected("object");
@@ -358,10 +427,23 @@ impl<T: AsRef<str>> TypedReader<T> {
     pub fn read_f64(&mut self, expected: &str) -> f64 {
         // A number token reads as the nearest `f64` whether it is written
         // as an integer or not, which is what `as_f64` makes of each form.
-        let number = if self.kind() == Kind::Number {
-            self.number_text().and_then(|text| text.parse::<f64>().ok())
-        } else {
-            None
+        let number = match (&self.index, self.node()) {
+            _ if self.failed() => None,
+            (Index::Tape(tape), Some(node)) => {
+                let index = node as u32;
+                // Each form converts to its nearest `f64`, as parsing the
+                // token's text as one does.
+                match tape.node(index).kind() {
+                    TapeKind::Float => Some(f64::from_bits(tape.word(index))),
+                    TapeKind::Int => Some(tape.word(index) as i64 as f64),
+                    TapeKind::Uint => Some(tape.word(index) as f64),
+                    _ => None,
+                }
+            }
+            _ if self.kind() == Kind::Number => {
+                self.number_text().and_then(|text| text.parse::<f64>().ok())
+            }
+            _ => None,
         };
         let Some(n) = number else {
             self.fail_expected(expected);
@@ -371,8 +453,14 @@ impl<T: AsRef<str>> TypedReader<T> {
     }
 
     fn number_text(&self) -> Option<&str> {
-        let start = self.node()?;
-        let end = scan_value_end(self.text().as_bytes(), start);
+        let node = self.node()?;
+        let (start, end) = match &self.index {
+            Index::Tape(tape) => {
+                let at = tape.node(node as u32);
+                (at.start as usize, at.end() as usize)
+            }
+            Index::Spans { .. } => (node, scan_value_end(self.text().as_bytes(), node)),
+        };
         self.text().get(start..end)
     }
 
@@ -414,8 +502,12 @@ impl<T: AsRef<str>> TypedReader<T> {
     /// that keeps the document as `json::Value`.
     #[must_use]
     pub fn raw_value(&self) -> &str {
-        match self.node() {
-            Some(start) if !self.failed() => {
+        match (self.node(), &self.index) {
+            (Some(node), Index::Tape(tape)) if !self.failed() => {
+                let at = tape.node(node as u32);
+                &self.text()[at.start as usize..at.end() as usize]
+            }
+            (Some(start), Index::Spans { .. }) if !self.failed() => {
                 let end = self.value_end(start);
                 &self.text()[start..end]
             }
@@ -498,23 +590,41 @@ impl<T: AsRef<str>> TypedReader<T> {
             self.fail_expected(expected);
             return 0;
         };
-        let mut entries: Vec<(String, usize, usize)> = Vec::new();
-        self.for_each_entry(start, |key, key_at, value| {
-            entries.push((String::from_utf8_lossy(key).into_owned(), key_at, value));
+        let mut entries = std::mem::take(&mut self.top_mut().entries);
+        entries.clear();
+        let text = self.text().as_ptr() as usize;
+        self.for_each_entry(start, |_, key_at, value| {
+            let key = match self.key_at(key_at) {
+                std::borrow::Cow::Borrowed(spelled) => {
+                    let offset = spelled.as_ptr() as usize - text;
+                    MapKey::Span(offset, offset + spelled.len())
+                }
+                std::borrow::Cow::Owned(resolved) => MapKey::Owned(resolved),
+            };
+            entries.push((key, key_at, value));
         });
-        // A stable sort keeps a repeated key's occurrences in document order,
-        // so the last of each run is the value `json::get` answers.
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut deduped: Vec<(String, usize, usize)> = Vec::with_capacity(entries.len());
-        for entry in entries {
-            match deduped.last_mut() {
-                Some(last) if last.0 == entry.0 => *last = entry,
-                _ => deduped.push(entry),
-            }
+        if entries.len() > 1 {
+            // A stable sort keeps a repeated key's occurrences in document
+            // order, so the last of each run is the value `json::get` answers.
+            entries.sort_by(|a, b| self.entry_key(&a.0).cmp(self.entry_key(&b.0)));
+            entries.dedup_by(|later, kept| {
+                let repeated = self.entry_key(&later.0) == self.entry_key(&kept.0);
+                if repeated {
+                    std::mem::swap(later, kept);
+                }
+                repeated
+            });
         }
-        let count = deduped.len();
-        self.top_mut().entries = deduped;
+        let count = entries.len();
+        self.top_mut().entries = entries;
         count
+    }
+
+    fn entry_key<'k>(&'k self, key: &'k MapKey) -> &'k str {
+        match key {
+            MapKey::Span(start, end) => &self.text()[*start..*end],
+            MapKey::Owned(text) => text,
+        }
     }
 
     /// The key of entry `index` of the map [`Self::begin_map`] began.
@@ -523,7 +633,7 @@ impl<T: AsRef<str>> TypedReader<T> {
         self.top()
             .entries
             .get(index)
-            .map_or("", |(key, _, _)| key.as_str())
+            .map_or("", |(key, _, _)| self.entry_key(key))
     }
 
     /// Steps into the value of entry `index` of the map [`Self::begin_map`]
@@ -700,8 +810,31 @@ impl<T: AsRef<str>> TypedReader<T> {
         if self.failed() {
             return Kind::Null;
         }
-        self.node()
-            .map_or(Kind::Null, |start| kind_at(self.text().as_bytes(), start))
+        let Some(node) = self.node() else {
+            return Kind::Null;
+        };
+        match &self.index {
+            Index::Tape(tape) => match tape.node(node as u32).kind() {
+                TapeKind::Null => Kind::Null,
+                TapeKind::False | TapeKind::True => Kind::Bool,
+                TapeKind::Int | TapeKind::Uint | TapeKind::Float => Kind::Number,
+                TapeKind::Str | TapeKind::StrEscaped => Kind::String,
+                TapeKind::Array => Kind::Array,
+                TapeKind::Object => Kind::Object,
+            },
+            Index::Spans { .. } => kind_at(self.text().as_bytes(), node),
+        }
+    }
+
+    /// The text of the string at tape node `node`, escapes resolved.
+    fn tape_string(&self, tape: &Tape, node: usize) -> std::borrow::Cow<'_, str> {
+        let at = tape.node(node as u32);
+        let raw = &self.text()[at.start as usize + 1..at.end() as usize - 1];
+        if at.kind() == TapeKind::StrEscaped {
+            std::borrow::Cow::Owned(unescape_string(raw))
+        } else {
+            std::borrow::Cow::Borrowed(raw)
+        }
     }
 
     fn object_start(&self) -> Option<usize> {
@@ -713,6 +846,22 @@ impl<T: AsRef<str>> TypedReader<T> {
     fn scalar(&self) -> Option<Value> {
         if self.failed() {
             return None;
+        }
+        if let (Index::Tape(tape), Some(node)) = (&self.index, self.node()) {
+            let index = node as u32;
+            let word = || tape.word(index);
+            return match tape.node(index).kind() {
+                TapeKind::Null => Some(Value::Null),
+                TapeKind::False => Some(Value::Bool(false)),
+                TapeKind::True => Some(Value::Bool(true)),
+                TapeKind::Int => Some(Value::Int(word() as i64)),
+                TapeKind::Uint => Some(Value::Uint(word())),
+                TapeKind::Float => Some(Value::Number(f64::from_bits(word()))),
+                TapeKind::Str | TapeKind::StrEscaped => {
+                    Some(Value::String(self.tape_string(tape, node).into_owned()))
+                }
+                TapeKind::Array | TapeKind::Object => None,
+            };
         }
         match self.kind() {
             Kind::Null => Some(Value::Null),
@@ -737,6 +886,15 @@ impl<T: AsRef<str>> TypedReader<T> {
         let Some(start) = self.node() else {
             return;
         };
+        if let Index::Tape(tape) = &self.index {
+            let array = start as u32;
+            let mut at = array + 2;
+            for _ in 0..tape.count(array) {
+                elems.push(at as usize);
+                at = tape.extent(at);
+            }
+            return;
+        }
         let bytes = self.text().as_bytes();
         let mut cursor = skip_ws(bytes, start + 1);
         if bytes.get(cursor) == Some(&b']') {
@@ -756,6 +914,17 @@ impl<T: AsRef<str>> TypedReader<T> {
     /// Calls `f` with each key of the object at `start`, the offset of the
     /// key's opening quote, and the offset of its value, in document order.
     fn for_each_entry(&self, start: usize, mut f: impl FnMut(&[u8], usize, usize)) {
+        if let Index::Tape(tape) = &self.index {
+            let object = start as u32;
+            let mut key = object + 2;
+            for _ in 0..tape.count(object) {
+                let value = key + 1;
+                let text = self.tape_string(tape, key as usize);
+                f(text.as_bytes(), key as usize, value as usize);
+                key = tape.extent(value);
+            }
+            return;
+        }
         let bytes = self.text().as_bytes();
         let mut cursor = skip_ws(bytes, start + 1);
         if bytes.get(cursor) == Some(&b'}') {
@@ -797,15 +966,36 @@ impl<T: AsRef<str>> TypedReader<T> {
     fn value_end(&self, start: usize) -> usize {
         let bytes = self.text().as_bytes();
         match bytes.get(start) {
-            Some(b'{' | b'[') => self
-                .containers
-                .binary_search_by_key(&start, |(open, _)| *open)
-                .map_or_else(
-                    |_| scan_value_end(bytes, start),
-                    |slot| self.containers[slot].1,
-                ),
+            Some(b'{' | b'[') => match (&self.index, self.container_slot(start)) {
+                (Index::Spans { containers, .. }, Some(slot)) => containers[slot].1,
+                _ => scan_value_end(bytes, start),
+            },
             _ => scan_value_end(bytes, start),
         }
+    }
+
+    /// The slot of the container opening at `start`: found by stepping
+    /// forward from the last lookup, which a walk in document order reaches
+    /// in a step or two, else by a search of the whole table.
+    fn container_slot(&self, start: usize) -> Option<usize> {
+        let Index::Spans { containers, cursor } = &self.index else {
+            return None;
+        };
+        let from = cursor.get();
+        let ahead = containers
+            .get(from..)
+            .unwrap_or_default()
+            .iter()
+            .take(4)
+            .position(|(open, _)| *open == start)
+            .map(|offset| from + offset);
+        let slot = ahead.or_else(|| {
+            containers
+                .binary_search_by_key(&start, |(open, _)| *open)
+                .ok()
+        })?;
+        cursor.set(slot + 1);
+        Some(slot)
     }
 }
 
@@ -904,11 +1094,11 @@ pub fn indent_text(compact: &str) -> String {
 
 /// Appends an object member's key text to `out`, after a `,` unless the
 /// member is the first of the object being written.
-pub fn write_key(out: &mut Vec<u8>, text: &str) {
+pub fn write_key(out: &mut Vec<u8>, text: &[u8]) {
     if out.last().is_some_and(|&b| b != b'{') {
         out.push(b',');
     }
-    out.extend_from_slice(text.as_bytes());
+    out.extend_from_slice(text);
 }
 
 /// Appends `text` as a JSON string literal.

@@ -25,4 +25,5 @@ include!("opt/exit_releases.rs");
 include!("opt/exit_tails.rs");
 include!("opt/region_pops.rs");
 include!("opt/move_forward.rs");
+include!("opt/move_out.rs");
 include!("opt/tests.rs");

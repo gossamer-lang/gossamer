@@ -1325,7 +1325,9 @@ unsafe fn encode_skey(key: *const u8, desc: &[u8], out: &mut Vec<u8>) -> Option<
         // SAFETY: `off` is below the descriptor's slot count times eight, inside the key's slots.
         let slot = unsafe { key.add(off) };
         match c {
-            b'B' => {
+            // An `N` slot is an `Option` held in one word: null for `None`,
+            // keyed by presence and content as a `B` slot is.
+            b'B' | b'N' => {
                 let inner = boxed.next()?;
                 // SAFETY: `slot` addresses one 8-byte slot of the key.
                 let raw = unsafe { crate::c_abi::vec::slot_read_word(slot) }.expose_provenance();
@@ -1487,7 +1489,7 @@ pub(crate) unsafe fn consume_moved_skey(key: *const u8, desc: *const c_char) {
             // SAFETY: `index * 8` is inside the key's slots, one per descriptor character.
             unsafe { crate::c_abi::vec::slot_read_word(key.add(index * 8)) }.expose_provenance();
         match kind {
-            b'B' => {
+            b'B' | b'N' => {
                 let payload: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
                 // A `B` slot holds null or a payload word; the blob it names
                 // carries the moved share this call consumes.
@@ -3120,7 +3122,7 @@ unsafe fn map_aggregate_entries(m: *const GosMap) -> Vec<DescEntry> {
                         key_by_word: false,
                         owned_strings: slots_of(b'S'),
                         owned_vecs: slots_of(b'V'),
-                        owned_blobs: slots_of(b'B'),
+                        owned_blobs: [slots_of(b'B'), slots_of(b'N')].concat(),
                         value: entries[k],
                     })
                 })
@@ -4062,6 +4064,8 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
         // `free_vec_buffer`.
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let compact_header = crate::c_abi::vec::vec_has_compact_header(unsafe { &*v });
+        // SAFETY: as above.
+        let tail_header = crate::c_abi::vec::vec_has_tail(unsafe { &*v });
         let inline_ptr = v.cast::<crate::c_abi::vec::InlineVec>();
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let boxed = unsafe { &*v };
@@ -4174,7 +4178,10 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
         unsafe { crate::c_abi::vec::drop_vec_owner(&mut *v) };
         // Reconstruct the owning box now that the self-referential walk is
         // done, so its drop reclaims the header block (and any inline buffer).
-        if compact_header {
+        if tail_header {
+            // SAFETY: `v` is a tail header whose split buffer, if any, was freed above.
+            unsafe { crate::c_abi::vec::free_tail_header(v) };
+        } else if compact_header {
             // SAFETY: `v` is a compact header `Box::into_raw` made, freed only here.
             drop(unsafe { Box::from_raw(v) });
         } else {
@@ -4776,11 +4783,30 @@ pub unsafe extern "C" fn gos_rt_map_keys_str(m: *const GosMap) -> *mut GosVec {
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         let push_key = |k: &[u8]| {
-            let cstr = alloc_cstring(k);
+            // An ASCII key needs no scan for its character index.
+            let cstr = if k.is_ascii() {
+                crate::c_abi::string::alloc_ascii_cstring(k)
+            } else {
+                alloc_cstring(k)
+            };
             let slot = (cstr as usize as i64).to_ne_bytes();
             // SAFETY: `out` is the live vec made above, and `slot` one 8-byte string word.
             unsafe { gos_rt_vec_push(out, slot.as_ptr()) };
         };
+        // A single key is in order already.
+        let single = match &*storage {
+            MapStorage::StrI64(inner) if inner.len() == 1 => {
+                inner.keys().next().map(ByteKey::as_slice)
+            }
+            MapStorage::StrStr(inner) if inner.len() == 1 => {
+                inner.keys().next().map(ByteKey::as_slice)
+            }
+            _ => None,
+        };
+        if let Some(key) = single {
+            push_key(key);
+            return out;
+        }
         // Sort by key (lexicographic byte order, matching the VM's
         // `SmolStr` ordering) for deterministic, cross-tier order.
         let keys = match &*storage {
@@ -5221,7 +5247,7 @@ pub unsafe extern "C" fn gos_rt_map_keys_skey(m: *const GosMap) -> *mut GosVec {
             .filter_map(|(i, c)| match *c {
                 b'S' => Some([-1, 0, i as i64, i64::from(vec_elem_kind::STRING)]),
                 b'V' => Some([-1, 0, i as i64, i64::from(vec_elem_kind::VEC)]),
-                b'B' => Some([-1, 0, i as i64, i64::from(vec_elem_kind::RC_NODE)]),
+                b'B' | b'N' => Some([-1, 0, i as i64, i64::from(vec_elem_kind::RC_NODE)]),
                 _ => None,
             })
             .flatten()
@@ -5354,7 +5380,7 @@ fn skey_order_at<'a>(key: &'a [u8], cursor: &mut usize, desc: &[u8]) -> Vec<Skey
                 *cursor += len * stride;
                 fields.push(SkeyField::Seq(seq_words(bytes, stride)));
             }
-            b'B' => {
+            b'B' | b'N' => {
                 let Some(inner) = boxed.next() else {
                     break;
                 };
@@ -5363,6 +5389,11 @@ fn skey_order_at<'a>(key: &'a [u8], cursor: &mut usize, desc: &[u8]) -> Vec<Skey
                 };
                 let present = marker.iter().any(|&b| b != 0);
                 *cursor += 8;
+                // A one-word `Option` orders as its carrier does: by
+                // discriminant first, `Some` (0) before `None` (1).
+                if code == b'N' {
+                    fields.push(SkeyField::Word(i64::from(!present)));
+                }
                 let payload = present.then(|| skey_order_at(key, cursor, inner));
                 fields.push(SkeyField::Boxed(payload));
             }
@@ -5455,7 +5486,7 @@ fn decode_skey_at(key: &[u8], cursor: &mut usize, desc: &[u8], slots: &mut [i64]
                 }
                 slots[index] = vec as usize as i64;
             }
-            b'B' => {
+            b'B' | b'N' => {
                 let Some(inner) = boxed.next() else {
                     return false;
                 };

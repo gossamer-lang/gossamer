@@ -164,7 +164,9 @@ unsafe fn desc_slot_span_walk(tags: DescStream, cursor: &mut usize) -> usize {
         gossamer_abi::DESC_PACKED => {
             let words = tags.byte(*cursor) as usize;
             let leaves = tags.byte(*cursor + 1) as usize;
-            *cursor += 2 + leaves * 3;
+            *cursor += 2;
+            // SAFETY: `cursor` addresses the entry's first leaf.
+            unsafe { skip_packed_leaves(tags, cursor, leaves) };
             words
         }
         gossamer_abi::DESC_OPTION => {
@@ -204,6 +206,25 @@ unsafe fn push_fresh_text(out: &mut String, rendered: *mut c_char) {
     unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
 }
 
+/// Advances `cursor`, at the first of `leaves` leaves of a `DESC_PACKED`
+/// entry, past them: three bytes each, and a nested leaf's own descriptor.
+///
+/// # Safety
+/// `cursor` addresses `leaves` leaves of a packed entry of `tags`.
+unsafe fn skip_packed_leaves(tags: DescStream, cursor: &mut usize, leaves: usize) {
+    for _ in 0..leaves {
+        let kind = tags.byte(*cursor + 2);
+        *cursor += 3;
+        if matches!(
+            kind,
+            gossamer_abi::packed_leaf::NESTED | gossamer_abi::packed_leaf::NICHE
+        ) {
+            // SAFETY: a nested or one-word carrier leaf is followed by a whole descriptor.
+            unsafe { skip_desc(tags, cursor) };
+        }
+    }
+}
+
 unsafe fn skip_desc(tags: DescStream, cursor: &mut usize) {
     let tag = tags.byte(*cursor);
     *cursor += 1;
@@ -233,7 +254,9 @@ unsafe fn skip_desc(tags: DescStream, cursor: &mut usize) {
         gossamer_abi::DESC_ADT => *cursor += 3,
         gossamer_abi::DESC_PACKED => {
             let leaves = tags.byte(*cursor + 1) as usize;
-            *cursor += 2 + leaves * 3;
+            *cursor += 2;
+            // SAFETY: `cursor` addresses the entry's first leaf.
+            unsafe { skip_packed_leaves(tags, cursor, leaves) };
         }
         // SAFETY: `cursor` addresses the payload descriptor that follows.
         gossamer_abi::DESC_OPTION => unsafe { skip_desc(tags, cursor) },

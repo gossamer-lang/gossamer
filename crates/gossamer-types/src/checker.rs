@@ -137,6 +137,7 @@ impl TypeChecker<'_> {
         self.check_deferred_field_receivers();
         self.check_deferred_structural();
         self.check_deferred_shared_payloads();
+        self.check_deferred_fn_item_type_args();
         self.resolve_table();
         let diagnostics = Self::dedupe_diagnostics(self.diagnostics);
         (self.table, diagnostics)
@@ -818,6 +819,9 @@ struct TypeChecker<'a> {
     export_symbols: HashMap<String, String>,
     /// Structs declared `#[repr(C)]`, which may cross the C boundary.
     repr_c_structs: HashSet<DefId>,
+    /// Every path naming a function item, with its span and spelling, for
+    /// the check that each generic one's type arguments were inferred.
+    fn_item_paths: Vec<(NodeId, Span, String)>,
     /// Foreign types declared `type Name` in an extern block, which have no
     /// Gossamer value and are reached only through `ffi::Ptr`.
     opaque_types: HashSet<DefId>,
@@ -1198,6 +1202,10 @@ struct TypeChecker<'a> {
     /// declaration order. Every `impl Trait for Type` has to supply them;
     /// monomorphisation emits a direct call to each one.
     trait_required_methods: HashMap<String, Vec<String>>,
+    /// Each trait's method declarations with the number of type parameters
+    /// the trait takes, keyed by trait name, for checking an impl's methods
+    /// against the signatures the trait declares.
+    trait_fn_decls: HashMap<String, (usize, Vec<gossamer_ast::FnDecl>)>,
     /// Types whose source writes its own `cmp`, so their order is the one that
     /// `impl` answers rather than the field-by-field one. A container that
     /// orders its elements internally cannot reach it.
@@ -1361,6 +1369,7 @@ impl<'a> TypeChecker<'a> {
             foreign_fns: HashMap::new(),
             export_symbols: HashMap::new(),
             repr_c_structs: HashSet::new(),
+            fn_item_paths: Vec::new(),
             unsafe_depth: 0,
             suppressed: SuppressedReadChecks::default(),
             deferred_reference_storage: Vec::new(),
@@ -1445,6 +1454,7 @@ impl<'a> TypeChecker<'a> {
             current_module: Vec::new(),
             trait_own_methods: HashMap::new(),
             trait_required_methods: builtin_trait_required_methods(),
+            trait_fn_decls: HashMap::new(),
             user_ordered_types: std::collections::HashSet::new(),
             trait_declared_methods: HashMap::new(),
             claimed_trait_impls: HashMap::new(),
@@ -2037,6 +2047,151 @@ impl<'a> TypeChecker<'a> {
             },
             span,
         );
+    }
+
+    /// Reports every method of an `impl Trait for Type` block whose
+    /// receiver, parameter count, parameter types, or return type differ
+    /// from the trait's declaration. `Self` in the trait's signature names
+    /// the implementing type; a position that names one of the trait's own
+    /// type parameters or an associated type is compared by its shape only.
+    fn check_trait_impl_signatures(&mut self, decl: &ImplDecl) {
+        let Some(trait_name) = decl
+            .trait_ref
+            .as_ref()
+            .and_then(|trait_ref| trait_ref.path.segments.last())
+            .map(|segment| segment.name.name.clone())
+        else {
+            return;
+        };
+        let Some((trait_generics, declared)) = self.trait_fn_decls.get(&trait_name).cloned() else {
+            return;
+        };
+        let ty_name = impl_self_ty_name(decl);
+        let scope = self.enter_generic_scope(&decl.generics);
+        let impl_self_ty = self.type_from_ast(&decl.self_ty);
+        let prev_self_ty = self.current_self_ty.replace(impl_self_ty);
+        for item in &decl.items {
+            let ImplItem::Fn(written) = item else {
+                continue;
+            };
+            let Some(expected) = declared.iter().find(|d| d.name.name == written.name.name) else {
+                continue;
+            };
+            let compare_types = trait_generics == 0
+                && expected.generics.params.is_empty()
+                && written.generics.params.is_empty();
+            if let Some(detail) = self.signature_difference(expected, written, compare_types) {
+                self.emit(
+                    TypeError::TraitImplSignatureMismatch {
+                        trait_name: trait_name.clone(),
+                        ty: ty_name.clone(),
+                        method: written.name.name.clone(),
+                        detail,
+                        declared: describe_fn_signature(expected),
+                    },
+                    written.span,
+                );
+            }
+        }
+        self.current_self_ty = prev_self_ty;
+        self.leave_generic_scope(scope);
+    }
+
+    /// What differs between a trait's declaration of a method and an impl's,
+    /// in words, or `None` when the two agree.
+    fn signature_difference(
+        &mut self,
+        expected: &gossamer_ast::FnDecl,
+        written: &gossamer_ast::FnDecl,
+        compare_types: bool,
+    ) -> Option<String> {
+        let receiver = |decl: &gossamer_ast::FnDecl| {
+            decl.params.iter().find_map(|param| match param {
+                FnParam::Receiver(receiver) => Some(*receiver),
+                FnParam::Typed { .. } => None,
+            })
+        };
+        let spell = |receiver: Option<gossamer_ast::Receiver>| {
+            receiver.map_or("no receiver", gossamer_ast::Receiver::as_str)
+        };
+        let (want, got) = (receiver(expected), receiver(written));
+        if want != got {
+            return Some(format!(
+                "it takes `{}` where the trait declares `{}`",
+                spell(got),
+                spell(want)
+            ));
+        }
+        let typed = |decl: &gossamer_ast::FnDecl| -> Vec<(String, gossamer_ast::Type)> {
+            decl.params
+                .iter()
+                .filter_map(|param| match param {
+                    FnParam::Typed { pattern, ty, .. } => Some((pattern_name(pattern), ty.clone())),
+                    FnParam::Receiver(_) => None,
+                })
+                .collect()
+        };
+        let (want_params, got_params) = (typed(expected), typed(written));
+        if want_params.len() != got_params.len() {
+            return Some(format!(
+                "it takes {} parameter{} where the trait declares {}",
+                got_params.len(),
+                if got_params.len() == 1 { "" } else { "s" },
+                want_params.len()
+            ));
+        }
+        if !compare_types {
+            return None;
+        }
+        for ((name, want), (_, got)) in want_params.iter().zip(&got_params) {
+            if let Some((want, got)) = self.differing_types(want, got) {
+                return Some(format!(
+                    "parameter `{name}` is `{got}` where the trait declares `{want}`"
+                ));
+            }
+        }
+        let unit = || {
+            gossamer_ast::Type::new(
+                NodeId::DUMMY,
+                Span::default(),
+                gossamer_ast::ty::TypeKind::Unit,
+            )
+        };
+        let want_ret = expected.ret.clone().unwrap_or_else(unit);
+        let got_ret = written.ret.clone().unwrap_or_else(unit);
+        self.differing_types(&want_ret, &got_ret)
+            .map(|(want, got)| format!("it answers `{got}` where the trait declares `{want}`"))
+    }
+
+    /// The two types as rendered when they differ. A type naming an
+    /// associated type of `Self` is the impl's to choose, so it is never
+    /// reported.
+    fn differing_types(
+        &mut self,
+        want: &gossamer_ast::Type,
+        got: &gossamer_ast::Type,
+    ) -> Option<(String, String)> {
+        if type_names_self_projection(want) {
+            return None;
+        }
+        let (want_ty, got_ty) = (self.type_from_ast(want), self.type_from_ast(got));
+        if want_ty == got_ty {
+            return None;
+        }
+        let unsettled = |this: &Self, ty: Ty| {
+            matches!(
+                this.tcx.kind(ty),
+                Some(TyKind::Error | TyKind::Var(_) | TyKind::Param { .. })
+            )
+        };
+        if unsettled(self, want_ty) || unsettled(self, got_ty) {
+            return None;
+        }
+        let (want, got) = (
+            crate::printer::render_ty(self.tcx, want_ty),
+            crate::printer::render_ty(self.tcx, got_ty),
+        );
+        (want != got).then_some((want, got))
     }
 
     /// Reports every item an `impl Trait for Type` block defines that the
@@ -2878,6 +3033,28 @@ impl<'a> TypeChecker<'a> {
             value: v,
             ordered,
         })
+    }
+
+    /// Reports a generic function named or called with a type argument
+    /// nothing fixed by the end of inference: no tier can run it without
+    /// knowing which instantiation it is.
+    fn check_deferred_fn_item_type_args(&mut self) {
+        for (node, span, name) in std::mem::take(&mut self.fn_item_paths) {
+            let Some(ty) = self.table.get(node) else {
+                continue;
+            };
+            let resolved = self.deep_resolve(ty);
+            let Some(TyKind::FnDef { substs, .. }) = self.tcx.kind(resolved) else {
+                continue;
+            };
+            let uninferred = substs
+                .types()
+                .iter()
+                .any(|arg| matches!(self.tcx.kind(*arg), Some(TyKind::Var(_))));
+            if uninferred {
+                self.emit(TypeError::FnItemTypeArgsUninferred { name }, span);
+            }
+        }
     }
 
     fn deep_resolve(&mut self, ty: Ty) -> Ty {
@@ -4771,6 +4948,13 @@ fn cast_allowed(from: &TyKind, to: &TyKind) -> bool {
 /// anything else falls back to a generic label.
 fn callee_display_name(callee: &Expr) -> String {
     match &callee.kind {
+        // A stdlib call the parser routed to its injected wrapper is named
+        // as the program wrote it.
+        ExprKind::Path(path) if path.segments.len() == 1 => {
+            let name = path.segments[0].name.name.as_str();
+            gossamer_parse::autoderive::stdlib_wrapper_spelling(name)
+                .unwrap_or_else(|| name.to_string())
+        }
         ExprKind::Path(path) => path
             .segments
             .iter()
@@ -4905,6 +5089,47 @@ fn builtin_trait_needs_impl(name: &str) -> bool {
 }
 
 /// Head name of the type an `impl` block attaches to, as written.
+/// A method's signature as a trait declares it: `fn name(&self, x: T) -> R`.
+fn describe_fn_signature(decl: &gossamer_ast::FnDecl) -> String {
+    let render = |ty: &gossamer_ast::Type| {
+        let mut printer = gossamer_ast::Printer::new();
+        printer.print_type(ty);
+        printer.finish()
+    };
+    let params: Vec<String> = decl
+        .params
+        .iter()
+        .map(|param| match param {
+            FnParam::Receiver(receiver) => receiver.as_str().to_string(),
+            FnParam::Typed { pattern, ty, .. } => {
+                format!("{}: {}", pattern_name(pattern), render(ty))
+            }
+        })
+        .collect();
+    let ret = decl
+        .ret
+        .as_ref()
+        .map(|ty| format!(" -> {}", render(ty)))
+        .unwrap_or_default();
+    format!("fn {}({}){ret}", decl.name.name, params.join(", "))
+}
+
+/// The name a parameter's pattern binds, or `_` for a destructuring one.
+fn pattern_name(pattern: &gossamer_ast::Pattern) -> String {
+    match &pattern.kind {
+        gossamer_ast::PatternKind::Ident { name, .. } => name.name.clone(),
+        _ => "_".to_string(),
+    }
+}
+
+/// Whether a type names an associated type through `Self` (`Self::Item`),
+/// which each impl chooses for itself.
+fn type_names_self_projection(ty: &gossamer_ast::Type) -> bool {
+    let mut printer = gossamer_ast::Printer::new();
+    printer.print_type(ty);
+    printer.finish().contains("Self::")
+}
+
 fn impl_self_ty_name(decl: &ImplDecl) -> String {
     // A structural type keys on the name every tier identifies a receiver of
     // it by, so two blocks a dispatch cannot separate are reported here rather

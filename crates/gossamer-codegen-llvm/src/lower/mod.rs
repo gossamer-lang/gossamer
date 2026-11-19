@@ -955,6 +955,7 @@ fn escape_c_string(s: &str) -> String {
     out
 }
 
+mod heap_inline;
 mod lower_call;
 mod lower_diagnostic;
 mod lower_expr_ops;

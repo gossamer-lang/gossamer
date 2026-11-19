@@ -211,6 +211,9 @@ pub enum FieldDefault {
     Zero,
     /// `#[default(value)]`.
     Value(DefaultValue),
+    /// The default the field declares (`name: T = expr`), evaluated by the
+    /// function of this name the parser wrote beside the type.
+    Declared(String),
 }
 
 /// A field's serde attributes.

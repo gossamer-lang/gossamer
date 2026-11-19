@@ -50,9 +50,19 @@ impl Printer {
     pub fn print_source_file(&mut self, source: &SourceFile) {
         let mut needs_blank = false;
         if !source.uses.is_empty() {
-            for use_decl in &source.uses {
-                self.print_use_decl(use_decl);
+            let mut rest = source.uses.as_slice();
+            while let Some(first) = rest.first() {
+                let len = match first.group {
+                    Some(group) => rest
+                        .iter()
+                        .take_while(|decl| decl.group == Some(group))
+                        .count(),
+                    None => 1,
+                };
+                let (decls, after) = rest.split_at(len);
+                self.print_use_group(decls);
                 self.newline();
+                rest = after;
             }
             needs_blank = true;
         }

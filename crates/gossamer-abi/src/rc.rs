@@ -212,3 +212,128 @@ pub const fn rc_child_blob_gate(kind: i64) -> Option<i64> {
         _ => None,
     }
 }
+
+/// Whether a struct layout names a child that owns a table of its own: a
+/// `Map`, set, deque, heap, iterator, or JSON handle. Copying such a value
+/// clones the table, so the copy needs an owner even inside a region.
+/// `word(i)` reads the layout's `i`th word; a layout of any other kind
+/// answers `false`.
+pub fn struct_meta_names_table_child(word: impl Fn(usize) -> i64) -> bool {
+    if rc_kind(word(0)) != RC_KIND_STRUCT {
+        return false;
+    }
+    let variants = word(1).max(0);
+    let mut idx: usize = 2;
+    for _ in 0..variants {
+        let count = usize::try_from(word(idx + 1)).unwrap_or(0);
+        let names_table = (0..count).any(|j| {
+            matches!(
+                word(idx + 2 + j) >> RC_CHILD_KIND_SHIFT,
+                RC_CHILD_MAP
+                    | RC_CHILD_SET
+                    | RC_CHILD_DEQUE
+                    | RC_CHILD_HEAP
+                    | RC_CHILD_ITER
+                    | RC_CHILD_ITER_PAIR
+                    | RC_CHILD_JSON
+            )
+        });
+        if names_table {
+            return true;
+        }
+        idx += 2 + count;
+    }
+    false
+}
+
+/// The runtime entry that allocates a counted copy of a value laid out by
+/// `meta` (`None` for a leaf), taking the source's shares of its children
+/// when `moved`. A layout naming no table-owning child takes the entry that
+/// bumps the open region's slab without inspecting the layout.
+#[must_use]
+pub fn rc_alloc_entry(moved: bool, meta: Option<&[i64]>) -> &'static str {
+    let plain = meta
+        .is_none_or(|words| !struct_meta_names_table_child(|i| words.get(i).copied().unwrap_or(0)));
+    match (moved, plain) {
+        (true, true) => "gos_rt_rc_alloc_move_plain",
+        (true, false) => "gos_rt_rc_alloc_move",
+        (false, true) => "gos_rt_rc_alloc_copy_plain",
+        (false, false) => "gos_rt_rc_alloc_copy",
+    }
+}
+
+/// [`rc_alloc_entry`] for a layout named by its symbol, `None` or empty for a
+/// leaf. A symbol `layout` does not know takes the general entry.
+#[must_use]
+pub fn rc_alloc_entry_for<'a>(
+    moved: bool,
+    symbol: Option<&str>,
+    layout: impl Fn(&str) -> Option<&'a [i64]>,
+) -> &'static str {
+    match symbol.filter(|sym| !sym.is_empty()) {
+        None => rc_alloc_entry(moved, None),
+        Some(sym) => match layout(sym) {
+            Some(words) => rc_alloc_entry(moved, Some(words)),
+            None if moved => "gos_rt_rc_alloc_move",
+            None => "gos_rt_rc_alloc_copy",
+        },
+    }
+}
+
+/// The per-thread block compiled code bumps an open region's slab through:
+/// the slab's base (null with no region open or no slab yet), the offset in
+/// use, the slab's end offset, and the objects bumped into it.
+pub mod region_bump {
+    /// The block a compiled program defines, one per thread.
+    pub const PROGRAM_BLOCK_SYMBOL: &str = "gos_rt_region_bump_tls";
+    /// The runtime entry the program hands its block's accessor to.
+    pub const ADOPT_SYMBOL: &str = "gos_rt_region_bump_adopt";
+    /// Offset of the slab base pointer.
+    pub const BASE_OFFSET: i64 = 0;
+    /// Offset of the slab offset the next bump starts at.
+    pub const CUR_OFFSET: i64 = 8;
+    /// Offset of the slab's end offset.
+    pub const END_OFFSET: i64 = 16;
+    /// Offset of the count of objects bumped into the innermost region.
+    pub const OBJS_OFFSET: i64 = 24;
+    /// Every bump is a whole number of these bytes.
+    pub const ALIGN: i64 = 8;
+}
+
+/// Layout of a counted object's header and the runtime data compiled code
+/// reads to take a retain or release inline. The runtime pins its
+/// `RcHeader` to these, and both code generators emit the fast paths from
+/// them, so the three agree by construction.
+pub mod header {
+    /// Bytes of header in front of every counted payload.
+    pub const BYTES: i64 = 8;
+    /// Offset of the 32-bit count word from the payload.
+    pub const STRONG_OFFSET: i64 = -8;
+    /// Offset of the 16-bit type-meta id from the payload.
+    pub const META_ID_OFFSET: i64 = -2;
+    /// Mask of the strong count in the count word.
+    pub const STRONG_COUNT_MASK: u32 = 0x07FF_FFFF;
+    /// The object has escaped to another goroutine and counts atomically.
+    pub const SHARED_BIT: u32 = 1 << 27;
+    /// The cycle collector's two color bits begin here.
+    pub const COLOR_SHIFT: u32 = 28;
+    /// The object lives in a region and is freed with it, never counted.
+    pub const REGION_BIT: u32 = 1 << 30;
+    /// The object is buffered as a cycle candidate.
+    pub const BUFFERED_BIT: u32 = 1 << 31;
+    /// A strong count that never moves.
+    pub const STRONG_IMMORTAL: u32 = STRONG_COUNT_MASK;
+    /// Bits per word of the acyclic-type table.
+    pub const ACYCLIC_WORD_BITS: u32 = 64;
+    /// Nonzero while any counter, ledger, sampler, or trace is armed; every
+    /// inline retain and release then takes the runtime call, which records
+    /// it.
+    pub const INSTRUMENTATION_SYMBOL: &str = "gos_rt_instrumentation";
+    /// Base address of the region arena reservation; zero until one exists.
+    pub const REGION_ARENA_BASE_SYMBOL: &str = "gos_rt_region_arena_base";
+    /// Bytes the region arena reservation spans; zero without one.
+    pub const REGION_ARENA_LEN_SYMBOL: &str = "gos_rt_region_arena_len";
+    /// One bit per type-meta id, set when no cycle can pass through that
+    /// layout; a release that leaves such an object alive buffers nothing.
+    pub const META_ACYCLIC_SYMBOL: &str = "gos_rt_meta_acyclic";
+}

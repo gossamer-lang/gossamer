@@ -16,6 +16,7 @@ mod declined;
 mod diagnostic;
 mod entry_main;
 mod expressions;
+mod field_defaults;
 mod format;
 mod generics;
 mod items;
@@ -24,14 +25,24 @@ mod patterns;
 mod recovery;
 mod statements;
 mod stream;
+mod type_bodies;
 mod types;
 mod use_decls;
 
 pub use diagnostic::{ParseDiagnostic, ParseError, SerdeTargetRefusal};
 pub use entry_main::synthesize_entry_main;
+pub use field_defaults::synthesize_field_default_fns;
+
+/// Whether `sf` writes a field default or a type body, the two spellings the
+/// front end rewrites before anything resolves.
+#[must_use]
+pub fn has_front_end_sugar(sf: &SourceFile) -> bool {
+    field_defaults::has_field_default(&sf.items) || type_bodies::has_type_body(&sf.items)
+}
 pub use format::{FormatError, format_source};
 pub use parser::Parser;
 pub use stream::{DocKind, StoredComment, TokenStream};
+pub use type_bodies::desugar_type_bodies;
 
 use gossamer_ast::SourceFile;
 use gossamer_lex::{FileId, Keyword};
@@ -67,9 +78,9 @@ fn parse_with(mut parser: Parser<'_>, file: FileId) -> (SourceFile, Vec<ParseDia
     let mut uses = Vec::new();
     loop {
         if parser.at_keyword_public(Keyword::Use) {
-            uses.push(parser.parse_use_decl());
+            uses.extend(parser.parse_use_decls());
         } else if parser.at_attributed_use() {
-            uses.push(parser.parse_attributed_use());
+            uses.extend(parser.parse_attributed_use());
         } else {
             break;
         }

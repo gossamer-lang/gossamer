@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GR0026]: A field default reads `self` or another field of its struct. A - here
+--- framed ---
+error[GR0026]: A field default reads `self` or another field of its struct. A
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

@@ -354,6 +354,9 @@ pub(crate) fn cmd_doc(file: &Path, html_out: Option<&std::path::Path>) -> Result
         }
         return Err(anyhow!("parse errors"));
     }
+    // A type's in-body methods document as the `impl` blocks they stand for.
+    let mut sf = sf;
+    let _ = gossamer_parse::desugar_type_bodies(&mut sf);
     let entries = collect_doc_entries(&sf, &source);
     if let Some(path) = html_out {
         let html = render_doc_html(file, &entries);

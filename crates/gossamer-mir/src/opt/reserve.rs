@@ -2125,3 +2125,109 @@ fn aggregate_field_origin(
     }
     None
 }
+
+/// Rebuilds, in index order, the nested vectors of a value a function stores
+/// into a field of something that outlives its frame (`self.graph = graph`).
+///
+/// A `Vec<Vec<T>>` filled push by push has each element's storage wherever
+/// the allocator had room when that element last grew, so a later walk of it
+/// pays a cache miss per element header and another per element buffer. The
+/// store is where such a structure is handed to the code that reads it, and
+/// the rebuild there gives each element one block in the order a reader
+/// visits them. The runtime leaves elements already laid out that way alone.
+/// A store on a loop is left out: rebuilding there would repeat the copy on
+/// every pass.
+pub(crate) fn compact_nested_vecs_on_outliving_store(body: &mut Body, tcx: &TyCtxt) {
+    let on_cycle = blocks_on_a_cycle(body);
+    let mut inserts: Vec<(usize, Vec<(Place, Ty)>)> = Vec::new();
+    for (bi, block) in body.blocks.iter().enumerate() {
+        if on_cycle.get(bi).copied().unwrap_or(true) {
+            continue;
+        }
+        let mut places = Vec::new();
+        for stmt in &block.stmts {
+            let StatementKind::Assign {
+                place,
+                rvalue: Rvalue::Use(Operand::Copy(src)),
+            } = &stmt.kind
+            else {
+                continue;
+            };
+            // A field of a parameter's referent outlives this frame.
+            if place.projection.is_empty()
+                || !src.projection.is_empty()
+                || place.local.0 == 0
+                || place.local.0 > body.arity
+            {
+                continue;
+            }
+            let Some(decl) = body.locals.get(src.local.0 as usize) else {
+                continue;
+            };
+            for (path, ty) in nested_vec_paths(tcx, decl.ty, 0) {
+                let mut target = place.clone();
+                target
+                    .projection
+                    .extend(path.into_iter().map(Projection::Field));
+                places.push((target, ty));
+            }
+        }
+        if !places.is_empty() {
+            inserts.push((bi, places));
+        }
+    }
+    for (bi, places) in inserts {
+        let span = body.blocks[bi].span;
+        for (place, ty) in places {
+            // A sink local so the statement is an assignment like every other
+            // intrinsic call.
+            let sink = Local(u32::try_from(body.locals.len()).expect("local overflow"));
+            body.locals.push(crate::ir::LocalDecl {
+                ty,
+                debug_name: None,
+                mutable: false,
+                region: false,
+            });
+            body.blocks[bi].stmts.push(Statement {
+                kind: StatementKind::Assign {
+                    place: Place::local(sink),
+                    rvalue: Rvalue::CallIntrinsic {
+                        name: "gos_rt_vec_compact_elems",
+                        args: vec![Operand::Copy(place)],
+                    },
+                },
+                span,
+                inlined: None,
+            });
+        }
+    }
+}
+
+/// The field paths inside a value of type `ty` that hold a vector of
+/// vectors, the whole value included, each with the vector's type.
+fn nested_vec_paths(tcx: &TyCtxt, ty: Ty, depth: u32) -> Vec<(Vec<u32>, Ty)> {
+    if depth > 3 {
+        return Vec::new();
+    }
+    match tcx.kind_of(ty) {
+        TyKind::Vec(inner) if matches!(tcx.kind_of(*inner), TyKind::Vec(_)) => {
+            vec![(Vec::new(), ty)]
+        }
+        TyKind::Adt { def, .. } => tcx
+            .struct_field_tys(*def)
+            .map(<[Ty]>::to_vec)
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .flat_map(|(index, field)| {
+                nested_vec_paths(tcx, field, depth + 1)
+                    .into_iter()
+                    .map(move |(mut path, ty)| {
+                        path.insert(0, u32::try_from(index).unwrap_or(u32::MAX));
+                        (path, ty)
+                    })
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}

@@ -1,0 +1,153 @@
+// Structs whose `Option` of a struct or tuple fields sit in one word: built,
+// read, matched, overwritten, compared, printed, used as map keys, stored in
+// vectors, copied, encoded, and borrowed.
+
+use std::encoding::json
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Leaf {
+    weight: i32
+    tag: String
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Node {
+    id: u16
+    left: Option<Leaf>
+    right: Option<Leaf>
+    pair: Option<(i64, String)>
+}
+
+struct Tree {
+    item: i32
+    left: Option<Tree>
+    right: Option<Tree>
+}
+
+struct Doc {
+    title: String
+    author: Option<Leaf>
+}
+
+fn leaf(weight: i32, tag: String) -> Leaf {
+    Leaf { weight, tag }
+}
+
+fn build(item: i32, depth: i32) -> Tree {
+    if depth == 0 {
+        return Tree { item, left: None, right: None }
+    }
+    Tree {
+        item
+        left: Some(build(item * 2, depth - 1))
+        right: Some(build(item * 2 + 1, depth - 1))
+    }
+}
+
+fn total(t: Tree) -> i64 {
+    let mut sum = t.item as i64
+    if let Some(l) = t.left { sum += total(l) }
+    if let Some(r) = t.right { sum += total(r) }
+    sum
+}
+
+fn describe(n: Node) -> String {
+    let left = match n.left {
+        Some(l) => f"{l.tag}:{l.weight}"
+        None => "-"
+    }
+    let right = match n.right {
+        Some(r) => f"{r.tag}:{r.weight}"
+        None => "-"
+    }
+    let pair = match n.pair {
+        Some((k, v)) => f"{k}/{v}"
+        None => "-"
+    }
+    f"{n.id} {left} {right} {pair}"
+}
+
+fn swap_left(slot: &mut Option<Leaf>, with: Leaf) {
+    *slot = Some(with)
+}
+
+// Built, rewritten, and read behind a scalar signature, so the forced-JIT
+// run compiles one-word fields as well.
+fn churn(rounds: i64) -> i64 {
+    let mut total = 0
+    for i in 0..rounds {
+        let mut node = Node { id: 1, left: Some(Leaf { weight: i as i32, tag: "l" }), right: None, pair: None }
+        if i % 3 == 0 {
+            node.right = Some(Leaf { weight: 2, tag: "r" })
+            node.left = None
+        }
+        if let Some(l) = node.left { total += l.weight as i64 }
+        if let Some(r) = node.right { total += r.weight as i64 * 100 }
+        if node.pair.is_none() { total += 1 }
+    }
+    total
+}
+
+struct Holder {
+    held: Option<Leaf>
+    count: i64
+}
+
+fn main() {
+    println(f"tree {total(build(1, 10))}")
+    println(f"churn {churn(1_000)}")
+
+    let mut n = Node { id: 7, left: Some(leaf(3, "a")), right: None, pair: Some((9, "nine")) }
+    println(describe(n))
+    n.right = Some(leaf(5, "b"))
+    n.left = None
+    println(describe(n))
+    let copy = n
+    n.pair = None
+    println(f"{describe(copy)} | {describe(n)}")
+    println(f"{n}")
+    println(f"{copy:?}")
+
+    let a = Node { id: 1, left: Some(leaf(1, "x")), right: None, pair: None }
+    let b = Node { id: 1, left: Some(leaf(1, "x")), right: None, pair: None }
+    let c = Node { id: 1, left: None, right: None, pair: None }
+    println(f"eq {a == b} {a == c} lt {a < c} {c < a}")
+
+    let mut nodes = #[]
+    for i in 0..6 {
+        let left = if i % 2 == 0 { Some(leaf(i as i32, f"t{i}")) } else { None }
+        nodes.push(Node { id: (6 - i) as u16, left, right: None, pair: Some((i, "p")) })
+    }
+    nodes.sort()
+    for x in nodes { print(f"{describe(x)}; ") }
+    println("")
+
+    let mut seen = Map::new()
+    seen[a] = 1
+    seen[c] = 2
+    seen[b] = 3
+    println(f"keys {seen.len()} a={seen[a]} c={seen[c]}")
+
+    let mut ordered = BTreeMap::new()
+    ordered.insert(a, "a")
+    ordered.insert(c, "c")
+    for (k, v) in ordered { print(f"{v}:{k.left.is_some()} ") }
+    println("")
+
+    let mut h = Holder { held: None, count: 0 }
+    swap_left(&mut h.held, leaf(8, "held"))
+    h.count += 1
+    match h.held {
+        Some(l) => println(f"held {l.tag} {h.count}")
+        None => println("empty")
+    }
+
+    let doc = Doc { title: "notes", author: Some(leaf(2, "ann")) }
+    let text = json::encode(doc).unwrap_or("")
+    println(text)
+    let back = json::decode::<Doc>(text)
+    match back {
+        Ok(d) => println(f"{d.title} {d.author.map(|l| l.tag).unwrap_or("none")}")
+        Err(e) => println(f"error {e}")
+    }
+}

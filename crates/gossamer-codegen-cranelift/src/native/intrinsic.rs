@@ -151,6 +151,9 @@ pub(super) struct IntrinsicContext {
     /// The runtime's yield-request byte, which loop preemption polls read,
     /// declared before the parallel phase.
     pub(super) preempt_requested: Option<DataId>,
+    /// The runtime data an inline retain or release reads, by symbol,
+    /// declared before the parallel phase.
+    pub(super) runtime_data: HashMap<&'static str, DataId>,
     /// Cached `DataId` for each RC type-meta blob, keyed by its codegen
     /// symbol (`gos_rc_meta_<id>`). Deduped so a variant constructed at
     /// many sites shares one data object.
@@ -278,6 +281,7 @@ impl IntrinsicContext {
             foreign: HashMap::new(),
             foreign_data: HashMap::new(),
             preempt_requested: None,
+            runtime_data: HashMap::new(),
             rc_metas: HashMap::new(),
             tuple_tags: HashMap::new(),
             const_tables: HashMap::new(),

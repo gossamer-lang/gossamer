@@ -604,6 +604,31 @@ pub enum TypeError {
         /// Trait methods with no body in this impl and no default.
         missing: Vec<String>,
     },
+    /// A trait impl's method whose signature differs from the one the
+    /// trait declares: its receiver, its parameter count, a parameter's
+    /// type, or its return type. A call through the trait would pass and
+    /// expect what the trait says.
+    #[error("`fn {method}` in `impl {trait_name} for {ty}` does not match the trait: {detail}")]
+    TraitImplSignatureMismatch {
+        /// Trait being implemented.
+        trait_name: String,
+        /// Type the impl attaches to.
+        ty: String,
+        /// The method.
+        method: String,
+        /// What differs, in words.
+        detail: String,
+        /// The trait's declaration of the method, as written.
+        declared: String,
+    },
+    /// A generic function named as a value or called with type arguments
+    /// nothing in the program fixes. Every tier runs an instantiation, so
+    /// each argument has to be known.
+    #[error("cannot infer the type arguments of `{name}`")]
+    FnItemTypeArgsUninferred {
+        /// The function as the program names it.
+        name: String,
+    },
     /// A trait impl leaves out an associated type or constant the trait
     /// declares without a default. Every projection through the trait has
     /// to land on a concrete item, so the impl has to supply it.
@@ -1268,6 +1293,8 @@ impl TypeError {
             Self::MethodNotOnBound { .. } => "method-not-on-bound",
             Self::OperatorNotOnBound { .. } => "operator-not-on-bound",
             Self::MissingTraitImplMethods { .. } => "missing-trait-impl-methods",
+            Self::TraitImplSignatureMismatch { .. } => "trait-impl-signature-mismatch",
+            Self::FnItemTypeArgsUninferred { .. } => "fn-item-type-args-uninferred",
             Self::MissingTraitImplAssocItems { .. } => "missing-trait-impl-assoc-items",
             Self::ImplItemNotInTrait { .. } => "impl-item-not-in-trait",
             Self::ConflictingTraitImpl { .. } => "conflicting-trait-impl",
@@ -1460,6 +1487,8 @@ impl TypeError {
             Self::SerdeTargetUnsupported { .. } => "GT0124",
             Self::SerdeTargetMissing { .. } => "GT0125",
             Self::SerdeTypeParameter { .. } => "GT0126",
+            Self::TraitImplSignatureMismatch { .. } => "GT0127",
+            Self::FnItemTypeArgsUninferred { .. } => "GT0128",
         }
     }
 }
@@ -1980,6 +2009,17 @@ impl TypeDiagnostic {
                         [] => format!("`{param}` has no trait bound, so it has no `fn {method}`"),
                         _ => format!("none of `{}` declares `fn {method}`", bounds.join("`, `")),
                     });
+            }
+            TypeError::TraitImplSignatureMismatch { declared, .. } => {
+                out = out.with_help(format!(
+                    "the trait declares `{declared}`; write the method with that signature"
+                ));
+            }
+            TypeError::FnItemTypeArgsUninferred { name } => {
+                out = out.with_help(format!(
+                    "name the arguments with `{name}::<..>`, or give the binding a function type \
+                     such as `fn(i64) -> i64`"
+                ));
             }
             TypeError::MissingTraitImplMethods {
                 trait_name,

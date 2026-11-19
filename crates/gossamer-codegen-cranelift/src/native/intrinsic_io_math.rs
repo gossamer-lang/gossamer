@@ -1574,6 +1574,17 @@ pub(super) fn lower_intrinsic_call_io_math(
                 "gos_rt_rc_weak_release" => "gos_rt_rc_weak_release",
                 _ => "gos_rt_rc_weak_retain",
             };
+            if matches!(name, "gos_rt_rc_release" | "gos_rt_rc_retain") {
+                emit_rc_count_inline(
+                    module,
+                    builder,
+                    intrinsics,
+                    name == "gos_rt_rc_retain",
+                    static_name,
+                    p,
+                )?;
+                return Ok(true);
+            }
             let f = intrinsics.extern_fn(module, static_name, &[types::I64], &[])?;
             let fref = module.declare_func_in_func(f, builder.func);
             builder.ins().call(fref, &[p]);
@@ -2740,4 +2751,163 @@ fn inline_word_local(
     let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
     builder.ins().store(MemFlagsData::trusted(), word, addr, 0);
     addr
+}
+
+/// The address of the runtime data symbol `name` in this function: the one
+/// declared before a parallel lowering phase, or declared here.
+fn runtime_data_addr(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    intrinsics: &IntrinsicContext,
+    name: &str,
+) -> Result<ir::Value> {
+    let data = match intrinsics.runtime_data.get(name) {
+        Some(data) => *data,
+        None => module
+            .declare_data(name, Linkage::Import, true, false)
+            .map_err(|e| anyhow!("declare {name}: {e}"))?,
+    };
+    let global = module.declare_data_in_func(data, builder.func);
+    let ptr_ty = module.target_config().pointer_type();
+    Ok(builder.ins().symbol_value(ptr_ty, global))
+}
+
+/// A retain or release of the counted pointer `p`, taken inline where the
+/// runtime would only adjust the count; every other case calls `runtime`.
+///
+/// The inline path stands aside for null (nothing to count), a string (an
+/// odd pointer), armed instrumentation (the call records the count), a region
+/// object (counted by neither), a shared or immortal object, and, on a
+/// release, the last reference or a survivor whose layout a cycle can pass
+/// through (the call buffers it as a candidate). The tests and stores match
+/// the LLVM backend's and the runtime's own, from
+/// [`gossamer_abi::rc::header`].
+fn emit_rc_count_inline(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    intrinsics: &mut IntrinsicContext,
+    retain: bool,
+    runtime: &'static str,
+    p: ir::Value,
+) -> Result<()> {
+    use gossamer_abi::rc::header;
+    let flags = MemFlagsData::trusted();
+    let live = builder.create_block();
+    let check = builder.create_block();
+    let counted = builder.create_block();
+    let fast = builder.create_block();
+    let slow = builder.create_block();
+    let done = builder.create_block();
+    builder.set_cold_block(slow);
+    builder.ins().brif(p, live, &[], done, &[]);
+
+    builder.switch_to_block(live);
+    let tag = builder.ins().band_imm_u(p, 1);
+    let odd = builder.ins().icmp_imm_u(IntCC::NotEqual, tag, 0);
+    let armed_at = runtime_data_addr(module, builder, intrinsics, header::INSTRUMENTATION_SYMBOL)?;
+    let armed = builder.ins().atomic_load(types::I8, flags, armed_at);
+    let armed = builder.ins().icmp_imm_u(IntCC::NotEqual, armed, 0);
+    let aside = builder.ins().bor(odd, armed);
+    builder.ins().brif(aside, slow, &[], check, &[]);
+
+    // The base is published after its length, so a reader that sees a base
+    // sees the length that goes with it; no base means no arena. A tagged
+    // word with no pointer under its tag (a unit variant) counts nothing
+    // either.
+    builder.switch_to_block(check);
+    let payload = builder.ins().band_imm_s(p, -8);
+    let base_at = runtime_data_addr(
+        module,
+        builder,
+        intrinsics,
+        header::REGION_ARENA_BASE_SYMBOL,
+    )?;
+    let base = builder.ins().atomic_load(types::I64, flags, base_at);
+    let len_at = runtime_data_addr(module, builder, intrinsics, header::REGION_ARENA_LEN_SYMBOL)?;
+    let len = builder.ins().atomic_load(types::I64, flags, len_at);
+    let off = builder.ins().isub(payload, base);
+    let within = builder.ins().icmp(IntCC::UnsignedLessThan, off, len);
+    let based = builder.ins().icmp_imm_u(IntCC::NotEqual, base, 0);
+    let region = builder.ins().band(within, based);
+    let bare = builder.ins().icmp_imm_u(IntCC::Equal, payload, 0);
+    let uncounted = builder.ins().bor(region, bare);
+    builder.ins().brif(uncounted, done, &[], counted, &[]);
+
+    builder.switch_to_block(counted);
+    let count_at = builder.ins().iadd_imm_s(payload, header::STRONG_OFFSET);
+    let strong = builder.ins().atomic_load(types::I32, flags, count_at);
+    let bits = builder
+        .ins()
+        .band_imm_u(strong, i64::from(header::SHARED_BIT | header::REGION_BIT));
+    let local = builder.ins().icmp_imm_u(IntCC::Equal, bits, 0);
+    let count = builder
+        .ins()
+        .band_imm_u(strong, i64::from(header::STRONG_COUNT_MASK));
+    let take = if retain {
+        // Below the immortal count by two, the bump stays an ordinary count.
+        let room = builder.ins().icmp_imm_u(
+            IntCC::UnsignedLessThan,
+            count,
+            i64::from(header::STRONG_IMMORTAL - 1),
+        );
+        builder.ins().band(local, room)
+    } else {
+        // A survivor of an ordinary count whose layout no cycle can pass
+        // through, or a leaf, needs nothing past the decrement.
+        let several = builder
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedGreaterThan, count, 1);
+        let mortal = builder.ins().icmp_imm_u(
+            IntCC::UnsignedLessThan,
+            count,
+            i64::from(header::STRONG_IMMORTAL),
+        );
+        let meta_at = builder.ins().iadd_imm_s(payload, header::META_ID_OFFSET);
+        let id = builder.ins().uload16(types::I64, flags, meta_at, 0);
+        let word_ix = builder
+            .ins()
+            .ushr_imm_u(id, i64::from(header::ACYCLIC_WORD_BITS.trailing_zeros()));
+        let bit_ix = builder
+            .ins()
+            .band_imm_u(id, i64::from(header::ACYCLIC_WORD_BITS - 1));
+        let table = runtime_data_addr(module, builder, intrinsics, header::META_ACYCLIC_SYMBOL)?;
+        let word_off = builder.ins().ishl_imm_u(word_ix, 3);
+        let word_at = builder.ins().iadd(table, word_off);
+        let word = builder.ins().atomic_load(types::I64, flags, word_at);
+        let one = builder.ins().iconst(types::I64, 1);
+        let mask = builder.ins().ishl(one, bit_ix);
+        let hit = builder.ins().band(word, mask);
+        let acyclic = builder.ins().icmp_imm_u(IntCC::NotEqual, hit, 0);
+        let leaf = builder.ins().icmp_imm_u(IntCC::Equal, id, 0);
+        let settled = builder.ins().bor(acyclic, leaf);
+        let counted_ok = builder.ins().band(several, mortal);
+        let both = builder.ins().band(local, counted_ok);
+        builder.ins().band(both, settled)
+    };
+    builder.ins().brif(take, fast, &[], slow, &[]);
+
+    builder.switch_to_block(fast);
+    let next = if retain {
+        // As the runtime's increment: the count up, the color back to black,
+        // the buffered bit kept.
+        let buffered = builder
+            .ins()
+            .band_imm_u(strong, i64::from(header::BUFFERED_BIT));
+        let bumped = builder.ins().iadd_imm_s(count, 1);
+        builder.ins().bor(buffered, bumped)
+    } else {
+        builder.ins().iadd_imm_s(strong, -1)
+    };
+    builder.ins().atomic_store(flags, next, count_at);
+    builder.ins().jump(done, &[]);
+
+    builder.switch_to_block(slow);
+    let f = intrinsics.extern_fn(module, runtime, &[types::I64], &[])?;
+    let fref = module.declare_func_in_func(f, builder.func);
+    builder.ins().call(fref, &[p]);
+    builder.ins().jump(done, &[]);
+
+    // Blocks are sealed together when the function ends.
+    builder.switch_to_block(done);
+    Ok(())
 }

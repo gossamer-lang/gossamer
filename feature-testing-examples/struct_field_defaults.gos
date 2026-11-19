@@ -1,0 +1,83 @@
+// A field may declare a default; a struct literal that leaves the field out
+// takes it. The default is evaluated at every construction, so a default that
+// builds a value builds one per value, and its names mean what they mean where
+// the struct is declared.
+
+use std::encoding::json
+use bench::Sieve
+
+mod bench {
+    fn seed() -> i64 { 7 }
+
+    pub struct Rng { pub state: i64 }
+
+    impl Rng {
+        pub fn new() -> Rng { Rng { state: seed() } }
+        pub fn next(&mut self) -> i64 {
+            self.state = (self.state * 31 + 11) % 1000
+            self.state
+        }
+    }
+
+    pub struct Sieve {
+        pub limit: i64
+        pub result: u32 = 0
+        pub rng: Rng = Rng::new()
+        pub label: String = "sieve"
+        pub seen: Vec<i64> = #[]
+    }
+}
+
+struct Options {
+    width: i64 = 80
+    verbose: bool = false
+    tags: Vec<String> = #["a", "b"]
+}
+
+enum Shape {
+    Circle(f64)
+    Rect { w: f64, h: f64 = 1.0 }
+}
+
+struct Wrapper<T> {
+    items: Vec<T> = #[]
+    count: i64 = 0
+}
+
+struct Point {
+    x: f64
+    y: f64 = 2.5
+    note: String = "none"
+}
+
+fn main() {
+    let mut a = Sieve { limit: 10 }
+    let b = Sieve { limit: 20, result: 7, label: "custom" }
+    a.rng.next()
+    a.seen.push(3)
+    println(f"{a.limit} {a.result} {a.rng.state} {a.label} {a.seen}")
+    println(f"{b.limit} {b.result} {b.rng.state} {b.label} {b.seen}")
+
+    let o = Options {}
+    let d = Options::default()
+    let wide = Options { width: 120 }
+    println(f"{o.width} {o.verbose} {o.tags} {d.width} {wide.width} {wide.tags}")
+
+    let shapes = #[Shape::Rect { w: 3.0 }, Shape::Rect { w: 2.0, h: 4.0 }, Shape::Circle(1.0)]
+    for s in shapes {
+        match s {
+            Shape::Rect { w, h } => println(f"rect {w} {h}")
+            Shape::Circle(r) => println(f"circle {r}")
+        }
+    }
+
+    let mut w: Wrapper<String> = Wrapper {}
+    w.items.push("x")
+    w.count += 1
+    println(f"{w.items} {w.count}")
+
+    let p = json::decode::<Point>("{\"x\": 1.5}").unwrap()
+    let q = json::decode::<Point>("{\"x\": 1.0, \"y\": 9.0, \"note\": \"set\"}").unwrap()
+    println(f"{p.x} {p.y} {p.note} {q.x} {q.y} {q.note}")
+    println(f"{a}")
+}

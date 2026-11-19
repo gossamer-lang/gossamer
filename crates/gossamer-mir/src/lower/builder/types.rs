@@ -728,11 +728,48 @@ impl<'a> Builder<'a> {
                 if self.struct_name_of(ty).is_none() {
                     return false;
                 }
-                // A packed struct's words are its content: construction zeroes
-                // the padding between its narrow fields, so equal values have
-                // equal words.
+                // A packed struct's scalar words are their content:
+                // construction zeroes the padding between its narrow fields, so
+                // equal values have equal words. Every other field keeps its
+                // own words at a word boundary and its own descriptor.
                 if let Some(layout) = self.tcx.packed_layout(ty) {
-                    for _ in 0..layout.size / 8 {
+                    let fields = self.tcx.adt_field_tys(*def, substs).map(<[Ty]>::to_vec);
+                    let mut next_word = 0u32;
+                    for (index, (field, offset)) in fields
+                        .iter()
+                        .flatten()
+                        .zip(&layout.field_offsets)
+                        .enumerate()
+                    {
+                        if self.tcx.packed_scalar_bytes(*field).is_some() {
+                            continue;
+                        }
+                        for _ in next_word..offset / 8 {
+                            out.push('s');
+                        }
+                        // An `Option` held in one word is its payload's blob,
+                        // or null for `None`.
+                        if self.tcx.is_niche_field(ty, index) {
+                            let payload = self.tcx.adt_field_tys(*def, substs).and_then(|f| {
+                                let TyKind::Adt { substs, .. } = self.tcx.kind_of(f[index]) else {
+                                    return None;
+                                };
+                                substs.types().first().copied()
+                            });
+                            let Some(inner) = payload.and_then(|p| self.key_descriptor(p)) else {
+                                return false;
+                            };
+                            out.push('N');
+                            boxed.push(inner);
+                            next_word = offset / 8 + 1;
+                            continue;
+                        }
+                        if !self.append_key_descriptor(*field, out, boxed) {
+                            return false;
+                        }
+                        next_word = offset / 8 + self.tcx.slot_bytes(*field).max(8) / 8;
+                    }
+                    for _ in next_word..layout.size / 8 {
                         out.push('s');
                     }
                     return true;
@@ -2006,9 +2043,23 @@ impl<'a> Builder<'a> {
             } => vec![*elem; *len],
             _ => return,
         };
-        let mut word = base_word;
-        for fty in field_tys {
+        let packed = self.tcx.packed_field_words(ty);
+        let mut next = base_word;
+        for (index, fty) in field_tys.into_iter().enumerate() {
             let fwords = i64::from(self.type_slot_bytes(fty).max(8) / 8);
+            // A packed struct places each field other than a scalar at a
+            // word of its own layout.
+            let word = packed
+                .as_ref()
+                .and_then(|words| words.get(index))
+                .map_or(next, |at| base_word + at);
+            next += fwords;
+            // An `Option` held in one word is its `Some` payload's blob, or
+            // null: an unconditional pair naming that one word.
+            if self.tcx.is_niche_field(ty, index) {
+                out.push((-1, word, word));
+                continue;
+            }
             match self.tcx.kind_of(fty) {
                 TyKind::Adt { def, .. } if def.local == u32::MAX || def.local == u32::MAX - 1 => {
                     // By-value `{disc, payload}` field: the payload word holds
@@ -2027,7 +2078,6 @@ impl<'a> Builder<'a> {
                 }
                 _ => {}
             }
-            word += fwords;
         }
     }
 
@@ -2193,10 +2243,25 @@ impl<'a> Builder<'a> {
             TyKind::Array { elem, len } => vec![*elem; len.to_usize()],
             _ => return,
         };
-        let mut word = base_word;
-        for fty in field_tys {
+        let packed = self.tcx.packed_field_words(ty);
+        let mut next = base_word;
+        for (index, fty) in field_tys.into_iter().enumerate() {
             let fwords = i64::from(self.type_slot_bytes(fty).max(8) / 8);
-            if matches!(self.tcx.kind_of(fty), TyKind::Vec(_) | TyKind::Slice(_)) {
+            // A packed struct places each field other than a scalar at a
+            // word of its own layout.
+            let word = packed
+                .as_ref()
+                .and_then(|words| words.get(index))
+                .map_or(next, |at| base_word + at);
+            next += fwords;
+            if self.tcx.is_niche_field(ty, index) {
+                // An `Option` held in one word is its `Some` payload's blob,
+                // or null, whatever word comes before it.
+                out.push(
+                    (gossamer_abi::rc::RC_CHILD_BLOB_ANY << gossamer_abi::rc::RC_CHILD_KIND_SHIFT)
+                        | word,
+                );
+            } else if matches!(self.tcx.kind_of(fty), TyKind::Vec(_) | TyKind::Slice(_)) {
                 out.push(
                     (gossamer_abi::rc::RC_CHILD_VEC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT)
                         | word,
@@ -2257,7 +2322,6 @@ impl<'a> Builder<'a> {
                 // slots.
                 self.collect_aggr_child_entries(fty, word, depth + 1, out);
             }
-            word += fwords;
         }
     }
 

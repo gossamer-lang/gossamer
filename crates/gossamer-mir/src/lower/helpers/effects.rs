@@ -477,7 +477,11 @@ fn is_formatting_intrinsic(name: &str) -> bool {
         || name.starts_with("__gos_fmt_")
         || matches!(
             name,
-            "__gos_dyn_display" | "__gos_dyn_debug" | "__gos_debug_quote"
+            "__gos_dyn_display"
+                | "__gos_dyn_debug"
+                | "__gos_debug_quote"
+                | "__gos_field_display"
+                | "__gos_field_debug"
         )
 }
 

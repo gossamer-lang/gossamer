@@ -27,11 +27,14 @@ pub struct Rewriter {
     /// means it applies to every version.
     pub versions: &'static [&'static str],
     /// Collects the edits this rewriter would make.
-    pub collect: fn(&SourceFile, &str, &mut Vec<Fix>),
+    pub collect: fn(&SourceFile, &str, &RewriteContext, &mut Vec<Fix>),
     /// When set, each collected edit is a candidate kept only where applying
     /// it removes a front-end diagnostic: the rewrite repairs code a meaning
     /// change broke and leaves code the change did not touch as written.
     pub repair_only: bool,
+    /// When set, the rewrite runs only when named (`gos fix --rewriter ID`):
+    /// it moves code between two spellings a program may keep either of.
+    pub explicit: bool,
 }
 
 /// Every registered migration, in application order.
@@ -42,6 +45,7 @@ pub const REWRITERS: &[Rewriter] = &[
         versions: &["v0.65.0"],
         collect: collect_integer_pow_to_float,
         repair_only: true,
+        explicit: false,
     },
     Rewriter {
         id: "regex-compile-answers-pattern",
@@ -49,6 +53,7 @@ pub const REWRITERS: &[Rewriter] = &[
         versions: &["v0.65.0"],
         collect: collect_regex_compile,
         repair_only: true,
+        explicit: false,
     },
     Rewriter {
         id: "hash-inputs-are-bytes",
@@ -56,6 +61,7 @@ pub const REWRITERS: &[Rewriter] = &[
         versions: &["v0.65.0"],
         collect: collect_bytes_arguments,
         repair_only: true,
+        explicit: false,
     },
     Rewriter {
         id: "checksums-are-u32",
@@ -63,6 +69,31 @@ pub const REWRITERS: &[Rewriter] = &[
         versions: &["v0.65.0"],
         collect: collect_checksum_width,
         repair_only: true,
+        explicit: false,
+    },
+    Rewriter {
+        id: "fields-take-literal-defaults",
+        summary: "gives a struct field the default every literal of the struct in the file writes for it, and drops that value from the literals",
+        versions: &[],
+        collect: crate::type_forms::fields_take_literal_defaults,
+        repair_only: false,
+        explicit: true,
+    },
+    Rewriter {
+        id: "impl-into-type-body",
+        summary: "moves each standalone `impl` block of a type declared in the same module into the type's body, listing its trait on the type",
+        versions: &[],
+        collect: crate::type_forms::merge_impls_into_bodies,
+        repair_only: false,
+        explicit: true,
+    },
+    Rewriter {
+        id: "type-body-into-impl",
+        summary: "moves the functions in each type's body into the standalone `impl` blocks they stand for",
+        versions: &[],
+        collect: crate::type_forms::split_bodies_into_impls,
+        repair_only: false,
+        explicit: true,
     },
 ];
 
@@ -98,7 +129,7 @@ fn literal_regex_compile(expr: &gossamer_ast::Expr) -> bool {
 /// or `.expect(..)` applied to a literal one, which now answers the
 /// `Pattern` itself; and `regex::new` in place of a call handed anything
 /// but a literal.
-fn collect_regex_compile(sf: &SourceFile, source: &str, out: &mut Vec<Fix>) {
+fn collect_regex_compile(sf: &SourceFile, source: &str, _: &RewriteContext, out: &mut Vec<Fix>) {
     use gossamer_ast::ExprKind;
     use gossamer_ast::visitor::{Visitor, walk_expr};
 
@@ -194,7 +225,7 @@ fn ok_arm_answers_binding(arm: &gossamer_ast::MatchArm) -> bool {
 
 /// Proposes `arg.as_bytes()` for each argument of a call that takes bytes
 /// since 0.65.0, where a `String` used to be accepted.
-fn collect_bytes_arguments(sf: &SourceFile, source: &str, out: &mut Vec<Fix>) {
+fn collect_bytes_arguments(sf: &SourceFile, source: &str, _: &RewriteContext, out: &mut Vec<Fix>) {
     use gossamer_ast::ExprKind;
     use gossamer_ast::visitor::{Visitor, walk_expr};
 
@@ -253,7 +284,7 @@ fn collect_bytes_arguments(sf: &SourceFile, source: &str, out: &mut Vec<Fix>) {
 
 /// Proposes `(call as i64)` for each checksum call, and `(seed as u32)` for
 /// the running value an `update` takes, where the program used `i64`.
-fn collect_checksum_width(sf: &SourceFile, source: &str, out: &mut Vec<Fix>) {
+fn collect_checksum_width(sf: &SourceFile, source: &str, _: &RewriteContext, out: &mut Vec<Fix>) {
     use gossamer_ast::ExprKind;
     use gossamer_ast::visitor::{Visitor, walk_expr};
 
@@ -303,7 +334,12 @@ fn collect_checksum_width(sf: &SourceFile, source: &str, out: &mut Vec<Fix>) {
 /// not already a float spelling. Before 0.65.0 an integer receiver reached
 /// the `math::pow` row and answered `f64`; a caller that used that `f64` (or
 /// passed a float exponent) no longer checks, and the cast restores it.
-fn collect_integer_pow_to_float(sf: &SourceFile, source: &str, out: &mut Vec<Fix>) {
+fn collect_integer_pow_to_float(
+    sf: &SourceFile,
+    source: &str,
+    _: &RewriteContext,
+    out: &mut Vec<Fix>,
+) {
     use gossamer_ast::visitor::{Visitor, walk_expr};
     use gossamer_ast::{Expr, ExprKind, Literal};
 
@@ -353,10 +389,37 @@ pub fn rewriter(id: &str) -> Option<&'static Rewriter> {
 
 /// Collects the edits every rewriter in `selected` would make.
 #[must_use]
-pub fn migrations(sf: &SourceFile, source: &str, selected: &[&Rewriter]) -> Vec<Fix> {
+pub fn migrations(
+    sf: &SourceFile,
+    source: &str,
+    context: &RewriteContext,
+    selected: &[&Rewriter],
+) -> Vec<Fix> {
     let mut out = Vec::new();
     for rewriter in selected {
-        (rewriter.collect)(sf, source, &mut out);
+        (rewriter.collect)(sf, source, context, &mut out);
     }
     out
+}
+
+/// What a rewrite of one file may know about the rest of its project: each
+/// trait the project declares and the names of its items, so a rewrite that
+/// moves functions between a type's body and its `impl` blocks can tell
+/// which trait a function implements.
+#[derive(Debug, Clone, Default)]
+pub struct RewriteContext {
+    /// Item names of each trait the project's files declare, by trait name.
+    pub traits: std::collections::HashMap<String, std::collections::HashSet<String>>,
+}
+
+impl RewriteContext {
+    /// The context the trees of a project's files give.
+    #[must_use]
+    pub fn of<'a>(trees: impl IntoIterator<Item = &'a SourceFile>) -> Self {
+        let mut context = Self::default();
+        for tree in trees {
+            crate::type_forms::file_trait_items(&tree.items, &mut context.traits);
+        }
+        context
+    }
 }

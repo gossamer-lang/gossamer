@@ -21,6 +21,7 @@ pub fn normalize_caller_side_spellings(
     resolutions: &mut Resolutions,
 ) -> Vec<ResolveDiagnostic> {
     gossamer_resolve::settle_single_name_patterns(sf, resolutions);
+    let field_default_diagnostics = gossamer_resolve::fill_field_defaults(sf, resolutions);
     let std_params = |segments: &[String]| {
         let (name, module) = segments.split_last()?;
         if module.is_empty() {
@@ -41,6 +42,7 @@ pub fn normalize_caller_side_spellings(
     };
     let (mut diagnostics, deferred) =
         gossamer_resolve::resolve_named_arguments(sf, resolutions, &std_params);
+    diagnostics.extend(field_default_diagnostics);
     let _ = crate::std_fn_eta::expand_std_fn_values(sf, resolutions);
     diagnostics.extend(crate::data_first::rotate_data_first_calls(sf, resolutions));
     name_display_channel(&mut sf.items);

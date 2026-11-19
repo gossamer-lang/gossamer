@@ -125,6 +125,21 @@ fn render_hover(doc: &DocumentAnalysis, loc: &Locate) -> String {
         }
         Locate::Field {
             name,
+            owner_id,
+            access_id,
+            ..
+        } if crate::members::receiver_type(doc, *owner_id)
+            .and_then(|ty| crate::members::member_of(doc, &ty, name))
+            .is_some() =>
+        {
+            let member = crate::members::receiver_type(doc, *owner_id)
+                .and_then(|ty| crate::members::member_of(doc, &ty, name));
+            let signature = member.map(|m| m.signature).unwrap_or_default();
+            let kind = if access_id.is_some() { "field" } else { "method" };
+            format!("```gos\n{signature}\n```\n\n{kind}")
+        }
+        Locate::Field {
+            name,
             access_id: Some(id),
             ..
         } if doc.types.get(*id).is_some() => {
