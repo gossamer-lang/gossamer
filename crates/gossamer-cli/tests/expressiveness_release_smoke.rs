@@ -63,6 +63,14 @@ fn packed_handle_structs_print_their_pinned_transcript_in_a_release_build() {
 }
 
 #[test]
+fn packed_enum_payloads_print_their_pinned_transcript_in_a_release_build() {
+    assert_eq!(
+        run_release("packed_enum_payload_children"),
+        pinned("packed_enum_payload_children")
+    );
+}
+
+#[test]
 fn generic_types_render_and_order_in_a_release_build() {
     assert_eq!(
         run_release("generic_render_and_order"),

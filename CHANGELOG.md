@@ -44,6 +44,8 @@
 - A vector's header is 48 bytes instead of 64: the identity and mutation count a lazy iterator checks move to a record only iterated or element-owning vectors carry.
 - A vector made with a known capacity small enough for the allocator's small-object pages (`Vec::with_capacity(n)`, a sized copy) holds its header and elements in one block.
 - A `csv::read` answer read only by index shares the document's text instead of copying it, and keeps each field's place in half the space.
+- A struct whose `Option` fields are held in one word, copied out of an enum variant that boxes it (`match node { Node::Field(input) => .. }`, `json::encode` of a tree of such variants), takes its strings' and vectors' shares at their packed places; compiled code took them a few words further on and faulted.
+- `==` and ordering on a recursive enum whose variants carry a struct or tuple wider than a word (`Vec<Node>` comparisons, `sort()`) read that payload through its box in a compiled program, instead of faulting.
 
 ## 0.81.2 - Faster array-to-Vec conversion for small elements
 

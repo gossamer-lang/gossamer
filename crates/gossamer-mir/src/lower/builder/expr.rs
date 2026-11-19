@@ -2900,6 +2900,10 @@ impl<'a> Builder<'a> {
                 for fields in &variants {
                     out.push(u8::try_from(fields.len()).ok()?);
                     for f in fields {
+                        // A node keeps a payload it boxes as the box's address.
+                        if inline == 0 && self.is_boxable_aggregate_payload(*f) {
+                            out.push(gossamer_abi::DESC_BOXED);
+                        }
                         out.extend(self.ordering_stream_inner(
                             *f,
                             &inner,

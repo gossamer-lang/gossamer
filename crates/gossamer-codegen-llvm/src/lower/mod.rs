@@ -80,8 +80,8 @@ use gossamer_types::{FloatTy, IntTy, Ty, TyCtxt, TyKind};
 use crate::emit::BuildError;
 use crate::ty::{
     NumericKind, STACK_AGGREGATE_SPILL_BYTES, aggregate_storage_bytes, elem_slots,
-    field_slot_offset, int_signed, int_width, is_aggregate, is_unit, numeric_kind, param_llvm_ty,
-    render_ty, slot_count,
+    field_byte_offset, field_slot_offset, int_signed, int_width, is_aggregate, is_unit,
+    numeric_kind, param_llvm_ty, render_ty, slot_count,
 };
 
 /// Adds the typed `declare` for `name` from the ABI registry into `refs`.

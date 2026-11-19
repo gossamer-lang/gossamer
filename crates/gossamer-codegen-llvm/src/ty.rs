@@ -347,6 +347,18 @@ pub(crate) fn field_slot_offset(tcx: &TyCtxt, ty: Ty, idx: u32) -> u32 {
     }
 }
 
+/// Byte offset of field `idx` inside the storage of `ty`: the packed
+/// layout's offset when the struct packs its fields, otherwise the whole
+/// words of every field before it ([`field_slot_offset`]).
+pub(crate) fn field_byte_offset(tcx: &TyCtxt, ty: Ty, idx: u32) -> u32 {
+    if let Some(TyKind::Ref { inner, .. }) = tcx.kind(ty) {
+        return field_byte_offset(tcx, *inner, idx);
+    }
+    tcx.packed_layout(ty)
+        .and_then(|layout| layout.field_offsets.get(idx as usize).copied())
+        .unwrap_or_else(|| field_slot_offset(tcx, ty, idx) * 8)
+}
+
 /// True when the type is an aggregate whose memory lives in a
 /// stack slot rather than a scalar SSA value. Drives the
 /// choice between a scalar `alloca <ty>` and an aggregate

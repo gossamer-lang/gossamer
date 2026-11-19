@@ -2357,6 +2357,7 @@ const SPECS: &[Spec] = &[
     // Narrow fields packed beside handles, a nested packed struct, and an
     // Option: stored, sorted, keyed, copied, sent, and encoded.
     spec("feature-testing-examples/packed_handle_structs.gos"),
+    spec("feature-testing-examples/packed_enum_payload_children.gos"),
     // Generic types render, order, and match by each instantiation's
     // arguments: quoted parameter fields, sorted generic vectors, and
     // struct-variant literals that infer their enum's arguments.
