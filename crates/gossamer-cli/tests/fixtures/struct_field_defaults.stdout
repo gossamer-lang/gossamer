@@ -7,3 +7,4 @@ circle 1
 #["x"] 1
 1.5 2.5 none 1 9 set
 Sieve { limit: 10, result: 0, rng: Rng { state: 228 }, label: "sieve", seen: #[3] }
+0 3 0 5 [1, 2, 3, 4, 5]

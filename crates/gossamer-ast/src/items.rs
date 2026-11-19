@@ -546,9 +546,17 @@ pub const FIELD_DEFAULT_ATTR: &str = "gos_field_default";
 #[must_use]
 pub fn field_default_fn_name(owner: &str, variant: Option<&str>, field: &str) -> String {
     match variant {
-        Some(variant) => format!("__gos_fd__{owner}__{variant}__{field}"),
-        None => format!("__gos_fd__{owner}__{field}"),
+        Some(variant) => format!("{FIELD_DEFAULT_FN_PREFIX}{owner}__{variant}__{field}"),
+        None => format!("{FIELD_DEFAULT_FN_PREFIX}{owner}__{field}"),
     }
+}
+
+const FIELD_DEFAULT_FN_PREFIX: &str = "__gos_fd__";
+
+/// Whether `name` is one [`field_default_fn_name`] writes.
+#[must_use]
+pub fn is_field_default_fn_name(name: &str) -> bool {
+    name.starts_with(FIELD_DEFAULT_FN_PREFIX)
 }
 
 /// The items an `impl Iterator` block may define: its `Item` type, then the

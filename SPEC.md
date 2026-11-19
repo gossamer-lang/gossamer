@@ -1134,6 +1134,11 @@ enum Shape: Area {
 struct Pair(i64, i64): Display { fn fmt(&self) -> String { .. } }
 ```
 
+By convention the body holds a type's primary API (constructors, accessors,
+invariant checks, and the operations that define it) and `impl` blocks hold
+its extended API (trait implementations, optional or platform-specific code,
+and large groups of specialized methods). Neither form is required.
+
 This is the same declaration as the type followed by the `impl` blocks its
 body stands for, and the two spellings mean the same program in every way:
 the front end writes those blocks beside the type before anything resolves,

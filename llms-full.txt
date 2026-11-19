@@ -41,15 +41,22 @@ is settled.
 ```gossamer
 const PI: f64 = 3.14159
 
-struct Point { x: f64, y: f64 = 0.0 }
+struct Point {
+    x: f64
+    y: f64 = 0.0
+
+    fn norm(&self) -> f64 { (self.x * self.x + self.y * self.y).sqrt() }
+}
 struct Pair(i64, i64)
 
 trait Area { fn area(&self) -> f64 }
 
-enum Shape: Area {
+enum Shape {
     Circle(f64)
     Rect { w: f64, h: f64 }
+}
 
+impl Area for Shape {
     fn area(&self) -> f64 {
         match self {
             Shape::Circle(r) => PI * r * r,
@@ -71,7 +78,7 @@ fn main() {
     let area = Shape::Circle(2.0).area()
     println(f"a circle of radius 2 covers {area:.2}")
     let p = Point { x: 1.5 }
-    println(f"{p.x} {p.y}")
+    println(f"{p.x} {p.y} {p.norm()}")
 }
 ```
 
@@ -128,13 +135,16 @@ extend(&mut items)     // items is now #[1, 2, 1]
   collections, variants, and builtin calls need no import.
 - Plain functions for free-standing logic; methods only when state belongs to
   a type. A function that answers a value declares `-> T` (GL0055).
-- A type's own methods and traits go in its body, after its fields or
-  variants: `struct S: Bench + Display { limit: i64  fn run(&mut self) {..} }`.
-  A body function a listed trait declares implements it, any other is
-  inherent; a name two listed traits declare (`fmt` of `Display` and `Debug`)
-  is GP0069, so write one as a standalone `impl Debug for S`. A standalone
-  `impl` is the same thing, kept for a trait on a type declared elsewhere or
-  one that needs bounds of its own (`impl<T: Ord> Trait for S<T>`).
+- A type's primary API (constructors, accessors, invariant checks, core
+  operations) goes in its body, after its fields or variants; its extended
+  API (trait impls, optional or platform-specific code, large method groups)
+  goes in `impl` blocks. Decide by meaning, not length; both spell the same
+  program. A body may also list traits after the name
+  (`struct S: Bench { limit: i64  fn run(&mut self) {..} }`): a body function
+  a listed trait declares implements it, any other is inherent, and a name two
+  listed traits declare (`fmt` of `Display` and `Debug`) is GP0069. A trait on
+  a type declared elsewhere, or one with bounds of its own
+  (`impl<T: Ord> Trait for S<T>`), needs a standalone `impl`.
 - A trait impl holds the trait's items only (GT0072), with the trait's
   signatures (GT0127); one block per `(trait, type)`. A type has one method
   per name across all its impls (GT0096).
