@@ -288,26 +288,12 @@ impl<'a> Lowerer<'a> {
                     // in those cases each field is exactly one
                     // slot and `idx == slot_offset`.
                     let next = self.fresh();
-                    // A packed struct places its fields at byte offsets.
-                    if let Some(layout) = self.tcx.packed_layout(current_ty) {
-                        let byte = layout
-                            .field_offsets
-                            .get(*idx as usize)
-                            .copied()
-                            .unwrap_or(0);
-                        writeln!(
-                            self.out,
-                            "  {next} = getelementptr i8, ptr {current}, i64 {byte}"
-                        )
-                        .unwrap();
-                    } else {
-                        let slot_offset = field_slot_offset(self.tcx, current_ty, *idx);
-                        writeln!(
-                            self.out,
-                            "  {next} = getelementptr i64, ptr {current}, i64 {slot_offset}"
-                        )
-                        .unwrap();
-                    }
+                    let byte = field_byte_offset(self.tcx, current_ty, *idx);
+                    writeln!(
+                        self.out,
+                        "  {next} = getelementptr i8, ptr {current}, i64 {byte}"
+                    )
+                    .unwrap();
                     current = next;
                     current_is_loaded = false;
                     // Advance current_ty so the next projection's

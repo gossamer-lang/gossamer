@@ -374,6 +374,10 @@ mod tests {
     /// as a debug build, many unloaded sections around it.
     #[test]
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "the release profile strips the symbol table this test reads"
+    )]
     fn shrinking_keeps_the_loaded_image_and_only_the_kept_functions() {
         use object::{Object, ObjectSection, ObjectSymbol, ObjectSymbolTable, SymbolKind};
 

@@ -1,0 +1,7 @@
+{"Row":[{"Field":{"id":"a","first":null,"second":{"label":"a-meta"},"names":["a-name","kept"],"family":""}},"Empty",{"Wrap":{"Field":{"id":"b","first":null,"second":{"label":"b-meta"},"names":["b-name","kept"],"family":""}}},{"Count":3},{"Text":"t"}]}
+{"Row":[{"Field":{"id":"a","first":null,"second":{"label":"a-meta"},"names":["a-name","kept"],"family":""}},"Empty",{"Wrap":{"Field":{"id":"b","first":null,"second":{"label":"b-meta"},"names":["b-name","kept"],"family":""}}},{"Count":3},{"Text":"t"}]}
+{"Row":[{"Field":{"id":"a","first":null,"second":{"label":"a-meta"},"names":["a-name","kept"],"family":""}},"Empty",{"Wrap":{"Field":{"id":"b","first":null,"second":{"label":"b-meta"},"names":["b-name","kept"],"family":""}}},{"Count":3},{"Text":"t"}]}
+#["a", "b"]
+true
+Row(#[Field(Input { id: "a", first: None, second: Some(Meta { label: "a-meta" }), names: #["a-name", "kept"], family: "" }), Empty, Wrap(Field(Input { id: "b", first: None, second: Some(Meta { label: "b-meta" }), names: #["b-name", "kept"], family: "" })), Count(3), Text("t")])
+50

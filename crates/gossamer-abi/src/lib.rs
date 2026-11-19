@@ -119,6 +119,11 @@ pub const DESC_ARRAY: u8 = 20;
 /// kind.
 pub const DESC_PACKED: u8 = 24;
 
+/// Ordering-descriptor tag for a field of an enum node held in a heap box:
+/// the field's slot is one word addressing the box, and the value's own
+/// descriptor follows, laid out in the box as it would be inline.
+pub const DESC_BOXED: u8 = 30;
+
 /// Ordering-descriptor tag for a user enum stored by value: a discriminant
 /// slot, then regions its variants share. One byte follows giving the region
 /// count, then each region's slot span, then the variant count and, per

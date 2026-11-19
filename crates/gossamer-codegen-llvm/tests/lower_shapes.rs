@@ -1702,3 +1702,56 @@ fn an_option_field_of_a_struct_is_held_in_one_word() {
     assert_eq!(layout.field_bytes, [4, 8]);
     assert!(tcx.is_niche_field(node, 1));
 }
+
+/// Byte offsets of the fields `helper` is called on in `body`: each call
+/// reads its handle from a `getelementptr i8` two lines above it.
+fn retained_offsets(body: &str, helper: &str) -> Vec<u32> {
+    let lines: Vec<&str> = body.lines().collect();
+    let call = format!("call void @{helper}(");
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.contains(&call))
+        .filter_map(|(i, _)| {
+            let gep = lines.get(i.checked_sub(2)?)?;
+            gep.contains("getelementptr i8,")
+                .then(|| gep.rsplit("i64 ").next()?.trim().parse().ok())
+                .flatten()
+        })
+        .collect()
+}
+
+/// A packed struct copied out of an enum box takes its children's shares
+/// at the packed byte offsets, past the one-word `Option` fields before them.
+#[test]
+fn boxed_enum_payload_retains_packed_fields_at_their_byte_offsets() {
+    let (bodies, tcx) = build_from_source(
+        r#"
+enum Page { Empty, Input(Input), Child(Page) }
+struct Meta { label: String }
+struct Input { id: String, first: Option<Meta>, second: Option<Meta>, names: Vec<String>, family: String }
+impl Page {
+    fn id(&self) -> String { match self { Page::Input(t) => t.id, _ => "" } }
+}
+fn main() {
+    let p = Page::Input(Input { id: "in", first: None, second: Some(Meta { label: "m" }), names: #["n"], family: String::new() })
+    println(p.id())
+}
+"#,
+    );
+    let input = tcx
+        .interned_tys()
+        .find(|ty| matches!(tcx.kind_of(*ty), TyKind::Adt { def, .. } if tcx.def_name(*def) == Some("Input")))
+        .expect("the program interns `Input`");
+    let layout = tcx
+        .packed_layout(input)
+        .expect("`Input` packs its one-word options");
+    assert_eq!(layout.field_offsets, [0, 8, 16, 24, 32]);
+    let ir = render_ir_to_string(&bodies, &tcx, false).unwrap();
+    let body = body_text(&ir, "define ptr @\"Page::id\"(");
+    assert_eq!(retained_offsets(body, "gos_rt_vec_retain"), [24], "{body}");
+    assert!(
+        retained_offsets(body, "gos_rt_str_retain_typed").contains(&32),
+        "{body}"
+    );
+}

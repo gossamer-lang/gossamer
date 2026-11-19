@@ -1,0 +1,68 @@
+// A packed struct inside a boxed enum variant: the one-word `Option` fields
+// ahead of its `Vec` and `String` shift them below their word-per-field
+// places. Copying the payload out of the box to encode it, compare it, and
+// print it takes each child's share at its packed place.
+use std::encoding::json
+
+#[derive(PartialEq)]
+struct Meta { label: String }
+
+#[derive(PartialEq)]
+struct Input {
+    id: String
+    first: Option<Meta>
+    second: Option<Meta>
+    names: Vec<String>
+    family: String
+}
+
+#[derive(PartialEq)]
+enum Node {
+    Empty
+    Text(String)
+    Count(i64)
+    Field(Input)
+    Row(Vec<Node>)
+    Wrap(Node)
+}
+
+fn field(id: String) -> Node {
+    Node::Field(Input {
+        id: id
+        first: None
+        second: Some(Meta { label: f"{id}-meta" })
+        names: #[f"{id}-name", "kept"]
+        family: String::new()
+    })
+}
+
+fn ids(node: Node) -> Vec<String> {
+    match node {
+        Node::Field(input) => #[input.id]
+        Node::Row(items) => items.flat_map(ids)
+        Node::Wrap(inner) => ids(inner)
+        _ => #[]
+    }
+}
+
+fn equal_rounds(rounds: i64) -> i64 {
+    let mut same = 0
+    for i in 0..rounds {
+        let id = f"r{i}"
+        if Node::Wrap(field(id)) == Node::Wrap(field(id)) {
+            same += 1
+        }
+    }
+    same
+}
+
+fn main() {
+    let tree = Node::Row(#[field("a"), Node::Empty, Node::Wrap(field("b")), Node::Count(3), Node::Text("t")])
+    for _ in 0..3 {
+        println(json::encode(tree).unwrap())
+    }
+    println(ids(tree))
+    println(tree == Node::Row(#[field("a"), Node::Empty, Node::Wrap(field("b")), Node::Count(3), Node::Text("t")]))
+    println(tree)
+    println(equal_rounds(50))
+}

@@ -123,6 +123,11 @@ unsafe fn desc_span_walk(tags: *const u8, cursor: &mut usize) -> usize {
             1
         }
         gossamer_abi::DESC_SELF => 1,
+        gossamer_abi::DESC_BOXED => {
+            // SAFETY: `cursor` addresses the boxed value's descriptor.
+            unsafe { skip_cmp_desc(tags, cursor) };
+            1
+        }
         gossamer_abi::DESC_ENUM_REF => {
             let tag_at = *cursor - 1;
             // SAFETY: `cursor` addresses the two distance bytes of the entry.
@@ -212,7 +217,7 @@ pub(crate) unsafe fn skip_cmp_desc(tags: *const u8, cursor: &mut usize) {
             unsafe { skip_cmp_desc(tags, cursor) };
         }
         // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor `tags`.
-        gossamer_abi::DESC_VEC | gossamer_abi::DESC_OPTION => unsafe {
+        gossamer_abi::DESC_VEC | gossamer_abi::DESC_OPTION | gossamer_abi::DESC_BOXED => unsafe {
             skip_cmp_desc(tags, cursor);
         },
         // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor `tags`.
@@ -875,6 +880,29 @@ pub(crate) unsafe fn compare_desc_in(
                 }
             }
             0
+        }
+        gossamer_abi::DESC_BOXED => {
+            *cursor += 1;
+            // SAFETY: a boxed field's slot is one word addressing its box (this `unsafe fn`'s
+            // caller).
+            let (box_a, box_b) = unsafe { (word_ptr::<u8>(a), word_ptr::<u8>(b)) };
+            if box_a.is_null() || box_b.is_null() {
+                // SAFETY: `cursor` addresses the boxed value's descriptor.
+                unsafe { skip_cmp_desc(tags, cursor) };
+                return ord_code(box_a.cmp(&box_b));
+            }
+            // SAFETY: each box holds the value laid out as the descriptor at `cursor` says.
+            unsafe {
+                compare_desc_in(
+                    mode,
+                    box_a,
+                    box_b,
+                    tags,
+                    cursor,
+                    CmpStorage::Inline,
+                    self_desc,
+                )
+            }
         }
         gossamer_abi::DESC_ENUM_REF => {
             // SAFETY: `cursor` addresses a `DESC_ENUM_REF` entry of `tags`.

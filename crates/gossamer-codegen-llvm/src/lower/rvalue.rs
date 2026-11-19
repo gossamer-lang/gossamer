@@ -258,9 +258,9 @@ impl<'a> Lowerer<'a> {
     ) {
         for field in fields {
             let mut leaf_ty = ty;
-            let mut word = 0;
+            let mut byte = 0;
             for index in field.path {
-                word += field_slot_offset(self.tcx, leaf_ty, index);
+                byte += field_byte_offset(self.tcx, leaf_ty, index);
                 leaf_ty = match self.tcx.kind_of(leaf_ty) {
                     TyKind::Tuple(fields) => fields[index as usize],
                     TyKind::Array { elem, .. } => *elem,
@@ -274,8 +274,7 @@ impl<'a> Lowerer<'a> {
             let addr = self.fresh();
             writeln!(
                 self.out,
-                "  {addr} = getelementptr i8, ptr {base}, i64 {}",
-                word * 8
+                "  {addr} = getelementptr i8, ptr {base}, i64 {byte}"
             )
             .unwrap();
             let helper = if retain { field.retain } else { field.release };
