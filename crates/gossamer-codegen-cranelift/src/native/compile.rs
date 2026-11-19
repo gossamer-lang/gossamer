@@ -172,6 +172,7 @@ pub(super) fn build_offline_module(
         .strings
         .values()
         .chain(intrinsics.preempt_requested.iter())
+        .chain(intrinsics.runtime_data.values())
         .chain(intrinsics.foreign_data.values())
     {
         let decl = decls.get_data_decl(data_id);
@@ -734,6 +735,17 @@ pub(crate) fn lower_program_full(
             .declare_data("gos_rt_preempt_requested", Linkage::Import, true, false)
             .map_err(|e| anyhow!("declare gos_rt_preempt_requested: {e}"))?,
     );
+    for name in [
+        gossamer_abi::rc::header::INSTRUMENTATION_SYMBOL,
+        gossamer_abi::rc::header::REGION_ARENA_BASE_SYMBOL,
+        gossamer_abi::rc::header::REGION_ARENA_LEN_SYMBOL,
+        gossamer_abi::rc::header::META_ACYCLIC_SYMBOL,
+    ] {
+        let data = module
+            .declare_data(name, Linkage::Import, true, false)
+            .map_err(|e| anyhow!("declare {name}: {e}"))?;
+        intrinsics.runtime_data.insert(name, data);
+    }
     intrinsics.extern_fn(module, "malloc", &[ptr_ty], &[ptr_ty])?;
     intrinsics.extern_fn(module, "strlen", &[ptr_ty], &[types::I64])?;
     intrinsics.extern_fn(module, "calloc", &[ptr_ty, ptr_ty], &[ptr_ty])?;

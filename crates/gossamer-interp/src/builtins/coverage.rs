@@ -389,6 +389,11 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
         "the VM reads the monotonic clock in its `time::` builtins",
     ),
     (
+        "gos_rt_niche_option_*",
+        "the VM holds a struct's `Option` field as a `Value::Variant` of its own, \
+         so there is no one-word field to decode or encode",
+    ),
+    (
         "gos_rt_option_*",
         "the VM holds `Option` as `Value::Variant`, so defaults, maps, and payload \
          ownership are operations on that value (`stdlib_builtins/option.rs`)",
@@ -445,6 +450,11 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
         "gos_rt_race_access",
         "the VM runs goroutines under its own scheduler and has no instrumented \
          memory accesses to report",
+    ),
+    (
+        "gos_rt_region_bump_adopt",
+        "the VM bumps no region slab from compiled code: an `arena` block's values \
+         are ordinary counted VM values, so there is no per-thread bump block to hand over",
     ),
     (
         "gos_rt_register_static_drop",

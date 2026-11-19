@@ -362,12 +362,10 @@ pub(super) fn map_value_copy(
         let slots = type_slot_count(tcx, ty).max(1);
         (coerce_arg_to(builder, value, ptr_ty)?, i64::from(slots) * 8)
     };
-    let alloc_fn = intrinsics.extern_fn(
-        module,
-        "gos_rt_rc_alloc_copy",
-        &[types::I64, ptr_ty, ptr_ty],
-        &[ptr_ty],
-    )?;
+    let allocator =
+        gossamer_abi::rc::rc_alloc_entry_for(false, Some(&symbol), |sym| tcx.rc_meta(sym));
+    let alloc_fn =
+        intrinsics.extern_fn(module, allocator, &[types::I64, ptr_ty, ptr_ty], &[ptr_ty])?;
     let alloc_ref = module.declare_func_in_func(alloc_fn, builder.func);
     let size = builder.ins().iconst(types::I64, bytes);
     let call = builder.ins().call(alloc_ref, &[size, meta, src]);
@@ -436,7 +434,55 @@ fn lower_inline_result_carrier_call(
     destination: &gossamer_mir::Place,
     name: &str,
 ) -> Result<bool> {
+    let ptr_ty = module.target_config().pointer_type();
     let value = match name {
+        // An `Option` field held in one word: zero is `None`, any other word
+        // is the `Some` payload.
+        "gos_rt_niche_option_load" | "gos_rt_niche_option_store" => {
+            let Some(addr_arg) = args.first() else {
+                return Ok(false);
+            };
+            let addr = lower_operand(
+                module,
+                builder,
+                locals,
+                body,
+                tcx,
+                addr_arg,
+                Some(ptr_ty),
+                intrinsics,
+            )?;
+            let addr = coerce_arg_to(builder, addr, ptr_ty)?;
+            if name == "gos_rt_niche_option_load" {
+                let word = builder
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), addr, 0);
+                let none = builder.ins().icmp_imm_s(IntCC::Equal, word, 0);
+                let disc = builder.ins().uextend(types::I64, none);
+                pack_i64_carrier(builder, disc, word)
+            } else {
+                let Some(value_arg) = args.get(1) else {
+                    return Ok(false);
+                };
+                let carrier = lower_operand(
+                    module,
+                    builder,
+                    locals,
+                    body,
+                    tcx,
+                    value_arg,
+                    Some(types::I128),
+                    intrinsics,
+                )?;
+                let carrier = coerce_arg_to(builder, carrier, types::I128)?;
+                let (disc, payload) = builder.ins().isplit(carrier);
+                let zero = builder.ins().iconst(types::I64, 0);
+                let some = builder.ins().icmp_imm_s(IntCC::Equal, disc, 0);
+                let word = builder.ins().select(some, payload, zero);
+                builder.ins().store(MemFlagsData::trusted(), word, addr, 0);
+                builder.ins().iconst(types::I64, 0)
+            }
+        }
         // The owning spelling differs only in who booked the payload's
         // share; this backend's box takes the words as they stand either way.
         "gos_rt_result_new" | "gos_rt_result_new_owned" => {
@@ -497,6 +543,10 @@ fn lower_inline_result_carrier_call(
                         // shape the carrier's release gives back.
                         Some(meta_blob) => {
                             let ptr_ty = module.target_config().pointer_type();
+                            let allocator = gossamer_abi::rc::rc_alloc_entry(
+                                name == "gos_rt_result_new_owned",
+                                meta_blob.as_ref().map(|(_, blob)| *blob),
+                            );
                             let meta = match meta_blob {
                                 Some((sym, blob)) => {
                                     let data_id = intrinsics.intern_rc_meta(module, &sym, blob)?;
@@ -504,11 +554,6 @@ fn lower_inline_result_carrier_call(
                                     builder.ins().symbol_value(ptr_ty, gv)
                                 }
                                 None => builder.ins().iconst(ptr_ty, 0),
-                            };
-                            let allocator = if name == "gos_rt_result_new_owned" {
-                                "gos_rt_rc_alloc_move"
-                            } else {
-                                "gos_rt_rc_alloc_copy"
                             };
                             let alloc_fn = intrinsics.extern_fn(
                                 module,
@@ -582,7 +627,7 @@ fn lower_inline_result_carrier_call(
                                 let src = builder.ins().stack_addr(ptr_ty, slot, 0);
                                 let alloc_fn = intrinsics.extern_fn(
                                     module,
-                                    "gos_rt_rc_alloc_copy",
+                                    gossamer_abi::rc::rc_alloc_entry(false, Some(blob)),
                                     &[types::I64, ptr_ty, ptr_ty],
                                     &[ptr_ty],
                                 )?;

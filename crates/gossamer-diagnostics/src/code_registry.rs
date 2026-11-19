@@ -1929,6 +1929,16 @@ pub const REGISTRY: &[(&str, &str)] = &[
             and never falls back to an inherent method.",
     ),
     (
+        "GT0128",
+        "A generic function is named as a value, or called, with a type\n\
+            argument nothing in the program fixes: `let f = id` with `f` never\n\
+            called, or `fn none<T>() -> Option<T>` called where its answer is\n\
+            never used. Every tier runs one instantiation of the function, so\n\
+            each type argument has to be known. Name it with `id::<i64>`, give\n\
+            the binding a function type (`let f: fn(i64) -> i64 = id`), or use\n\
+            the value where its type is fixed.",
+    ),
+    (
         "GX0001",
         "An operation received a value of an incompatible type. The\n\
                      diagnostic names the type that was required and the type\n\

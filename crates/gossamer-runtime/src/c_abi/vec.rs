@@ -1525,6 +1525,7 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_set_slots(v: *mut GosVec, idx: i64, s
                 vec_elem_kind::AGGR_GUARDED if !meta.is_null() => {
                     crate::c_abi::rc::gos_rt_aggr_retain_children(destination, meta);
                 }
+                _ if vec_is_region(vec) => vec_hold_slot_children(vec, destination),
                 _ => {}
             }
         }
@@ -2259,9 +2260,139 @@ pub unsafe extern "C" fn gos_rt_vec_set_slot_children(v: *mut GosVec, meta: *con
     }
     // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
     let vec = unsafe { &mut *v };
-    if !vec_is_region(vec) {
+    if vec_is_region(vec) {
+        record_region_slot_children(vec, children.into_boxed_slice());
+    } else {
         vec.elem_kind = vec_elem_kind::AGGR_OWNED;
         ensure_vec_owner(vec).slot_children = Some(children.into_boxed_slice());
+    }
+}
+
+/// Records where the heap children of a region vec's elements live, so each
+/// element stored into it takes the shares its region gives back at pop
+/// ([`vec_hold_slot_children`]). The vec keeps its element kind: its region
+/// frees it without a walk, so no path releases an element's children one by
+/// one. The side record goes when the region does.
+fn record_region_slot_children(vec: &mut GosVec, children: Box<[VecSlotChild]>) {
+    unsafe fn drop_owner(owner: *mut u8) {
+        // SAFETY: `owner` is the region vec's side record, boxed by `new_vec_owner` and
+        // dropped once, at its region's pop.
+        drop(unsafe { Box::from_raw(owner.cast::<VecOwner>()) });
+    }
+    let fresh = vec.owner.is_null();
+    ensure_vec_owner(vec).slot_children = Some(children);
+    if fresh {
+        let header = std::ptr::from_ref(vec).cast::<u8>();
+        crate::c_abi::rc::region_give_back_with(header, vec.owner.as_ptr().cast(), drop_owner);
+    }
+}
+
+/// Takes the shares the element at `slot` of the region vec `v` needs of the
+/// heap children it holds, given back when the vec's region pops. A table
+/// child (map, set, deque, heap, JSON) takes a table of its own, as an owned
+/// vec's copy does.
+///
+/// # Safety
+/// `v` must be a live region vec and `slot` one of its elements.
+pub(crate) unsafe fn vec_hold_slot_children(v: *const GosVec, slot: *mut u8) {
+    use crate::c_abi::rc::{HeldChild, region_hold};
+    unsafe fn free_map(m: *mut u8) {
+        // SAFETY: `m` is the table a region vec's element took as its own.
+        unsafe { kind_ops::free(Kind::Map, m.cast()) };
+    }
+    unsafe fn free_set(m: *mut u8) {
+        // SAFETY: `m` is the table a region vec's element took as its own.
+        unsafe { kind_ops::free(Kind::Set, m.cast()) };
+    }
+    unsafe fn free_deque(m: *mut u8) {
+        // SAFETY: `m` is the table a region vec's element took as its own.
+        unsafe { kind_ops::free(Kind::Deque, m.cast()) };
+    }
+    unsafe fn free_json(m: *mut u8) {
+        // SAFETY: `m` is the table a region vec's element took as its own.
+        unsafe { kind_ops::free(Kind::Json, m.cast()) };
+    }
+    unsafe fn free_heap(m: *mut u8) {
+        // SAFETY: `m` is the vector a region vec's element took as its own.
+        unsafe { crate::c_abi::map::gos_rt_vec_free(m.cast()) };
+    }
+    unsafe fn drop_iter(it: *mut u8) {
+        // SAFETY: `it` is the iterator whose share a region vec's element took.
+        unsafe { crate::c_abi::rc::lazy_children::drop_share(it.cast(), false) };
+    }
+    unsafe fn drop_iter_pair(it: *mut u8) {
+        // SAFETY: `it` is the iterator whose share a region vec's element took.
+        unsafe { crate::c_abi::rc::lazy_children::drop_share(it.cast(), true) };
+    }
+    // SAFETY: this `unsafe fn`'s caller passes `v` a live `Vec`.
+    let Some(children) = vec_slot_children(unsafe { &*v }) else {
+        return;
+    };
+    let holder = v.cast::<u8>();
+    // A copy for a vec an outer region holds goes to the heap, freed at that
+    // region's pop, rather than to the innermost region, which pops first.
+    let outer = !crate::c_abi::rc::region_holder_is_innermost(holder);
+    let copy_of = |copy: &dyn Fn() -> *mut u8| {
+        if outer {
+            crate::c_abi::rc::outside_regions(copy)
+        } else {
+            copy()
+        }
+    };
+    let own = |word: *mut u8, copy: *mut u8, free: unsafe fn(*mut u8)| {
+        // SAFETY: `word` is the element's child word.
+        unsafe { slot_write_word(word, copy) };
+        if !copy.is_null() && !crate::c_abi::rc::in_region_arena(copy) {
+            crate::c_abi::rc::region_give_back_with(holder, copy, free);
+        }
+    };
+    // SAFETY: `slot` is an element of `v`, laid out as its slot children describe, each child
+    // a live value of the kind recorded.
+    unsafe {
+        visit_slot_child_words(slot, children, |word, child, kind| match kind {
+            vec_elem_kind::STRING => region_hold(holder, child, HeldChild::Str),
+            vec_elem_kind::VEC => region_hold(holder, child, HeldChild::Vec),
+            vec_elem_kind::RC_NODE => region_hold(holder, child, HeldChild::Node),
+            vec_elem_kind::WEAK => region_hold(holder, child, HeldChild::Weak),
+            vec_elem_kind::MAP => own(
+                word,
+                copy_of(&|| kind_ops::clone(Kind::Map, child.cast())),
+                free_map,
+            ),
+            vec_elem_kind::SET => own(
+                word,
+                copy_of(&|| kind_ops::clone(Kind::Set, child.cast())),
+                free_set,
+            ),
+            vec_elem_kind::DEQUE => own(
+                word,
+                copy_of(&|| kind_ops::clone(Kind::Deque, child.cast())),
+                free_deque,
+            ),
+            vec_elem_kind::JSON => own(
+                word,
+                copy_of(&|| kind_ops::clone(Kind::Json, child.cast())),
+                free_json,
+            ),
+            vec_elem_kind::HEAP => own(
+                word,
+                copy_of(&|| crate::c_abi::gos_rt_vec_clone(child.cast()).cast()),
+                free_heap,
+            ),
+            vec_elem_kind::ITER => {
+                crate::c_abi::rc::lazy_children::retain(child.cast(), false);
+                if !crate::c_abi::rc::in_region_arena(child) {
+                    crate::c_abi::rc::region_give_back_with(holder, child, drop_iter);
+                }
+            }
+            vec_elem_kind::ITER_PAIR => {
+                crate::c_abi::rc::lazy_children::retain(child.cast(), true);
+                if !crate::c_abi::rc::in_region_arena(child) {
+                    crate::c_abi::rc::region_give_back_with(holder, child, drop_iter_pair);
+                }
+            }
+            _ => {}
+        });
     }
 }
 
@@ -3433,7 +3564,14 @@ unsafe fn vec_reserve_to(vec: &mut GosVec, min_cap: i64, reserve: Reserve) {
         Reserve::Exact => alloc_vec_buffer,
         Reserve::Geometric | Reserve::AsPushed => alloc_growing_vec_buffer,
     };
-    if vec_is_region(vec) && crate::c_abi::rc::region_owns_buffers_of(new_bytes) {
+    let header = std::ptr::from_ref::<GosVec>(vec).cast::<u8>();
+    // A region vec grows in the region holding its header. The innermost
+    // region bumps the buffer; one an outer region holds takes it from the
+    // allocator, owned by that region, since the innermost pops first.
+    if vec_is_region(vec)
+        && (crate::c_abi::rc::region_owns_buffers_of(new_bytes)
+            || !crate::c_abi::rc::region_holder_is_innermost(header))
+    {
         // A buffer this large comes from the allocator and is owned by the
         // vector's region. Growing one the region already owns replaces it,
         // in place where both sizes are mapped, and frees the old one now; a
@@ -3458,7 +3596,7 @@ unsafe fn vec_reserve_to(vec: &mut GosVec, min_cap: i64, reserve: Reserve) {
                 // `old_bytes` that only this vector referenced.
                 unsafe { free_vec_buffer(old, old_bytes) };
             } else {
-                crate::c_abi::rc::region_own_buffer(new_buf, new_bytes);
+                crate::c_abi::rc::region_own_buffer_for(header, new_buf, new_bytes);
             }
             new_buf
         };
@@ -3501,7 +3639,7 @@ unsafe fn vec_reserve_to(vec: &mut GosVec, min_cap: i64, reserve: Reserve) {
                 // `old_bytes` that only this vector referenced.
                 unsafe { free_vec_buffer(old, old_bytes) };
             } else {
-                crate::c_abi::rc::region_own_buffer(new_buf, new_bytes);
+                crate::c_abi::rc::region_own_buffer_for(header, new_buf, new_bytes);
             }
         } else if !old.is_null() && crate::c_abi::rc::region_disown_buffer(old) {
             // The elements moved from a buffer the region owned into a slab.
@@ -3842,6 +3980,9 @@ pub unsafe extern "C" fn gos_rt_vec_push(v: *mut GosVec, elem: *const u8) {
             // SAFETY: `v` is live, and `dst` the new element laid out as its slot children
             // describe.
             unsafe { vec_retain_slot_children(v, dst) };
+        } else if vec_is_region(vec) {
+            // SAFETY: `v` is a live region vec, and `dst` its new element.
+            unsafe { vec_hold_slot_children(v, dst) };
         }
     });
 }

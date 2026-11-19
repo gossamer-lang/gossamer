@@ -164,9 +164,13 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
         impl_items: &["default"],
         bound_methods: &["default"],
         signature: "{ fn default() -> Self }",
-        doc: "The value `T::default()` answers. `#[derive(Default)]` synthesizes \
-              one from the fields' own defaults, with `#[default]` picking an \
-              enum's variant; an `impl` writes it directly.",
+        doc: "The value `T::default()` answers. A struct whose every field declares \
+              a default answers `T::default()` and `T {}` with no derive, and \
+              `#[derive(Default)]` on it is redundant (`GL0061`). Elsewhere \
+              `#[derive(Default)]` synthesizes one, building a field that \
+              declares a default from that default and any other from its type's \
+              own, with `#[default]` picking an enum's variant; an `impl` writes \
+              it directly.",
         instead: "",
         example: "impl Default for Point { fn default() -> Point { Point { x: 0, y: 0 } } }",
     },

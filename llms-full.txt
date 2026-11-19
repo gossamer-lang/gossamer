@@ -409,10 +409,12 @@ Discover signatures with `hover` / `gos doc std::<module>`. Areas:
   (`json::set_max_size(n)`).
 - Web: `net`, `http` (client `http::get`, server `http::serve(addr,
   handler)`, `http::router`), `http::websocket`, `html`, `mime`.
-- Terminal: `term` (`is_terminal`, `size`, `enter_raw`, `read_input`,
-  `resized`; each takes an optional `os::fd::Descriptor`: the `fs::File` of
-  an opened `/dev/tty` when stdin is piped, kept open while the call uses
-  it, or `term::STDIN` / `STDOUT` / `STDERR`), `os::fd` (`wait_readable`,
+- Terminal: `term` (`is_terminal(fd)` tests the descriptor it is given;
+  `size`, `enter_raw`, `read_input`, and `resized` take one optionally,
+  `STDOUT` for `size` / `resized` and `STDIN` otherwise). A descriptor is an
+  `os::fd::Descriptor`: the `fs::File` of an opened `/dev/tty` when stdin is
+  piped, kept open while the call uses it, or `term::STDIN` / `STDOUT` /
+  `STDERR`. `os::fd` (`wait_readable`,
   `wait_writable`, same argument; a descriptor a foreign call answered as an
   integer is `fs::File::from_raw(n)?`, owned and closed with the file, or
   `fd::Borrowed::from_raw(n)`, never closed), `os::signal`

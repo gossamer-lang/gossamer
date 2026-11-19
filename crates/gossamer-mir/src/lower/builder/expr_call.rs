@@ -1073,7 +1073,16 @@ impl<'a> Builder<'a> {
                         // (e.g. `let plus = __closure_0; plus(...)`).
                         // Falling back to the segment name alone
                         // loses the pointer to the synthesised body.
-                        if let Some(name) = self.local_fn_name.get(&local).cloned() {
+                        if let TyKind::FnDef { def, substs } =
+                            self.tcx.kind_of(self.locals[local.0 as usize].ty).clone()
+                            && !substs.is_empty()
+                        {
+                            // A generic function item bound to a name carries
+                            // its instantiation in its type; the call names
+                            // that instantiation, as a direct call to the item
+                            // with the same arguments would.
+                            Operand::FnRef { def, substs }
+                        } else if let Some(name) = self.local_fn_name.get(&local).cloned() {
                             Operand::Const(ConstValue::Str(name))
                         } else if self.param_locals.contains(&local) {
                             Operand::Copy(Place::local(local))

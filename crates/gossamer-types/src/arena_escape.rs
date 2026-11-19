@@ -64,12 +64,12 @@ pub fn check_arena_escapes(
     table: &TypeTable,
     tcx: &TyCtxt,
 ) -> Vec<ArenaEscapeDiagnostic> {
-    let unsafe_fns = collect_region_unsafe_fns(source, resolutions, table, tcx);
+    let summaries = collect_region_unsafe_fns(source, resolutions, table, tcx);
     let mut finder = Finder {
         resolutions,
         table,
         tcx,
-        unsafe_fns: &unsafe_fns,
+        summaries: &summaries,
         diags: Vec::new(),
     };
     finder.walk_items(&source.items);
@@ -228,11 +228,61 @@ struct StashSummary {
     /// through one of them only when the place passed there outlives the
     /// caller's region.
     sinks: HashSet<usize>,
+    /// The parameters it may store a value of its own making into. Called
+    /// inside an arena, it makes that value in the arena, so a place passed
+    /// there that outlives the block would keep it past the block.
+    fills: HashSet<usize>,
 }
 
 impl StashSummary {
     fn stashes(&self) -> bool {
-        self.global || !self.sinks.is_empty()
+        self.global || !self.sinks.is_empty() || !self.fills.is_empty()
+    }
+
+    fn absorb(&mut self, other: &StashSummary) {
+        self.global |= other.global;
+        self.sinks.extend(other.sinks.iter().copied());
+        self.fills.extend(other.fills.iter().copied());
+    }
+}
+
+/// A function the escape summaries are kept for: a free function, or a
+/// method by its `impl` type's name and its own. Method calls are matched by
+/// name, so a call whose receiver type is unknown answers every method of
+/// that name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Callee {
+    Fn(DefId),
+    Method { owner: String, name: String },
+}
+
+/// The summaries of the functions that may let a value outlive their call.
+#[derive(Debug, Default)]
+struct Summaries {
+    fns: HashMap<DefId, StashSummary>,
+    methods: HashMap<(String, String), StashSummary>,
+}
+
+impl Summaries {
+    fn get(&self, callee: &Callee) -> Option<&StashSummary> {
+        match callee {
+            Callee::Fn(def) => self.fns.get(def),
+            Callee::Method { owner, name } => self.methods.get(&(owner.clone(), name.clone())),
+        }
+    }
+
+    /// The summary of a call of method `name` on a receiver of type `owner`,
+    /// or of every method of that name when the type is unknown.
+    fn method(&self, owner: Option<&str>, name: &str) -> Option<StashSummary> {
+        let mut merged: Option<StashSummary> = None;
+        for ((type_name, method), summary) in &self.methods {
+            if method == name && owner.is_none_or(|owner| owner == type_name) {
+                merged
+                    .get_or_insert_with(StashSummary::default)
+                    .absorb(summary);
+            }
+        }
+        merged
     }
 }
 
@@ -262,13 +312,13 @@ fn collect_region_unsafe_fns(
     resolutions: &Resolutions,
     table: &TypeTable,
     tcx: &TyCtxt,
-) -> HashMap<DefId, StashSummary> {
-    let mut fns: Vec<(DefId, HashMap<String, usize>, &Expr)> = Vec::new();
+) -> Summaries {
+    let mut fns: Vec<(Callee, HashMap<String, usize>, &Expr)> = Vec::new();
     collect_fns(&source.items, resolutions, &mut fns);
 
-    let mut summaries: HashMap<DefId, StashSummary> = HashMap::new();
-    let mut calls: HashMap<DefId, Vec<(DefId, Vec<ArgRoot>)>> = HashMap::new();
-    for (def, params, body) in &fns {
+    let mut summaries: HashMap<Callee, StashSummary> = HashMap::new();
+    let mut calls: HashMap<Callee, Vec<(CallSite, Vec<ArgRoot>)>> = HashMap::new();
+    for (callee, params, body) in &fns {
         let mut scan = Scan {
             resolutions,
             table,
@@ -278,16 +328,19 @@ fn collect_region_unsafe_fns(
             calls: Vec::new(),
         };
         scan.expr(body);
-        summaries.insert(*def, scan.summary);
-        calls.insert(*def, scan.calls);
+        summaries
+            .entry(callee.clone())
+            .or_default()
+            .absorb(&scan.summary);
+        calls.entry(callee.clone()).or_default().extend(scan.calls);
     }
 
     loop {
         let mut changed = false;
-        for (def, sites) in &calls {
-            let mut grown = summaries.get(def).cloned().unwrap_or_default();
-            for (callee, roots) in sites {
-                let Some(callee_summary) = summaries.get(callee) else {
+        for (caller, sites) in &calls {
+            let mut grown = summaries.get(caller).cloned().unwrap_or_default();
+            for (site, roots) in sites {
+                let Some(callee_summary) = site.summary(&summaries) else {
                     continue;
                 };
                 grown.global |= callee_summary.global;
@@ -300,9 +353,16 @@ fn collect_region_unsafe_fns(
                         ArgRoot::Other => grown.global = true,
                     }
                 }
+                // A value the callee makes and stores through a parameter of
+                // this function's own is one this function stores there too.
+                for &fill in &callee_summary.fills {
+                    if let Some(ArgRoot::Param(position)) = roots.get(fill).copied() {
+                        grown.fills.insert(position);
+                    }
+                }
             }
-            if summaries.get(def) != Some(&grown) {
-                summaries.insert(*def, grown);
+            if summaries.get(caller) != Some(&grown) {
+                summaries.insert(caller.clone(), grown);
                 changed = true;
             }
         }
@@ -310,8 +370,86 @@ fn collect_region_unsafe_fns(
             break;
         }
     }
-    summaries.retain(|_, summary| summary.stashes());
-    summaries
+    let mut out = Summaries::default();
+    for (callee, summary) in summaries {
+        if !summary.stashes() {
+            continue;
+        }
+        match callee {
+            Callee::Fn(def) => {
+                out.fns.insert(def, summary);
+            }
+            Callee::Method { owner, name } => {
+                out.methods.insert((owner, name), summary);
+            }
+        }
+    }
+    out
+}
+
+/// A call a function body makes, as the summaries see it.
+#[derive(Debug, Clone)]
+enum CallSite {
+    /// A free function, resolved.
+    Fn(DefId),
+    /// A method of this name, on a receiver of this type when it is known.
+    Method { owner: Option<String>, name: String },
+}
+
+impl CallSite {
+    fn summary(&self, summaries: &HashMap<Callee, StashSummary>) -> Option<StashSummary> {
+        match self {
+            Self::Fn(def) => summaries.get(&Callee::Fn(*def)).cloned(),
+            Self::Method { owner, name } => {
+                let mut merged: Option<StashSummary> = None;
+                for (callee, summary) in summaries {
+                    if let Callee::Method {
+                        owner: type_name,
+                        name: method,
+                    } = callee
+                        && method == name
+                        && owner.as_ref().is_none_or(|owner| owner == type_name)
+                    {
+                        merged
+                            .get_or_insert_with(StashSummary::default)
+                            .absorb(summary);
+                    }
+                }
+                merged
+            }
+        }
+    }
+}
+
+/// The name a type path ends in, the way an `impl` names its type.
+fn type_name(ty: &gossamer_ast::Type) -> Option<String> {
+    match &ty.kind {
+        gossamer_ast::TypeKind::Path(path) => path.segments.last().map(|s| s.name.name.clone()),
+        _ => None,
+    }
+}
+
+/// The name an `impl` gives the type a receiver of type `ty` has, through
+/// references, or `None` when the type is not known: a type the language
+/// builds in answers the name its spelling starts with, so its own methods
+/// never take the summary of a user type's method of the same name.
+fn receiver_type_name(tcx: &TyCtxt, mut ty: Ty) -> Option<String> {
+    loop {
+        let name = match tcx.kind(ty)? {
+            TyKind::Ref { inner, .. } => {
+                ty = *inner;
+                continue;
+            }
+            TyKind::Adt { def, .. } => return tcx.def_name(*def).map(str::to_string),
+            TyKind::Var(_) | TyKind::Error | TyKind::Param { .. } => return None,
+            TyKind::Vec(_) => "Vec",
+            TyKind::HashMap { .. } => "Map",
+            TyKind::String => "String",
+            TyKind::Slice(_) | TyKind::Array { .. } => "[]",
+            _ => "<builtin>",
+        };
+        return Some(name.to_string());
+    }
 }
 
 /// Gathers every free-function body with its `DefId` and parameter names,
@@ -319,13 +457,29 @@ fn collect_region_unsafe_fns(
 fn collect_fns<'a>(
     items: &'a [Item],
     resolutions: &Resolutions,
-    out: &mut Vec<(DefId, HashMap<String, usize>, &'a Expr)>,
+    out: &mut Vec<(Callee, HashMap<String, usize>, &'a Expr)>,
 ) {
     for item in items {
         match &item.kind {
             ItemKind::Fn(decl) => {
                 if let (Some(def), Some(body)) = (resolutions.definition_of(item.id), &decl.body) {
-                    out.push((def, param_positions(decl), body));
+                    out.push((Callee::Fn(def), param_positions(decl), body));
+                }
+            }
+            ItemKind::Impl(decl) => {
+                let Some(owner) = type_name(&decl.self_ty) else {
+                    continue;
+                };
+                for impl_item in &decl.items {
+                    if let gossamer_ast::ImplItem::Fn(method) = impl_item
+                        && let Some(body) = &method.body
+                    {
+                        let callee = Callee::Method {
+                            owner: owner.clone(),
+                            name: method.name.name.clone(),
+                        };
+                        out.push((callee, param_positions(method), body));
+                    }
                 }
             }
             ItemKind::Mod(decl) => {
@@ -346,7 +500,7 @@ struct Scan<'a> {
     tcx: &'a TyCtxt,
     params: &'a HashMap<String, usize>,
     summary: StashSummary,
-    calls: Vec<(DefId, Vec<ArgRoot>)>,
+    calls: Vec<(CallSite, Vec<ArgRoot>)>,
 }
 
 impl Scan<'_> {
@@ -371,10 +525,17 @@ impl Scan<'_> {
         }
     }
 
-    /// Records a store into the place rooted at `root`.
-    fn stash_into(&mut self, root: &str) {
+    /// Records a store of `value` into the place rooted at `root`: a sink of
+    /// the parameter there, and a fill of it when the value is not one the
+    /// function was handed.
+    fn stash_into(&mut self, root: &str, value: Option<&Expr>) {
         if let Some(&position) = self.params.get(root) {
             self.summary.sinks.insert(position);
+            if value
+                .is_some_and(|v| self.non_copy(v) && !matches!(self.arg_root(v), ArgRoot::Param(_)))
+            {
+                self.summary.fills.insert(position);
+            }
         }
     }
 
@@ -431,7 +592,7 @@ impl Scan<'_> {
                     }) = self.resolutions.get(callee.id)
                     {
                         let roots = args.iter().map(|a| self.arg_root(a)).collect();
-                        self.calls.push((def, roots));
+                        self.calls.push((CallSite::Fn(def), roots));
                     }
                 }
                 self.expr(callee);
@@ -448,8 +609,26 @@ impl Scan<'_> {
                 if MUTATOR_METHODS.contains(&name.name.as_str())
                     && let Some(root) = root_name(receiver)
                 {
-                    self.stash_into(root);
+                    self.stash_into(root, None);
+                    for a in args {
+                        self.stash_into(root, Some(a));
+                    }
                 }
+                let owner = self
+                    .table
+                    .get(receiver.id)
+                    .and_then(|ty| receiver_type_name(self.tcx, ty));
+                let roots = std::iter::once(&**receiver)
+                    .chain(args.iter())
+                    .map(|a| self.arg_root(a))
+                    .collect();
+                self.calls.push((
+                    CallSite::Method {
+                        owner,
+                        name: name.name.clone(),
+                    },
+                    roots,
+                ));
                 self.expr(receiver);
                 for a in args {
                     self.expr(a);
@@ -466,7 +645,7 @@ impl Scan<'_> {
                 if self.non_copy(value) {
                     let roots: Vec<&str> = assign_roots(place).collect();
                     for root in roots {
-                        self.stash_into(root);
+                        self.stash_into(root, Some(value));
                     }
                 }
                 self.expr(place);
@@ -578,7 +757,7 @@ struct Finder<'a> {
     resolutions: &'a Resolutions,
     table: &'a TypeTable,
     tcx: &'a TyCtxt,
-    unsafe_fns: &'a HashMap<DefId, StashSummary>,
+    summaries: &'a Summaries,
     diags: Vec<ArenaEscapeDiagnostic>,
 }
 
@@ -627,7 +806,7 @@ impl Finder<'_> {
                 resolutions: self.resolutions,
                 table: self.table,
                 tcx: self.tcx,
-                unsafe_fns: self.unsafe_fns,
+                summaries: self.summaries,
                 block_locals: HashSet::new(),
                 tainted: HashSet::new(),
                 loop_depth: 0,
@@ -800,7 +979,7 @@ struct Analyzer<'a> {
     resolutions: &'a Resolutions,
     table: &'a TypeTable,
     tcx: &'a TyCtxt,
-    unsafe_fns: &'a HashMap<DefId, StashSummary>,
+    summaries: &'a Summaries,
     /// Names `let`-bound lexically within this arena block.
     block_locals: HashSet<String>,
     /// Subset of `block_locals` whose value is arena-allocated.
@@ -901,7 +1080,7 @@ impl<'a> Analyzer<'a> {
             Some(Resolution::Def {
                 def,
                 kind: DefKind::Fn,
-            }) => match self.unsafe_fns.get(&def) {
+            }) => match self.summaries.get(&Callee::Fn(def)) {
                 Some(summary) => CalleeClass::Unsafe(summary),
                 None => CalleeClass::Safe,
             },
@@ -978,10 +1157,27 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    /// Flags each place a callee stores values of its own making into, when
+    /// the place outlives the block: called here, the callee makes them in
+    /// the arena. `places` are the call's arguments by parameter position.
+    fn flag_filled(&mut self, summary: &StashSummary, places: &[&Expr]) {
+        for &fill in &summary.fills {
+            if let Some(place) = places.get(fill)
+                && self.escapes_outer(place)
+            {
+                self.flag(place.span, ArenaEscapeKind::CalleeFillsOuter);
+            }
+        }
+    }
+
     fn sink_call(&mut self, callee: &Expr, args: &[Expr]) {
         self.expr(callee);
         for a in args {
             self.expr(a);
+        }
+        if let CalleeClass::Unsafe(summary) = self.classify_callee(callee) {
+            let places: Vec<&Expr> = args.iter().collect();
+            self.flag_filled(summary, &places);
         }
         let kind = match self.classify_callee(callee) {
             CalleeClass::Safe => return,
@@ -1009,6 +1205,26 @@ impl<'a> Analyzer<'a> {
         self.expr(receiver);
         for a in args {
             self.expr(a);
+        }
+        let owner = self
+            .table
+            .get(receiver.id)
+            .and_then(|ty| receiver_type_name(self.tcx, ty));
+        if let Some(summary) = self.summaries.method(owner.as_deref(), method) {
+            let places: Vec<&Expr> = std::iter::once(receiver).chain(args.iter()).collect();
+            self.flag_filled(&summary, &places);
+            let stashes_outer = summary.global
+                || summary
+                    .sinks
+                    .iter()
+                    .any(|&sink| places.get(sink).is_none_or(|p| self.escapes_outer(p)));
+            if stashes_outer {
+                for a in args {
+                    if self.is_region_local(a) {
+                        self.flag(a.span, ArenaEscapeKind::UnsafeCallee);
+                    }
+                }
+            }
         }
         let kind = if method == "send" {
             ArenaEscapeKind::ChannelSend
@@ -1331,6 +1547,9 @@ pub enum ArenaEscapeKind {
     UnsafeCallee,
     /// Passed to an indirect call that cannot be vetted.
     IndirectCall,
+    /// A place outliving the block, passed to a function that stores values
+    /// it makes into it - made in the arena when it runs inside one.
+    CalleeFillsOuter,
 }
 
 impl ArenaEscapeKind {
@@ -1358,6 +1577,9 @@ impl ArenaEscapeKind {
             }
             Self::IndirectCall => {
                 "this arena-allocated value is passed to an indirect call that cannot be verified safe"
+            }
+            Self::CalleeFillsOuter => {
+                "this call stores values it allocates in the arena into a place that outlives the block"
             }
         }
     }

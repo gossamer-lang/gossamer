@@ -814,6 +814,43 @@ fn integer_abs_of_a_computed_value_is_inline_too() {
     );
 }
 
+/// A retain and a release of a counted node adjust its header inline, with
+/// the runtime call left for the cases the runtime must see: a string, armed
+/// instrumentation, a region or shared object, the last reference, and a
+/// survivor a cycle can pass through.
+#[test]
+fn a_counted_node_is_retained_and_released_inline() {
+    let source = "enum Tree {\n\
+                  Leaf\n\
+                  Node(i64, Tree, Tree)\n\
+                  }\n\
+                  fn weight(t: Tree) -> i64 {\n\
+                  match t {\n\
+                  Tree::Leaf => 0\n\
+                  Tree::Node(v, l, r) => v + weight(l) + weight(r)\n\
+                  }\n\
+                  }\n\
+                  fn twice(t: Tree) -> i64 {\n\
+                  let kept = t\n\
+                  weight(kept) + weight(t)\n\
+                  }\n\
+                  fn main() { println(twice(Tree::Node(1, Tree::Leaf, Tree::Node(2, Tree::Leaf, Tree::Leaf)))) }\n";
+    let (bodies, tcx) = build_from_source(source);
+    let ir = render_ir_to_string(&bodies, &tcx, false).unwrap();
+    assert!(
+        ir.contains("rc_fast") && ir.contains("@gos_rt_meta_acyclic"),
+        "a retain or release should adjust the count inline:\n{ir}"
+    );
+    for block in ir.split("\n\n").flat_map(|f| f.split("\nrc_").skip(1)) {
+        if block.contains("call void @gos_rt_rc_re") {
+            assert!(
+                block.starts_with("slow"),
+                "the runtime call belongs to the slow path:\n{block}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_heap_of_integer_tuples_pushes_and_pops_inline() {
     let source = "fn drain(n: i64) -> i64 {\n\
@@ -1599,4 +1636,69 @@ fn direct_call_passes_a_pointer_local_as_the_callees_word_parameter() {
         !ir.contains("@\"__closure_0.main\"(ptr "),
         "a ptr argument disagrees with the callee's definition:\n{ir}"
     );
+}
+
+/// A struct copied into a counted blob whose layout names no table bumps the
+/// open region's slab inline, headerless, off the program's per-thread block,
+/// and calls the plain runtime entry only on a miss.
+#[test]
+fn a_region_copy_is_bumped_inline_off_the_program_block() {
+    let source = "struct Node {\n\
+                  item: i64\n\
+                  next: Option<Node>\n\
+                  }\n\
+                  fn chain(n: i64) -> Node {\n\
+                  if n == 0 { return Node { item: 0, next: None } }\n\
+                  Node { item: n, next: Some(chain(n - 1)) }\n\
+                  }\n\
+                  fn main() { arena { println(chain(3).item) } }\n";
+    let (bodies, tcx) = build_from_source(source);
+    let ir = render_ir_to_string(&bodies, &tcx, false).unwrap();
+    assert!(
+        ir.contains("bump_fast") && ir.contains("@\"gos_rt_region_bump_tls\""),
+        "a region copy should be bumped inline:\n{ir}"
+    );
+    assert!(
+        ir.contains("thread_local global [4 x i64]"),
+        "every module defines the per-thread bump block:\n{ir}"
+    );
+    assert!(
+        ir.contains("@gos_rt_rc_alloc_move_plain") || ir.contains("@gos_rt_rc_alloc_copy_plain"),
+        "the miss takes the plain entry:\n{ir}"
+    );
+}
+
+/// An `Option` of a struct held in one word of a packed struct is read and
+/// written through the niche accessors, which decode and encode the carrier.
+#[test]
+fn an_option_field_of_a_struct_is_held_in_one_word() {
+    let source = "struct Node {\n\
+                  item: i32\n\
+                  next: Option<Node>\n\
+                  }\n\
+                  fn depth(n: Node) -> i64 {\n\
+                  match n.next { Some(rest) => 1 + depth(rest), None => 1 }\n\
+                  }\n\
+                  fn main() {\n\
+                  let mut n = Node { item: 1, next: None }\n\
+                  n.next = Some(Node { item: 2, next: None })\n\
+                  println(depth(n))\n\
+                  }\n";
+    let (bodies, tcx) = build_from_source(source);
+    let ir = render_ir_to_string(&bodies, &tcx, false).unwrap();
+    assert!(
+        !ir.contains("@gos_rt_niche_option_load(") && !ir.contains("@gos_rt_niche_option_store("),
+        "the one-word accessors are inlined:\n{ir}"
+    );
+    let node = tcx
+        .interned_tys()
+        .find(|ty| matches!(tcx.kind_of(*ty), TyKind::Adt { def, .. } if tcx.def_name(*def) == Some("Node")))
+        .expect("the program interns `Node`");
+    let layout = tcx.packed_layout(node).expect("`Node` packs");
+    assert_eq!(
+        layout.size, 16,
+        "the `i32` and the one-word `Option` share two words"
+    );
+    assert_eq!(layout.field_bytes, [4, 8]);
+    assert!(tcx.is_niche_field(node, 1));
 }

@@ -2726,8 +2726,8 @@ runtime. It yields at channel, `select`, lock, and `sleep` operations, and a
 watchdog asks a goroutine that holds its worker too long to yield at its next
 safepoint. Compiled code has a safepoint at the head of the outermost loop of
 each loop nest; a nest that is counted all the way down and calls none of the
-program's functions runs to completion first. The bytecode VM yields on every
-loop back edge. `spawn(|| expr)` starts one. Each goroutine owns a fixed-size
+program's functions runs to completion first. The bytecode VM polls every 1,024
+loop back edges. `spawn(|| expr)` starts one. Each goroutine owns a fixed-size
 mmap'd stack (default 1 MiB; override with `GOSSAMER_GOROUTINE_STACK`,
 clamped to a 32 KiB minimum). The operating system commits pages on demand.
 A byte-budget guard reports `GX0008` before the hardware guard page; the stack

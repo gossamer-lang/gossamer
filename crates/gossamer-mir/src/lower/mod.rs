@@ -303,6 +303,7 @@ fn keep_word_fields_where_required(
 }
 
 /// What a `&mut <place>.field` borrow says about the struct holding the field.
+/// A narrow scalar and an `Option` held in one word both answer for it.
 enum NarrowBorrow {
     /// The expression borrows no narrow field.
     None,
@@ -335,7 +336,7 @@ fn narrow_field_borrow(expr: &HirExpr, tcx: &TyCtxt) -> NarrowBorrow {
             )
             | TyKind::Var(_)
             | TyKind::Error
-    );
+    ) || tcx.is_niche_option(operand.ty);
     if !narrow {
         return NarrowBorrow::None;
     }
@@ -942,6 +943,11 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut Vec<Body>, start: usize, tcx: &
         tcx,
         crate::opt::narrow_slot_calls_to_blob_arms,
     );
+    // After every pass that reads or writes a struct's fields as carriers,
+    // so each of them sees an `Option` field as the carrier it stands for.
+    for body in &mut bodies[start..] {
+        niche_fields::encode_niche_fields(body, tcx);
+    }
     // Last, so a closure it copies is copied whole and finished.
     address_params::mark_carrier_address_params(bodies, start, tcx);
     #[cfg(debug_assertions)]
@@ -956,6 +962,7 @@ pub(crate) mod flat_carriers;
 pub(crate) mod flat_enums;
 pub mod helpers;
 pub(crate) mod instantiate;
+mod niche_fields;
 
 pub(crate) use builder::Builder;
 pub use helpers::*;

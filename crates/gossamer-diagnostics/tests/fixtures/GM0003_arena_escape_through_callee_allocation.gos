@@ -1,0 +1,14 @@
+// ERROR: GM0003
+fn fill(out: &mut Vec<String>, n: i64) {
+    for i in 0..n {
+        out.push(f"item-{i}")
+    }
+}
+
+fn main() {
+    let mut kept: Vec<String> = #[]
+    arena {
+        fill(&mut kept, 3)
+    }
+    println(kept.len())
+}

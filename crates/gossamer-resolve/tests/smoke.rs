@@ -603,3 +603,47 @@ fn a_use_list_entry_naming_a_module_binds_that_module() {
     assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
     assert_eq!(resolutions.module_alias("filter"), Some("engine::filter"));
 }
+
+/// A member a standard-library module does not export is unresolved, also
+/// for the modules written in Gossamer that bind no runtime name of their
+/// own, while the members the manifest lists resolve.
+#[test]
+fn a_member_a_gossamer_written_stdlib_module_does_not_export_is_unresolved() {
+    let modules = [
+        ("fd", "os::fd"),
+        ("fmt", "fmt"),
+        ("form", "http::form"),
+        ("health", "http::health"),
+        ("multipart", "http::multipart"),
+        ("panic", "panic"),
+        ("query", "http::query"),
+        ("sql", "database::sql"),
+        ("state", "http::state"),
+        ("term", "term"),
+        ("tls", "tls"),
+    ];
+    for (leaf, path) in modules {
+        let source = format!("use std::{path}\n\nfn main() {{\n    let _x = {leaf}::nope()\n}}\n");
+        let sf = parse(&source);
+        let (_resolutions, diags) = resolve_source_file(&sf);
+        assert!(
+            diags.iter().any(|d| matches!(&d.error,
+                ResolveError::UnresolvedName { name } if *name == format!("{leaf}::nope"))),
+            "`{leaf}::nope` should be unresolved: {diags:?}"
+        );
+    }
+    let source = "use std::{term, os::fd, http}\n\n\
+                  fn main() {\n\
+                  let _t = term::is_terminal(term::STDOUT)\n\
+                  let _w = fd::wait_readable\n\
+                  let _p = http::multipart::parse\n\
+                  }\n";
+    let sf = parse(source);
+    let (_resolutions, diags) = resolve_source_file(&sf);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| matches!(d.error, ResolveError::UnresolvedName { .. })),
+        "the members the manifest lists resolve: {diags:?}"
+    );
+}

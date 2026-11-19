@@ -1391,6 +1391,8 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/enum_unit_local.gos"),
     spec("feature-testing-examples/panic_hook.gos"),
     spec("feature-testing-examples/arena_blocks.gos"),
+    spec("feature-testing-examples/arena_bump_objects.gos"),
+    spec("feature-testing-examples/option_field_one_word.gos"),
     spec("feature-testing-examples/result_struct_payload.gos"),
     spec("feature-testing-examples/vec_literal_coercion.gos"),
     spec("feature-testing-examples/derive_traits.gos"),

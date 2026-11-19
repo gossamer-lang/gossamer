@@ -190,3 +190,27 @@ fn a_send_racing_a_finishing_goroutine_is_not_reported() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Three children race to hand `main` one value; `main` takes the first and
+/// joins at once. The sender it took from has not yet woken, and the two the
+/// race cancels leave their waits while a finished child checks for a
+/// deadlock. Each of them is about to move, so none of those readings is a
+/// deadlock. Two thousand rounds give every interleaving a chance to occur;
+/// the narrowest ones need the speed of a release build to land.
+#[test]
+fn a_sender_whose_value_was_taken_keeps_a_race_join_alive() {
+    const SOURCE: &str = "use std::errors\nuse std::sync::channel\n\nfn fastest(round: i64) -> Result<i64, errors::Error> {\n    let tx, rx = channel()\n    let mut first = -1\n    cohort(policy: Policy::Race) {\n        for id in 0..3 {\n            spawn(|| tx.send(round * 10 + id))\n        }\n        if let Some(v) = rx.recv() {\n            first = v\n        }\n    }?\n    Ok(first)\n}\n\nfn main() {\n    let mut answered = 0\n    for round in 0..2000 {\n        if let Ok(v) = fastest(round) && v >= round * 10 {\n            answered += 1\n        }\n    }\n    println(f\"answered {answered}\")\n}\n";
+    let dir = std::env::temp_dir().join(format!("gos-deadlock-handed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    for (tier, output) in run_every_tier(&dir, "handed_send", SOURCE) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{tier} stderr:\n{stderr}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "answered 2000\n",
+            "{tier}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

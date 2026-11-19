@@ -1325,7 +1325,9 @@ unsafe fn encode_skey(key: *const u8, desc: &[u8], out: &mut Vec<u8>) -> Option<
         // SAFETY: `off` is below the descriptor's slot count times eight, inside the key's slots.
         let slot = unsafe { key.add(off) };
         match c {
-            b'B' => {
+            // An `N` slot is an `Option` held in one word: null for `None`,
+            // keyed by presence and content as a `B` slot is.
+            b'B' | b'N' => {
                 let inner = boxed.next()?;
                 // SAFETY: `slot` addresses one 8-byte slot of the key.
                 let raw = unsafe { crate::c_abi::vec::slot_read_word(slot) }.expose_provenance();
@@ -1487,7 +1489,7 @@ pub(crate) unsafe fn consume_moved_skey(key: *const u8, desc: *const c_char) {
             // SAFETY: `index * 8` is inside the key's slots, one per descriptor character.
             unsafe { crate::c_abi::vec::slot_read_word(key.add(index * 8)) }.expose_provenance();
         match kind {
-            b'B' => {
+            b'B' | b'N' => {
                 let payload: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
                 // A `B` slot holds null or a payload word; the blob it names
                 // carries the moved share this call consumes.
@@ -3120,7 +3122,7 @@ unsafe fn map_aggregate_entries(m: *const GosMap) -> Vec<DescEntry> {
                         key_by_word: false,
                         owned_strings: slots_of(b'S'),
                         owned_vecs: slots_of(b'V'),
-                        owned_blobs: slots_of(b'B'),
+                        owned_blobs: [slots_of(b'B'), slots_of(b'N')].concat(),
                         value: entries[k],
                     })
                 })
@@ -5245,7 +5247,7 @@ pub unsafe extern "C" fn gos_rt_map_keys_skey(m: *const GosMap) -> *mut GosVec {
             .filter_map(|(i, c)| match *c {
                 b'S' => Some([-1, 0, i as i64, i64::from(vec_elem_kind::STRING)]),
                 b'V' => Some([-1, 0, i as i64, i64::from(vec_elem_kind::VEC)]),
-                b'B' => Some([-1, 0, i as i64, i64::from(vec_elem_kind::RC_NODE)]),
+                b'B' | b'N' => Some([-1, 0, i as i64, i64::from(vec_elem_kind::RC_NODE)]),
                 _ => None,
             })
             .flatten()
@@ -5378,7 +5380,7 @@ fn skey_order_at<'a>(key: &'a [u8], cursor: &mut usize, desc: &[u8]) -> Vec<Skey
                 *cursor += len * stride;
                 fields.push(SkeyField::Seq(seq_words(bytes, stride)));
             }
-            b'B' => {
+            b'B' | b'N' => {
                 let Some(inner) = boxed.next() else {
                     break;
                 };
@@ -5387,6 +5389,11 @@ fn skey_order_at<'a>(key: &'a [u8], cursor: &mut usize, desc: &[u8]) -> Vec<Skey
                 };
                 let present = marker.iter().any(|&b| b != 0);
                 *cursor += 8;
+                // A one-word `Option` orders as its carrier does: by
+                // discriminant first, `Some` (0) before `None` (1).
+                if code == b'N' {
+                    fields.push(SkeyField::Word(i64::from(!present)));
+                }
                 let payload = present.then(|| skey_order_at(key, cursor, inner));
                 fields.push(SkeyField::Boxed(payload));
             }
@@ -5479,7 +5486,7 @@ fn decode_skey_at(key: &[u8], cursor: &mut usize, desc: &[u8], slots: &mut [i64]
                 }
                 slots[index] = vec as usize as i64;
             }
-            b'B' => {
+            b'B' | b'N' => {
                 let Some(inner) = boxed.next() else {
                     return false;
                 };

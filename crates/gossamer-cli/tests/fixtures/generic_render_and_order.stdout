@@ -1,4 +1,6 @@
 150
+8
+pear
 Pair { a: 1, v: "x" }
 Pair { a: 1, v: "x" }
 #[Pair { a: 1, v: "x" }]

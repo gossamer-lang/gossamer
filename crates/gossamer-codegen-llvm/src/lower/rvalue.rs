@@ -472,6 +472,18 @@ impl<'a> Lowerer<'a> {
     /// payload extractor `gos_rt_result_payload_i128` and the constructor
     /// `gos_rt_result_new_f64` are left on the call path (the former dereferences
     /// a heap pointer; the latter is rare).
+    /// The address an `Option` field held in one word is read and written
+    /// through, from the operand MIR hands the niche intrinsics.
+    fn niche_slot_address(&mut self, arg: &Operand) -> Result<String, BuildError> {
+        let ty = self.operand_llvm_ty(arg);
+        let raw = self.lower_operand(arg)?;
+        Ok(if ty == "ptr" {
+            raw
+        } else {
+            self.coerce_llvm_value(&raw, &ty, "ptr")
+        })
+    }
+
     fn try_inline_result_carrier(
         &mut self,
         name: &str,
@@ -489,6 +501,54 @@ impl<'a> Lowerer<'a> {
             }
         };
         match name {
+            // An `Option` field held in one word: zero is `None`, any other
+            // word is the `Some` payload.
+            "gos_rt_niche_option_load" if args.len() == 1 => {
+                let addr = self.niche_slot_address(&args[0])?;
+                let (word, none, disc, wide, high, carrier) = (
+                    self.fresh(),
+                    self.fresh(),
+                    self.fresh(),
+                    self.fresh(),
+                    self.fresh(),
+                    self.fresh(),
+                );
+                writeln!(self.out, "  {word} = load i64, ptr {addr}, align 8").unwrap();
+                writeln!(self.out, "  {none} = icmp eq i64 {word}, 0").unwrap();
+                writeln!(self.out, "  {disc} = zext i1 {none} to i128").unwrap();
+                writeln!(self.out, "  {wide} = zext i64 {word} to i128").unwrap();
+                writeln!(self.out, "  {high} = shl i128 {wide}, 64").unwrap();
+                writeln!(self.out, "  {carrier} = or i128 {high}, {disc}").unwrap();
+                Ok(Some(coerce_dest(self, carrier, "i128")))
+            }
+            "gos_rt_niche_option_store" if args.len() == 2 => {
+                let addr = self.niche_slot_address(&args[0])?;
+                let c_ty = self.operand_llvm_ty(&args[1]);
+                let c_raw = self.lower_operand(&args[1])?;
+                let carrier = if c_ty == "i128" {
+                    c_raw
+                } else {
+                    self.coerce_llvm_value(&c_raw, &c_ty, "i128")
+                };
+                let (disc, shifted, payload, some, word) = (
+                    self.fresh(),
+                    self.fresh(),
+                    self.fresh(),
+                    self.fresh(),
+                    self.fresh(),
+                );
+                writeln!(self.out, "  {disc} = trunc i128 {carrier} to i64").unwrap();
+                writeln!(self.out, "  {shifted} = lshr i128 {carrier}, 64").unwrap();
+                writeln!(self.out, "  {payload} = trunc i128 {shifted} to i64").unwrap();
+                writeln!(self.out, "  {some} = icmp eq i64 {disc}, 0").unwrap();
+                writeln!(
+                    self.out,
+                    "  {word} = select i1 {some}, i64 {payload}, i64 0"
+                )
+                .unwrap();
+                writeln!(self.out, "  store i64 {word}, ptr {addr}, align 8").unwrap();
+                Ok(Some(coerce_dest(self, "0".to_string(), "i64")))
+            }
             "gos_rt_result_new" | "gos_rt_result_new_owned" if args.len() == 2 => {
                 // A Unit / `void` operand (`Ok(())`, `Some(())`) carries no
                 // bits: pack it as 0, matching the runtime-call arg path's
@@ -765,12 +825,229 @@ impl<'a> Lowerer<'a> {
             )
             .unwrap();
             writeln!(self.out, "{live_l}:").unwrap();
+            if matches!(name, "gos_rt_rc_retain" | "gos_rt_rc_release") {
+                let word = self.coerce_llvm_value(&handle, &ty, "i64");
+                self.emit_rc_count_inline(name == "gos_rt_rc_retain", &word, &done_l);
+            }
             let result = self.emit_runtime_call_intrinsic(name, args, dest_local)?;
             writeln!(self.out, "  br label %{done_l}").unwrap();
             writeln!(self.out, "{done_l}:").unwrap();
             return Ok(result);
         }
         self.emit_runtime_call_intrinsic(name, args, dest_local)
+    }
+
+    /// A retain or release of the non-null counted pointer `word` taken
+    /// inline where the runtime would only adjust the count, branching to
+    /// `done` after it; every other case falls through to the runtime call
+    /// that follows.
+    ///
+    /// The inline path stands aside for a string (an odd pointer), for armed
+    /// instrumentation (the call records the count), for a region object
+    /// (counted by neither), for a shared or immortal object, and, on a
+    /// release, for the last reference or a survivor whose layout a cycle can
+    /// pass through (the call buffers it as a candidate).
+    fn emit_rc_count_inline(&mut self, retain: bool, word: &str, done: &str) {
+        use gossamer_abi::rc::header;
+        for decl in [
+            "@gos_rt_instrumentation = external dso_local global i8",
+            "@gos_rt_region_arena_base = external dso_local global i64",
+            "@gos_rt_region_arena_len = external dso_local global i64",
+            "@gos_rt_meta_acyclic = external dso_local global i64",
+        ] {
+            self.runtime_refs.insert(decl.to_string());
+        }
+        let slow = self.fresh_label("rc_slow");
+        let check = self.fresh_label("rc_check");
+        let counted = self.fresh_label("rc_counted");
+        let fast = self.fresh_label("rc_fast");
+        let tag = self.fresh();
+        let odd = self.fresh();
+        let armed = self.fresh();
+        let armed_b = self.fresh();
+        let aside = self.fresh();
+        writeln!(self.out, "  {tag} = and i64 {word}, 1").unwrap();
+        writeln!(self.out, "  {odd} = icmp ne i64 {tag}, 0").unwrap();
+        writeln!(
+            self.out,
+            "  {armed} = load atomic i8, ptr @gos_rt_instrumentation monotonic, align 1"
+        )
+        .unwrap();
+        writeln!(self.out, "  {armed_b} = icmp ne i8 {armed}, 0").unwrap();
+        writeln!(self.out, "  {aside} = or i1 {odd}, {armed_b}").unwrap();
+        writeln!(self.out, "  br i1 {aside}, label %{slow}, label %{check}").unwrap();
+        writeln!(self.out, "{check}:").unwrap();
+        // The base is published after its length, so a reader that sees a
+        // base sees the length that goes with it; no base means no arena. A
+        // tagged word with no pointer under its tag (a unit variant) counts
+        // nothing either.
+        let payload = self.fresh();
+        let base = self.fresh();
+        let len = self.fresh();
+        let off = self.fresh();
+        let within = self.fresh();
+        let based = self.fresh();
+        let region = self.fresh();
+        writeln!(self.out, "  {payload} = and i64 {word}, -8").unwrap();
+        writeln!(
+            self.out,
+            "  {base} = load atomic i64, ptr @gos_rt_region_arena_base acquire, align 8"
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  {len} = load atomic i64, ptr @gos_rt_region_arena_len monotonic, align 8"
+        )
+        .unwrap();
+        writeln!(self.out, "  {off} = sub i64 {payload}, {base}").unwrap();
+        writeln!(self.out, "  {within} = icmp ult i64 {off}, {len}").unwrap();
+        writeln!(self.out, "  {based} = icmp ne i64 {base}, 0").unwrap();
+        writeln!(self.out, "  {region} = and i1 {within}, {based}").unwrap();
+        let bare = self.fresh();
+        let uncounted = self.fresh();
+        writeln!(self.out, "  {bare} = icmp eq i64 {payload}, 0").unwrap();
+        writeln!(self.out, "  {uncounted} = or i1 {region}, {bare}").unwrap();
+        writeln!(
+            self.out,
+            "  br i1 {uncounted}, label %{done}, label %{counted}"
+        )
+        .unwrap();
+        writeln!(self.out, "{counted}:").unwrap();
+        let count_at = self.fresh();
+        let count_ptr = self.fresh();
+        let strong = self.fresh();
+        let flags = self.fresh();
+        let local = self.fresh();
+        let count = self.fresh();
+        writeln!(
+            self.out,
+            "  {count_at} = add i64 {payload}, {}",
+            header::STRONG_OFFSET
+        )
+        .unwrap();
+        writeln!(self.out, "  {count_ptr} = inttoptr i64 {count_at} to ptr").unwrap();
+        writeln!(
+            self.out,
+            "  {strong} = load atomic i32, ptr {count_ptr} monotonic, align 4"
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  {flags} = and i32 {strong}, {}",
+            header::SHARED_BIT | header::REGION_BIT
+        )
+        .unwrap();
+        writeln!(self.out, "  {local} = icmp eq i32 {flags}, 0").unwrap();
+        writeln!(
+            self.out,
+            "  {count} = and i32 {strong}, {}",
+            header::STRONG_COUNT_MASK
+        )
+        .unwrap();
+        let next = self.fresh();
+        if retain {
+            // Below the immortal count by two, the bump stays an ordinary count.
+            let room = self.fresh();
+            let take = self.fresh();
+            let buffered = self.fresh();
+            let bumped = self.fresh();
+            writeln!(
+                self.out,
+                "  {room} = icmp ult i32 {count}, {}",
+                header::STRONG_IMMORTAL - 1
+            )
+            .unwrap();
+            writeln!(self.out, "  {take} = and i1 {local}, {room}").unwrap();
+            writeln!(self.out, "  br i1 {take}, label %{fast}, label %{slow}").unwrap();
+            writeln!(self.out, "{fast}:").unwrap();
+            // As the runtime's increment: the count up, the color back to
+            // black, the buffered bit kept.
+            writeln!(
+                self.out,
+                "  {buffered} = and i32 {strong}, {}",
+                header::BUFFERED_BIT
+            )
+            .unwrap();
+            writeln!(self.out, "  {bumped} = add i32 {count}, 1").unwrap();
+            writeln!(self.out, "  {next} = or i32 {buffered}, {bumped}").unwrap();
+        } else {
+            // A survivor of an ordinary count whose layout no cycle can pass
+            // through, or a leaf, needs nothing past the decrement.
+            let several = self.fresh();
+            let mortal = self.fresh();
+            let meta_at = self.fresh();
+            let meta_ptr = self.fresh();
+            let meta = self.fresh();
+            let id = self.fresh();
+            let word_ix = self.fresh();
+            let bit_ix = self.fresh();
+            let word_ptr = self.fresh();
+            let bits = self.fresh();
+            let mask = self.fresh();
+            let hit = self.fresh();
+            let acyclic = self.fresh();
+            let leaf = self.fresh();
+            let settled = self.fresh();
+            let counted_ok = self.fresh();
+            let take = self.fresh();
+            writeln!(self.out, "  {several} = icmp ugt i32 {count}, 1").unwrap();
+            writeln!(
+                self.out,
+                "  {mortal} = icmp ult i32 {count}, {}",
+                header::STRONG_IMMORTAL
+            )
+            .unwrap();
+            writeln!(
+                self.out,
+                "  {meta_at} = add i64 {payload}, {}",
+                header::META_ID_OFFSET
+            )
+            .unwrap();
+            writeln!(self.out, "  {meta_ptr} = inttoptr i64 {meta_at} to ptr").unwrap();
+            writeln!(self.out, "  {meta} = load i16, ptr {meta_ptr}, align 2").unwrap();
+            writeln!(self.out, "  {id} = zext i16 {meta} to i64").unwrap();
+            writeln!(
+                self.out,
+                "  {word_ix} = lshr i64 {id}, {}",
+                header::ACYCLIC_WORD_BITS.trailing_zeros()
+            )
+            .unwrap();
+            writeln!(
+                self.out,
+                "  {bit_ix} = and i64 {id}, {}",
+                header::ACYCLIC_WORD_BITS - 1
+            )
+            .unwrap();
+            writeln!(
+                self.out,
+                "  {word_ptr} = getelementptr i64, ptr @gos_rt_meta_acyclic, i64 {word_ix}"
+            )
+            .unwrap();
+            writeln!(
+                self.out,
+                "  {bits} = load atomic i64, ptr {word_ptr} monotonic, align 8"
+            )
+            .unwrap();
+            writeln!(self.out, "  {mask} = shl i64 1, {bit_ix}").unwrap();
+            writeln!(self.out, "  {hit} = and i64 {bits}, {mask}").unwrap();
+            writeln!(self.out, "  {acyclic} = icmp ne i64 {hit}, 0").unwrap();
+            writeln!(self.out, "  {leaf} = icmp eq i64 {id}, 0").unwrap();
+            writeln!(self.out, "  {settled} = or i1 {acyclic}, {leaf}").unwrap();
+            writeln!(self.out, "  {counted_ok} = and i1 {several}, {mortal}").unwrap();
+            let both = self.fresh();
+            writeln!(self.out, "  {both} = and i1 {local}, {counted_ok}").unwrap();
+            writeln!(self.out, "  {take} = and i1 {both}, {settled}").unwrap();
+            writeln!(self.out, "  br i1 {take}, label %{fast}, label %{slow}").unwrap();
+            writeln!(self.out, "{fast}:").unwrap();
+            writeln!(self.out, "  {next} = sub i32 {strong}, 1").unwrap();
+        }
+        writeln!(
+            self.out,
+            "  store atomic i32 {next}, ptr {count_ptr} monotonic, align 4"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{done}").unwrap();
+        writeln!(self.out, "{slow}:").unwrap();
     }
 
     /// The runtime call [`Self::lower_runtime_call_intrinsic`] makes.

@@ -2514,12 +2514,14 @@ impl Parser<'_> {
                 continue;
             }
             // `Point { x, y }`: a lone name initializes the field of that
-            // name from the binding of that name.
+            // name from the binding of that name, in a multi-line literal a
+            // name alone on its line.
             if matches!(self.peek().kind, TokenKind::Ident)
-                && matches!(
+                && (matches!(
                     self.peek_nth(1).kind,
                     TokenKind::Punct(Punct::Comma | Punct::RBrace)
-                )
+                ) || (self.newline_after_peek()
+                    && !matches!(self.peek_nth(1).kind, TokenKind::Punct(_))))
             {
                 let name_span = self.peek_span();
                 let name = Ident::new(self.slice(name_span));

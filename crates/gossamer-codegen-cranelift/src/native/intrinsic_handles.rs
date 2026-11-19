@@ -1681,7 +1681,7 @@ fn sent_aggregate_copy(
     let meta = builder.ins().symbol_value(ptr_ty, gv);
     let alloc_fn = intrinsics.extern_fn(
         module,
-        "gos_rt_rc_alloc_copy",
+        gossamer_abi::rc::rc_alloc_entry(false, Some(blob)),
         &[types::I64, ptr_ty, ptr_ty],
         &[ptr_ty],
     )?;

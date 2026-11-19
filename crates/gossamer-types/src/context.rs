@@ -1199,7 +1199,7 @@ impl TyCtxt {
             return None;
         }
         let fields = self.struct_fields_inst.get(&(*def, substs.clone()))?;
-        self.packed_walk_fields(fields, on_field)
+        self.packed_walk_fields(fields, false, on_field)
     }
 
     /// Every type interned so far.
@@ -1229,25 +1229,82 @@ impl TyCtxt {
         if fields.iter().any(|field| self.ty_contains_param(*field)) {
             return None;
         }
-        self.packed_walk_fields(fields, on_field)
+        self.packed_walk_fields(fields, true, on_field)
+    }
+
+    /// Whether a value of `ty` can be held in one word: an `Option` of a
+    /// struct or tuple, whose `Some` payload is a counted copy of the value
+    /// and so never null. The word holds that payload, or zero for `None`.
+    #[must_use]
+    pub fn is_niche_option(&self, ty: Ty) -> bool {
+        let TyKind::Adt { def, substs } = self.kind_of(ty) else {
+            return false;
+        };
+        if def.local != u32::MAX - 1 {
+            return false;
+        }
+        let Some(&payload) = substs.types().first() else {
+            return false;
+        };
+        match self.kind_of(payload) {
+            TyKind::Tuple(items) => !items.is_empty(),
+            TyKind::Adt { def, .. } => {
+                def.local < u32::MAX - 16
+                    && !self.is_inline_enum_ty(payload)
+                    && !self.flat_enums.contains_key(&def.local)
+                    && self.struct_field_tys(*def).is_some()
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether field `index` of the packed struct `ty` is an `Option` held in
+    /// one word ([`Self::is_niche_option`]).
+    #[must_use]
+    pub fn is_niche_field(&self, ty: Ty, index: usize) -> bool {
+        let TyKind::Adt { def, substs } = self.kind_of(ty) else {
+            return false;
+        };
+        let Some(field) = self
+            .adt_field_tys(*def, substs)
+            .and_then(|f| f.get(index).copied())
+        else {
+            return false;
+        };
+        self.is_niche_option(field)
+            && self
+                .packed_layout(ty)
+                .is_some_and(|layout| layout.field_bytes.get(index) == Some(&8))
     }
 
     /// The packed layout of a struct with `fields`, handing each field's
-    /// offset and bytes to `on_field`: see [`Self::packed_walk`].
-    fn packed_walk_fields(&self, fields: &[Ty], mut on_field: impl FnMut(u32, u32)) -> Option<u32> {
+    /// offset and bytes to `on_field`: see [`Self::packed_walk`]. With
+    /// `niche`, an `Option` [`Self::is_niche_option`] accepts takes one word.
+    fn packed_walk_fields(
+        &self,
+        fields: &[Ty],
+        niche: bool,
+        mut on_field: impl FnMut(u32, u32),
+    ) -> Option<u32> {
         let mut offset = 0u32;
         let mut word_offset = 0u32;
         let mut changed = false;
         for field in fields {
+            // The words the field spans when every field keeps whole words.
+            let word_bytes = match self.packed_scalar_bytes(*field) {
+                Some(_) => 8,
+                None => self.slot_bytes(*field).max(8),
+            };
             let (bytes, align) = match self.packed_scalar_bytes(*field) {
                 Some(bytes) => (bytes, bytes),
-                None => (self.slot_bytes(*field).max(8), 8),
+                None if niche && self.is_niche_option(*field) => (8, 8),
+                None => (word_bytes, 8),
             };
             offset = offset.next_multiple_of(align);
             changed |= offset != word_offset;
             on_field(offset, bytes);
             offset += bytes;
-            word_offset += bytes.next_multiple_of(8);
+            word_offset += word_bytes;
         }
         let size = offset.next_multiple_of(8).max(8);
         changed |= size != word_offset.max(8);

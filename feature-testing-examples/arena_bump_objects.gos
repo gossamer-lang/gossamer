@@ -1,0 +1,140 @@
+// Objects built inside `arena { }` blocks: enough of them to fill several
+// slabs, nested regions, a field-less value, a value holding a string, a
+// layout holding a map, and goroutines that yield while their region is open.
+
+use std::sync::channel
+
+struct Node {
+    item: i64
+    left: Option<Node>
+    right: Option<Node>
+}
+
+struct Marker {}
+
+struct Named {
+    name: String
+    rank: i64
+}
+
+struct Tally {
+    counts: Map<String, i64>
+}
+
+fn build(item: i64, depth: i64) -> Node {
+    if depth > 0 {
+        Node {
+            item
+            left: Some(build(item * 2, depth - 1))
+            right: Some(build(item * 2 + 1, depth - 1))
+        }
+    } else {
+        Node { item, left: None, right: None }
+    }
+}
+
+fn total(node: Node) -> i64 {
+    let mut sum = node.item
+    if let Some(left) = node.left { sum += total(left) }
+    if let Some(right) = node.right { sum += total(right) }
+    sum
+}
+
+fn markers(n: i64) -> i64 {
+    let mut kept = #[]
+    for _ in 0..n {
+        kept.push(Some(Marker {}))
+    }
+    kept.filter(|m| m.is_some()).len()
+}
+
+fn names(n: i64) -> String {
+    let mut best = Named { name: "none", rank: -1 }
+    for i in 0..n {
+        let candidate = Some(Named { name: f"n{i}", rank: (i * 7) % 13 })
+        if let Some(c) = candidate && c.rank > best.rank {
+            best = c
+        }
+    }
+    f"{best.name}:{best.rank}"
+}
+
+fn tallies(n: i64) -> i64 {
+    let mut seen = #[]
+    for i in 0..n {
+        let mut counts = Map::new()
+        counts[f"k{i % 3}"] = i
+        seen.push(Some(Tally { counts }))
+    }
+    let mut sum = 0
+    for t in seen {
+        if let Some(t) = t {
+            for (_, v) in t.counts { sum += v }
+        }
+    }
+    sum
+}
+
+fn worker(id: i64, rounds: i64, tx: Sender<i64>, ack: Receiver<i64>) {
+    let mut sum = 0
+    arena {
+        let first = build(id, 10)
+        for r in 0..rounds {
+            tx.send(r)
+            let _ = ack.recv()
+            let more = build(id + r, 8)
+            sum += total(more)
+        }
+        sum += total(first)
+    }
+    tx.send(sum)
+}
+
+fn main() {
+    let mut grand = 0
+    for round in 0..3 {
+        arena {
+            let root = build(1, 16)
+            grand += total(root)
+            arena {
+                let inner = build(round, 6)
+                grand += total(inner)
+            }
+            let again = build(2, 12)
+            grand += total(again)
+        }
+    }
+    println(f"trees: {grand}")
+    println(f"tallies outside: {tallies(300)}")
+    arena {
+        println(f"markers: {markers(5000)}")
+        println(f"names: {names(4000)}")
+        println(f"tallies: {tallies(300)}")
+    }
+    arena {
+        let mut grown = #[]
+        for i in 0..10 { grown.push(i) }
+        arena {
+            for i in 0..5000 { grown.push(i) }
+        }
+        let mut before = 0
+        for x in grown { before += x }
+        let mut filler = #[]
+        for i in 0..20_000 { filler.push(i * 2) }
+        let mut after = 0
+        for x in grown { after += x }
+        println(f"grown: {grown.len()} {before} {after} {filler.len()}")
+    }
+    let mut results = #[]
+    for id in 1..4 {
+        let tx, rx = channel()
+        let ack_tx, ack_rx = channel()
+        spawn(|| worker(id, 4, tx, ack_rx))
+        for r in 0..4 {
+            let _ = rx.recv()
+            ack_tx.send(r)
+        }
+        results.push(rx.recv().unwrap_or(-1))
+    }
+    println(f"workers: {results}")
+}

@@ -208,7 +208,7 @@ impl GosSet {
                 let kind = match kind {
                     b'S' => vec_elem_kind::STRING,
                     b'V' => vec_elem_kind::VEC,
-                    b'B' => vec_elem_kind::RC_NODE,
+                    b'B' | b'N' => vec_elem_kind::RC_NODE,
                     _ => return None,
                 };
                 Some(VecSlotChild {

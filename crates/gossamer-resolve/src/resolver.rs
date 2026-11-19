@@ -3208,7 +3208,14 @@ impl Resolver {
     /// when its full spelling is bound, or when `head::sub` is a real
     /// module path and the `sub::member` binding spelling is bound.
     fn stdlib_member_resolves(&self, joined: &str, effective: &[&str]) -> bool {
-        if crate::stdlib_exports::is_stdlib_qualified(joined) {
+        if crate::stdlib_exports::is_stdlib_qualified(joined)
+            || crate::stdlib_exports::is_stdlib_item_path(joined)
+        {
+            return true;
+        }
+        if let [leaf, member] = effective
+            && manifest_lists_leaf_member(leaf, member)
+        {
             return true;
         }
         // An associated item an `impl char { .. }` block in the program
@@ -4032,7 +4039,9 @@ fn starts_lowercase(seg: &str) -> bool {
 fn path_shape_is_validated(effective: &[&str]) -> bool {
     match effective {
         [head, _member] => {
-            crate::stdlib_exports::is_stdlib_module_name(head) || is_scalar_primitive_name(head)
+            crate::stdlib_exports::is_stdlib_module_name(head)
+                || is_stdlib_module_leaf(head)
+                || is_scalar_primitive_name(head)
         }
         [head, sub, member] if starts_lowercase(sub) && starts_lowercase(member) => {
             crate::stdlib_exports::is_stdlib_module_name(head)
@@ -4045,6 +4054,31 @@ fn path_shape_is_validated(effective: &[&str]) -> bool {
         }
         _ => false,
     }
+}
+
+/// Whether `leaf` is the last segment of a standard-library module path.
+///
+/// A module whose functions are written in Gossamer binds no runtime name
+/// under its leaf (`fmt`, `term`, `os::fd`, `http::form`), so the runtime
+/// table alone does not know it; the module paths the manifest documents do.
+fn is_stdlib_module_leaf(leaf: &str) -> bool {
+    crate::stdlib_exports::STDLIB_MODULE_PATHS
+        .iter()
+        .any(|path| path.rsplit("::").next() == Some(leaf))
+}
+
+/// Whether the manifest lists `member` under a standard-library module whose
+/// path ends in `leaf`, as a program names it after `use std::..::leaf`.
+fn manifest_lists_leaf_member(leaf: &str, member: &str) -> bool {
+    crate::stdlib_exports::STDLIB_MODULE_PATHS
+        .iter()
+        .filter(|path| path.rsplit("::").next() == Some(leaf))
+        .any(|path| {
+            let item = format!("{path}::{member}");
+            crate::stdlib_exports::STDLIB_MANIFEST_ITEMS
+                .binary_search(&item.as_str())
+                .is_ok()
+        })
 }
 
 /// Whether `name` is a scalar primitive type. Its associated surface is

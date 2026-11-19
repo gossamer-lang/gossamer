@@ -173,6 +173,10 @@ pub mod packed_leaf {
     /// A field other than a scalar, at a word boundary: the leaf is followed
     /// by the field's own descriptor, which orders the words at its offset.
     pub const NESTED: u8 = 11;
+    /// An `Option` held in one word: zero for `None`, else the `Some`
+    /// payload. The leaf is followed by the `Option`'s own descriptor, which
+    /// orders the two-word carrier the word stands for.
+    pub const NICHE: u8 = 12;
 }
 
 /// Runtime shims that invoke a gossamer callback through

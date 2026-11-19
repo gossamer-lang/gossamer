@@ -72,6 +72,10 @@ struct ChannelState {
     next_send_id: u64,
     waiting_receivers: usize,
     waiting_senders: usize,
+    /// Unbuffered values a receiver has taken whose senders have not yet
+    /// woken to see it. Each such sender is still counted as waiting, yet its
+    /// send has completed, so it is never stuck.
+    handed_unobserved: usize,
     select_waiters: Vec<Arc<SelectWaiter>>,
     /// Whether this channel currently contributes to the pending-handoff count
     /// maintained through [`crate::vm::goroutine::adjust_pending_handoffs`],
@@ -85,6 +89,7 @@ impl ChannelState {
     fn pop_message(&mut self) -> Option<Value> {
         let msg = self.buf.pop_front()?;
         if let Some(handed) = &msg.handed {
+            self.handed_unobserved += 1;
             handed.notify_one();
         }
         Some(msg.value)
@@ -117,10 +122,10 @@ impl ChannelState {
         }
         match self.capacity {
             // An unbuffered sender's value is queued until a receiver takes
-            // it. A receiver present means the handoff is imminent; an empty
-            // buffer means it already happened and the sender has simply not
-            // observed it yet. Either way the sender is not stuck.
-            ChannelCapacity::Unbuffered => self.waiting_receivers > 0 || self.buf.is_empty(),
+            // it. A receiver present means the handoff is imminent; a value
+            // already taken means a sender has completed and has simply not
+            // observed it yet. Either way that sender is not stuck.
+            ChannelCapacity::Unbuffered => self.waiting_receivers > 0 || self.handed_unobserved > 0,
             ChannelCapacity::Unbounded => true,
             ChannelCapacity::Bounded(capacity) => self.buf.len() < capacity,
         }
@@ -263,6 +268,7 @@ impl Channel {
                     next_send_id: 1,
                     waiting_receivers: 0,
                     waiting_senders: 0,
+                    handed_unobserved: 0,
                     select_waiters: Vec::new(),
                     counted_ready: false,
                 }),
@@ -321,6 +327,14 @@ impl Channel {
                     };
                     handed.wait(&mut guard);
                 }
+                let taken = !guard.buf.iter().any(|msg| msg.id == id);
+                if taken {
+                    guard.handed_unobserved -= 1;
+                } else if let Some(msg) = guard.buf.iter_mut().find(|msg| msg.id == id) {
+                    // No sender waits on this value any longer, so a receive
+                    // that takes it later completes no pending handoff.
+                    msg.handed = None;
+                }
                 guard.waiting_senders = guard.waiting_senders.saturating_sub(1);
                 Self::sync_ready_count(&mut guard);
                 if deadlocked {
@@ -330,7 +344,7 @@ impl Channel {
                 // channel did after the handoff; one still queued when the
                 // channel closed is withdrawn, so no later receive hands it
                 // over.
-                if !guard.buf.iter().any(|msg| msg.id == id) {
+                if taken {
                     return SendOutcome::Sent;
                 }
                 if guard.closed {

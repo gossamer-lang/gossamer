@@ -795,6 +795,17 @@ fn mangled_stdlib_name(parent: &str, item: &str) -> Option<&'static str> {
         .map(|(_, _, name)| *name)
 }
 
+/// The `parent::item` a program writes for the injected stdlib wrapper or
+/// type `mangled` (`term::is_terminal` for `__gos_term_is_terminal`), for a
+/// diagnostic that names it.
+#[must_use]
+pub fn stdlib_wrapper_spelling(mangled: &str) -> Option<String> {
+    MANGLED_STDLIB_NAMES
+        .iter()
+        .find(|(_, _, name)| *name == mangled)
+        .map(|(parent, item, _)| format!("{parent}::{item}"))
+}
+
 /// The spelling a program writes for the injected stdlib type `mangled`
 /// (`fs::Metadata` for `__gos_fs_Metadata`), which its rendering shows.
 fn public_stdlib_type_spelling(mangled: &str) -> Option<String> {

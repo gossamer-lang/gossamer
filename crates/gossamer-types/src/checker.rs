@@ -137,6 +137,7 @@ impl TypeChecker<'_> {
         self.check_deferred_field_receivers();
         self.check_deferred_structural();
         self.check_deferred_shared_payloads();
+        self.check_deferred_fn_item_type_args();
         self.resolve_table();
         let diagnostics = Self::dedupe_diagnostics(self.diagnostics);
         (self.table, diagnostics)
@@ -818,6 +819,9 @@ struct TypeChecker<'a> {
     export_symbols: HashMap<String, String>,
     /// Structs declared `#[repr(C)]`, which may cross the C boundary.
     repr_c_structs: HashSet<DefId>,
+    /// Every path naming a function item, with its span and spelling, for
+    /// the check that each generic one's type arguments were inferred.
+    fn_item_paths: Vec<(NodeId, Span, String)>,
     /// Foreign types declared `type Name` in an extern block, which have no
     /// Gossamer value and are reached only through `ffi::Ptr`.
     opaque_types: HashSet<DefId>,
@@ -1365,6 +1369,7 @@ impl<'a> TypeChecker<'a> {
             foreign_fns: HashMap::new(),
             export_symbols: HashMap::new(),
             repr_c_structs: HashSet::new(),
+            fn_item_paths: Vec::new(),
             unsafe_depth: 0,
             suppressed: SuppressedReadChecks::default(),
             deferred_reference_storage: Vec::new(),
@@ -3028,6 +3033,28 @@ impl<'a> TypeChecker<'a> {
             value: v,
             ordered,
         })
+    }
+
+    /// Reports a generic function named or called with a type argument
+    /// nothing fixed by the end of inference: no tier can run it without
+    /// knowing which instantiation it is.
+    fn check_deferred_fn_item_type_args(&mut self) {
+        for (node, span, name) in std::mem::take(&mut self.fn_item_paths) {
+            let Some(ty) = self.table.get(node) else {
+                continue;
+            };
+            let resolved = self.deep_resolve(ty);
+            let Some(TyKind::FnDef { substs, .. }) = self.tcx.kind(resolved) else {
+                continue;
+            };
+            let uninferred = substs
+                .types()
+                .iter()
+                .any(|arg| matches!(self.tcx.kind(*arg), Some(TyKind::Var(_))));
+            if uninferred {
+                self.emit(TypeError::FnItemTypeArgsUninferred { name }, span);
+            }
+        }
     }
 
     fn deep_resolve(&mut self, ty: Ty) -> Ty {
@@ -4921,6 +4948,13 @@ fn cast_allowed(from: &TyKind, to: &TyKind) -> bool {
 /// anything else falls back to a generic label.
 fn callee_display_name(callee: &Expr) -> String {
     match &callee.kind {
+        // A stdlib call the parser routed to its injected wrapper is named
+        // as the program wrote it.
+        ExprKind::Path(path) if path.segments.len() == 1 => {
+            let name = path.segments[0].name.name.as_str();
+            gossamer_parse::autoderive::stdlib_wrapper_spelling(name)
+                .unwrap_or_else(|| name.to_string())
+        }
         ExprKind::Path(path) => path
             .segments
             .iter()

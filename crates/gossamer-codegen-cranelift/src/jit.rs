@@ -3597,12 +3597,11 @@ fn foreign_libraries(bodies: &[Body]) -> Vec<String> {
 }
 
 fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashSet<&'static str> {
-    // The one data symbol compiled code reads: the yield-request byte every
-    // loop-header preemption poll tests.
-    builder.symbol(
-        "gos_rt_preempt_requested",
-        std::ptr::from_ref(&gossamer_runtime::preempt::PREEMPT_REQUESTED).cast::<u8>(),
-    );
+    // The data compiled code reads: the yield-request byte every loop poll
+    // tests, and the state an inline retain or release reads.
+    for (name, addr) in gossamer_runtime::symbols::data_entries() {
+        builder.symbol(name, addr);
+    }
     gossamer_runtime::symbols::entries()
         .map(|(name, addr)| {
             builder.symbol(name, addr.cast::<u8>());

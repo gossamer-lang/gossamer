@@ -22,7 +22,11 @@ use std::sync::{
 /// and from the calls that turn a scope or the sampler on - because the hooks
 /// gate on it: a switch read lazily from inside a hook would never be read at
 /// all.
-static INSTRUMENTATION: AtomicBool = AtomicBool::new(cfg!(test));
+///
+/// Compiled code reads it too: an inline retain or release takes the runtime
+/// call, which records it, while this is set.
+#[unsafe(export_name = "gos_rt_instrumentation")]
+pub static INSTRUMENTATION: AtomicBool = AtomicBool::new(cfg!(test));
 
 /// Reports whether any instrumentation is armed. The exact switch is
 /// re-checked in each recorder's own cold body.
@@ -47,6 +51,8 @@ pub fn init_instrumentation_from_env() {
         "GOS_RC_ALLOC_STATS",
         "GOS_MAP_ALLOC_STATS",
         "GOS_LEAK_LEDGER",
+        "GOS_RC_TRACE",
+        "GOS_RC_DEBUG",
     ]
     .iter()
     .any(|k| std::env::var_os(k).is_some());

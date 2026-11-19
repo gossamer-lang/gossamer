@@ -2637,15 +2637,20 @@ impl<'a> Builder<'a> {
             u8::try_from(layout.size / 8).ok()?,
             u8::try_from(fields.len()).ok()?,
         ];
-        for (field, offset) in fields.iter().zip(&layout.field_offsets) {
+        for (index, (field, offset)) in fields.iter().zip(&layout.field_offsets).enumerate() {
             out.extend(u16::try_from(*offset).ok()?.to_le_bytes());
             if self.tcx.packed_scalar_bytes(*field).is_some() {
                 out.push(self.packed_leaf_kind(*field));
             } else {
                 // The field's own descriptor, placed where it begins in the
                 // whole stream, so a type that reaches itself refers back to
-                // its enclosing entry or meets the depth bound.
-                out.push(gossamer_abi::packed_leaf::NESTED);
+                // its enclosing entry or meets the depth bound. An `Option`
+                // held in one word names the carrier it stands for.
+                out.push(if self.tcx.is_niche_field(ty, index) {
+                    gossamer_abi::packed_leaf::NICHE
+                } else {
+                    gossamer_abi::packed_leaf::NESTED
+                });
                 let nested =
                     self.ordering_stream_inner(*field, enclosing, at + out.len(), depth + 1)?;
                 out.extend(nested);

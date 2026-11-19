@@ -215,8 +215,11 @@ unsafe fn skip_packed_leaves(tags: DescStream, cursor: &mut usize, leaves: usize
     for _ in 0..leaves {
         let kind = tags.byte(*cursor + 2);
         *cursor += 3;
-        if kind == gossamer_abi::packed_leaf::NESTED {
-            // SAFETY: a nested leaf is followed by a whole descriptor.
+        if matches!(
+            kind,
+            gossamer_abi::packed_leaf::NESTED | gossamer_abi::packed_leaf::NICHE
+        ) {
+            // SAFETY: a nested or one-word carrier leaf is followed by a whole descriptor.
             unsafe { skip_desc(tags, cursor) };
         }
     }

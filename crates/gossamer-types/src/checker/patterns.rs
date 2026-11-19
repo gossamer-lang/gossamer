@@ -1601,6 +1601,15 @@ impl TypeChecker<'_> {
                 // lowerer reads the real substitution instead of
                 // deriving one heuristically from argument types.
                 let substs = self.fn_item_path_substs(node, def, path);
+                if !substs.is_empty() {
+                    let name = path
+                        .segments
+                        .iter()
+                        .map(|s| s.name.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    self.fn_item_paths.push((node, span, name));
+                }
                 self.tcx.intern(TyKind::FnDef { def, substs })
             }
             gossamer_resolve::DefKind::Const | gossamer_resolve::DefKind::Static => {

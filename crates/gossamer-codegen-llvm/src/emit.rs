@@ -70,6 +70,7 @@ const LLVM_SPECIAL_DECLS: &[&str] = &[
     "declare i32 @gos_rt_main_exit_code(i64)",
     "declare i32 @gos_rt_main_exit_code_err(i64, i64)",
     "declare void @gos_rt_call_main(ptr, ptr)",
+    "declare void @gos_rt_region_bump_adopt(ptr)",
 ];
 
 /// What a program's `gos_main` answers, which the C `main` translates into an
@@ -112,9 +113,19 @@ fn render_main_entry(kind: MainReturn, init_bindings: bool) -> String {
     }
     writeln!(out, "  ret void").unwrap();
     writeln!(out, "}}").unwrap();
+    let block = gossamer_abi::rc::region_bump::PROGRAM_BLOCK_SYMBOL;
+    writeln!(out, "define internal ptr @gos_region_bump_block() {{").unwrap();
+    writeln!(out, "entry:").unwrap();
+    writeln!(out, "  ret ptr @\"{block}\"").unwrap();
+    writeln!(out, "}}").unwrap();
     writeln!(out, "define i32 @main(i32 %argc, ptr %argv) {{").unwrap();
     writeln!(out, "entry:").unwrap();
     writeln!(out, "  %slot = alloca i128, align 16").unwrap();
+    writeln!(
+        out,
+        "  call void @gos_rt_region_bump_adopt(ptr @gos_region_bump_block)"
+    )
+    .unwrap();
     writeln!(out, "  call void @gos_rt_program_start()").unwrap();
     // An instrumented build hands the runtime its profile writer, which every
     // exit path calls, rather than leaving the write to the profile runtime's
@@ -2036,6 +2047,23 @@ fn module_header(triple: &str) -> String {
     for d in LLVM_SPECIAL_DECLS {
         writeln!(out, "{d}").unwrap();
     }
+    // The per-thread block compiled code bumps region objects off. Every
+    // module defines it once-only, so a module that bumps links whatever else
+    // is in the program; only `main` hands it to the runtime, so in a library
+    // it stays empty and every bump takes the runtime's path.
+    let block = gossamer_abi::rc::region_bump::PROGRAM_BLOCK_SYMBOL;
+    let comdat = match coff_comdat_decl("linkonce_odr", block) {
+        Some(decl) => {
+            writeln!(out, "{decl}").unwrap();
+            ", comdat"
+        }
+        None => "",
+    };
+    writeln!(
+        out,
+        "@\"{block}\" = linkonce_odr hidden thread_local global [4 x i64] zeroinitializer{comdat}, align 8"
+    )
+    .unwrap();
     writeln!(out).unwrap();
     out
 }

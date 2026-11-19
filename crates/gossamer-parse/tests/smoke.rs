@@ -1413,7 +1413,7 @@ fn a_line_leading_range_in_a_multiline_struct_literal_is_its_base() {
 
 #[test]
 fn positional_and_named_struct_literal_entries_both_end_at_a_newline() {
-    let source = "fn f() -> P {\n    P {\n        a\n        b: 2\n    }\n}\n";
+    let source = "fn f() -> P {\n    P {\n        a + 1\n        b: 2\n        c\n    }\n}\n";
     let mut map = SourceMap::new();
     let file = map.add_file("struct_lines.gos", source.to_string());
     let (sf, diags) = parse_source_file(source, file);
@@ -1429,7 +1429,11 @@ fn positional_and_named_struct_literal_entries_both_end_at_a_newline() {
         panic!("expected a struct literal, got {:?}", tail.kind);
     };
     let names: Vec<&str> = fields.iter().map(|f| f.name.name.as_str()).collect();
-    assert_eq!(names, ["0", "b"]);
+    assert_eq!(names, ["0", "b", "c"]);
+    assert!(
+        fields[2].value.is_none(),
+        "a name alone on its line is shorthand for the binding of that name"
+    );
 }
 
 #[test]

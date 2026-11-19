@@ -1300,6 +1300,12 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "A serde attribute is malformed, misplaced, or conflicts with another. On a struct or enum, `#[rename_all(\"rule\")]` respells every field or variant without its own `#[rename]` (rules: `lowercase`, `UPPERCASE`, `camelCase`, `PascalCase`, `snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`, `SCREAMING-KEBAB-CASE`). On an enum, `#[tag(\"member\")]` writes each variant as one object holding that member; its variants are unit, struct, or one-field variants holding a struct. On a variant, `#[rename(\"name\")]`. On a field, `#[rename(\"key\")]`, `#[skip]`, `#[default]`, and `#[default(value)]` with a literal of the field's type, `None`, or a unit variant of its enum. Two fields or variants written under one name are also reported.",
     ),
     (
+        "GP0069",
+        "Parser",
+        "a type-body function two listed traits declare",
+        "A function in a type's body has a name more than one of the traits the type lists declares. A body function implements the one listed trait that declares its name, so with two the declaration does not say which; the compiler never picks. `Display` and `Debug` both declare `fmt`: list one on the type and write the other as a standalone `impl Debug for T { fn fmt(&self) -> String { .. } }`.",
+    ),
+    (
         "GR0001",
         "Resolve",
         "unresolved name",
@@ -1396,6 +1402,12 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "An or-pattern's alternatives bind different names. Whichever alternative matches, the arm reads the same names, so a name one alternative binds and another does not would be unbound when that other one matched. Bind the name in every alternative, or match the alternatives in separate arms.",
     ),
     (
+        "GR0026",
+        "Resolve",
+        "field default reads another field",
+        "A field default reads `self` or another field of its struct. A default is evaluated when a literal leaves its field out, before the value it belongs to exists, so there is no `self` and no other field to read: `struct S { a: i64 = 1, b: i64 = a + 1 }` has no `a` when `b`'s default runs. A default may call functions and build values of its own; a value that depends on other fields is computed where the struct is built, or by a constructor function.",
+    ),
+    (
         "GT0001",
         "Types",
         "type mismatch",
@@ -1472,6 +1484,18 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "Types",
         "encode over a type parameter",
         "`json::encode`, `json::encode_pretty`, `json::to_value`, `yaml::encode`, and `toml::encode` write a value through a walk generated for one concrete type, as `json::encode::<T>` does, so an encode of a value whose type is, or holds, a type parameter (`fn text<T>(v: T) { json::encode(v) }`) has no walk to run. Call the encoder where the type is concrete, in the caller that names it, and pass the text in.",
+    ),
+    (
+        "GT0127",
+        "Types",
+        "trait impl method differs from the trait",
+        "A method of a trait impl does not match the trait's declaration of it: its receiver (`self`, `&self`, `&mut self`, or none), its parameter count, a parameter's type, or its return type differs. A call through the trait passes and expects what the trait declares, so the impl's method has to take and answer exactly that, with `Self` meaning the implementing type. This holds the same for a method written in a type's body (`struct S: Trait { fn m(..) }`): a body function whose name a listed trait declares implements it, and never falls back to an inherent method.",
+    ),
+    (
+        "GT0128",
+        "Types",
+        "generic function's type arguments not inferred",
+        "A generic function is named as a value, or called, with a type argument nothing in the program fixes: `let f = id` with `f` never called, or `fn none<T>() -> Option<T>` called where its answer is never used. Every tier runs one instantiation of the function, so each type argument has to be known. Name it with `id::<i64>`, give the binding a function type (`let f: fn(i64) -> i64 = id`), or use the value where its type is fixed.",
     ),
 ];
 

@@ -621,6 +621,14 @@ pub enum TypeError {
         /// The trait's declaration of the method, as written.
         declared: String,
     },
+    /// A generic function named as a value or called with type arguments
+    /// nothing in the program fixes. Every tier runs an instantiation, so
+    /// each argument has to be known.
+    #[error("cannot infer the type arguments of `{name}`")]
+    FnItemTypeArgsUninferred {
+        /// The function as the program names it.
+        name: String,
+    },
     /// A trait impl leaves out an associated type or constant the trait
     /// declares without a default. Every projection through the trait has
     /// to land on a concrete item, so the impl has to supply it.
@@ -1286,6 +1294,7 @@ impl TypeError {
             Self::OperatorNotOnBound { .. } => "operator-not-on-bound",
             Self::MissingTraitImplMethods { .. } => "missing-trait-impl-methods",
             Self::TraitImplSignatureMismatch { .. } => "trait-impl-signature-mismatch",
+            Self::FnItemTypeArgsUninferred { .. } => "fn-item-type-args-uninferred",
             Self::MissingTraitImplAssocItems { .. } => "missing-trait-impl-assoc-items",
             Self::ImplItemNotInTrait { .. } => "impl-item-not-in-trait",
             Self::ConflictingTraitImpl { .. } => "conflicting-trait-impl",
@@ -1479,6 +1488,7 @@ impl TypeError {
             Self::SerdeTargetMissing { .. } => "GT0125",
             Self::SerdeTypeParameter { .. } => "GT0126",
             Self::TraitImplSignatureMismatch { .. } => "GT0127",
+            Self::FnItemTypeArgsUninferred { .. } => "GT0128",
         }
     }
 }
@@ -2003,6 +2013,12 @@ impl TypeDiagnostic {
             TypeError::TraitImplSignatureMismatch { declared, .. } => {
                 out = out.with_help(format!(
                     "the trait declares `{declared}`; write the method with that signature"
+                ));
+            }
+            TypeError::FnItemTypeArgsUninferred { name } => {
+                out = out.with_help(format!(
+                    "name the arguments with `{name}::<..>`, or give the binding a function type \
+                     such as `fn(i64) -> i64`"
                 ));
             }
             TypeError::MissingTraitImplMethods {

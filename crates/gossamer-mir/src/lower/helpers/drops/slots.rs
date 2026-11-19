@@ -191,6 +191,11 @@ pub(super) fn collect_slot_rc_children(
             .and_then(|words| words.get(index))
             .map_or(next, |at| base_word + at);
         next += fwords;
+        // An `Option` held in one word is its `Some` payload's blob, or null.
+        if tcx.is_niche_field(ty, index) {
+            out.push((-1, 0, word, SLOT_KIND_RC_NODE));
+            continue;
+        }
         collect_field_rc(tcx, fty, word, depth, out, has_direct);
     }
 }

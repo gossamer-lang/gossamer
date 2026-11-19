@@ -166,11 +166,25 @@ unsafe fn skip_packed_leaves(tags: *const u8, cursor: &mut usize, leaves: usize)
         // SAFETY: each leaf entry is three bytes inside the descriptor (contract).
         let kind = unsafe { *tags.add(*cursor + 2) };
         *cursor += 3;
-        if kind == gossamer_abi::packed_leaf::NESTED {
-            // SAFETY: a nested leaf is followed by a whole descriptor.
+        if matches!(
+            kind,
+            gossamer_abi::packed_leaf::NESTED | gossamer_abi::packed_leaf::NICHE
+        ) {
+            // SAFETY: a nested or one-word carrier leaf is followed by a whole descriptor.
             unsafe { skip_cmp_desc(tags, cursor) };
         }
     }
+}
+
+/// The two-word `[disc, payload]` carrier an `Option` held in one word at
+/// `slot` stands for: `None` for zero, else `Some` of the word.
+///
+/// # Safety
+/// `slot` addresses one readable word.
+pub(crate) unsafe fn niche_carrier(slot: *const u8) -> [i64; 2] {
+    // SAFETY: `slot` addresses one word (this `unsafe fn`'s caller).
+    let word = unsafe { slot.cast::<i64>().read_unaligned() };
+    if word == 0 { [1, 0] } else { [0, word] }
 }
 
 /// Advances `cursor` past one whole descriptor.
@@ -813,7 +827,28 @@ pub(crate) unsafe fn compare_desc_in(
                 // SAFETY: each leaf entry is three bytes inside the descriptor.
                 let kind = unsafe { *tags.add(at + 2) };
                 *cursor += 3;
-                let ord = if kind == gossamer_abi::packed_leaf::NESTED {
+                let ord = if kind == gossamer_abi::packed_leaf::NICHE {
+                    // SAFETY: the leaf's word lies at its offset inside each packed value.
+                    let (ca, cb) = unsafe {
+                        (
+                            niche_carrier(base_a.add(offset)),
+                            niche_carrier(base_b.add(offset)),
+                        )
+                    };
+                    // SAFETY: a one-word carrier leaf is followed by the carrier's descriptor,
+                    // which the stand-in pairs are laid out as.
+                    unsafe {
+                        compare_desc_in(
+                            mode,
+                            ca.as_ptr().cast(),
+                            cb.as_ptr().cast(),
+                            tags,
+                            cursor,
+                            CmpStorage::Inline,
+                            self_desc,
+                        )
+                    }
+                } else if kind == gossamer_abi::packed_leaf::NESTED {
                     // SAFETY: a nested leaf is followed by the descriptor of the words at its
                     // offset inside the packed value.
                     unsafe {

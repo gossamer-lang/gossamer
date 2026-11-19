@@ -291,7 +291,6 @@ unsafe fn meta_names_map_child_cached(meta: *const i64) -> bool {
 /// # Safety
 /// `meta` must be null or a well-formed RC meta blob.
 unsafe fn meta_names_map_child(meta: *const i64) -> bool {
-    use gossamer_abi::rc::{RC_CHILD_KIND_SHIFT, RC_CHILD_MAP};
     if meta.is_null() {
         return false;
     }
@@ -323,42 +322,9 @@ unsafe fn meta_names_map_child(meta: *const i64) -> bool {
         });
     }
     // SAFETY: `meta` is non-null (checked above) and, per this `unsafe fn`'s contract, a
-    // well-formed meta table, which the variant and child counts it records keep this read
-    // inside.
-    if gossamer_abi::rc::rc_kind(unsafe { *meta }) != RC_KIND_STRUCT {
-        return false;
-    }
-    // SAFETY: `meta` is non-null (checked above) and, per this `unsafe fn`'s contract, a
-    // well-formed meta table, which the variant and child counts it records keep this read
-    // inside.
-    let variants = unsafe { *meta.add(1) };
-    let mut idx: usize = 2;
-    for _ in 0..variants.max(0) {
-        // SAFETY: `meta` is non-null (checked above) and, per this `unsafe fn`'s contract, a
-        // well-formed meta table, which the variant and child counts it records keep this read
-        // inside.
-        let count = usize::try_from(unsafe { *meta.add(idx + 1) }).unwrap_or(0);
-        for j in 0..count {
-            // SAFETY: `meta` is non-null (checked above) and, per this `unsafe fn`'s contract, a
-            // well-formed meta table, which the variant and child counts it records keep this
-            // read inside.
-            let entry = unsafe { *meta.add(idx + 2 + j) };
-            if matches!(
-                entry >> RC_CHILD_KIND_SHIFT,
-                RC_CHILD_MAP
-                    | gossamer_abi::rc::RC_CHILD_SET
-                    | gossamer_abi::rc::RC_CHILD_DEQUE
-                    | gossamer_abi::rc::RC_CHILD_HEAP
-                    | gossamer_abi::rc::RC_CHILD_ITER
-                    | gossamer_abi::rc::RC_CHILD_ITER_PAIR
-                    | gossamer_abi::rc::RC_CHILD_JSON
-            ) {
-                return true;
-            }
-        }
-        idx += 2 + count;
-    }
-    false
+    // well-formed meta table, whose variant and child counts keep every read the walk makes
+    // inside it.
+    gossamer_abi::rc::struct_meta_names_table_child(|i| unsafe { *meta.add(i) })
 }
 
 /// Walk the `(disc_word, payload_word)` pairs of an `RC_KIND_STRUCT_GUARDED`
@@ -445,6 +411,60 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_move(
     unsafe { rc_alloc_from(size, meta, src, false) }
 }
 
+/// [`gos_rt_rc_alloc_copy`] for a layout that names no table-owning child, which
+/// the compiler knows from the layout it emitted. Inside a region with room in
+/// its current slab the copy is a bump with nothing to look up.
+///
+/// # Safety
+/// As for [`gos_rt_rc_alloc_copy`], and `meta` must name no table-owning child.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_rc_alloc_copy_plain(
+    size: u64,
+    meta: *const i64,
+    src: *const u8,
+) -> *mut u8 {
+    // SAFETY: `src` is null or holds `size` bytes (C-ABI contract).
+    if let Some(payload) = unsafe { super::region_bump_copy(size, src) } {
+        return payload;
+    }
+    // SAFETY: as for this shim (C-ABI contract).
+    unsafe { rc_alloc_from_outside_bump(size, meta, src, true) }
+}
+
+/// [`gos_rt_rc_alloc_move`] for a layout that names no table-owning child; see
+/// [`gos_rt_rc_alloc_copy_plain`].
+///
+/// # Safety
+/// As for [`gos_rt_rc_alloc_move`], and `meta` must name no table-owning child.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_rc_alloc_move_plain(
+    size: u64,
+    meta: *const i64,
+    src: *const u8,
+) -> *mut u8 {
+    // SAFETY: `src` is null or holds `size` bytes (C-ABI contract).
+    if let Some(payload) = unsafe { super::region_bump_copy(size, src) } {
+        return payload;
+    }
+    // SAFETY: as for this shim (C-ABI contract).
+    unsafe { rc_alloc_from_outside_bump(size, meta, src, false) }
+}
+
+/// The general allocation, for a copy the current slab cannot take: outside
+/// any region, the first object of a region, or a full slab.
+#[cold]
+#[inline(never)]
+unsafe fn rc_alloc_from_outside_bump(
+    size: u64,
+    meta: *const i64,
+    src: *const u8,
+    retain_children: bool,
+) -> *mut u8 {
+    // SAFETY: this `unsafe fn`'s caller passes `meta` and `src` null or live, `src` holding
+    // `size` bytes.
+    unsafe { rc_alloc_from(size, meta, src, retain_children) }
+}
+
 /// Copies `size` payload bytes. Escaped aggregates are a few words wide, and a
 /// fixed-width move of those is a handful of instructions where the general
 /// copy is a library call.
@@ -489,9 +509,12 @@ unsafe fn rc_alloc_from(
     // SAFETY: this `unsafe fn`'s caller passes `meta` live or null, which
     // `meta_names_map_child_cached` accepts.
     if in_region && !unsafe { meta_names_map_child_cached(meta) } {
-        // SAFETY: `meta` is not passed, so the allocation carries no children; `src` is null or
-        // holds `size` bytes (this `unsafe fn`'s caller).
-        return unsafe { rc_alloc_payload(size, std::ptr::null(), src) };
+        // SAFETY: a region is open (checked above), and `src` is null or holds `size` bytes
+        // (this `unsafe fn`'s caller).
+        let payload = unsafe { super::region_blob_copy(size, src) };
+        if !payload.is_null() {
+            return payload;
+        }
     }
     // SAFETY: this `unsafe fn`'s caller passes `meta` and `src` null or live, `src` holding
     // `size` bytes.
@@ -1011,6 +1034,32 @@ pub unsafe extern "C" fn gos_rt_aggr_zero_guarded(base: *mut u8, meta: *const i6
         // contract).
         unsafe { *(base.add(payload_word as usize * 8) as *mut i64) = 0 };
     }
+}
+
+/// The two-word carrier an `Option` field held in one word at `slot` stands
+/// for: zero is `None`, any other word the `Some` payload. The compiled tiers
+/// inline the same decode.
+///
+/// # Safety
+/// `slot` must address one readable word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_niche_option_load(slot: *const i64) -> i128 {
+    // SAFETY: `slot` addresses one word (C-ABI contract).
+    let [disc, payload] = unsafe { crate::c_abi::desc_cmp::niche_carrier(slot.cast()) };
+    i128::from(disc as u64) | (i128::from(payload as u64) << 64)
+}
+
+/// Stores the two-word carrier `value` into an `Option` field held in one
+/// word at `slot`: the `Some` payload, or zero for `None`.
+///
+/// # Safety
+/// `slot` must address one writable word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_niche_option_store(slot: *mut i64, value: i128) {
+    let disc = value as i64;
+    let payload = (value >> 64) as i64;
+    // SAFETY: `slot` addresses one word (C-ABI contract).
+    unsafe { slot.write_unaligned(if disc == 0 { payload } else { 0 }) };
 }
 
 /// Release the payload of the by-value `{disc, payload}` Option/Result at

@@ -75,6 +75,136 @@ use gossamer_mir::{
 use gossamer_types::{FloatTy, IntTy, Ty, TyCtxt, TyKind};
 
 impl<'a> Lowerer<'a> {
+    /// The runtime entry allocating a counted copy laid out by `meta_symbol`.
+    fn rc_alloc_entry(&self, moved: bool, meta_symbol: Option<&str>) -> &'static str {
+        gossamer_abi::rc::rc_alloc_entry_for(moved, meta_symbol, |sym| self.tcx.rc_meta(sym))
+    }
+
+    /// A counted copy of the `bytes` at `src` (`null` for zeros) through
+    /// `allocator`, answering the payload pointer. A plain entry is first
+    /// tried inline: with instrumentation quiet and room in the open region's
+    /// slab, the copy is bumped off the program's per-thread block, headerless,
+    /// exactly as the entry's own fast path would, and only a miss calls it.
+    fn emit_rc_alloc(
+        &mut self,
+        allocator: &'static str,
+        bytes: u64,
+        meta: &str,
+        src: &str,
+    ) -> String {
+        use gossamer_abi::rc::region_bump;
+        declare_rt(&mut self.runtime_refs, allocator);
+        let plain = matches!(
+            allocator,
+            "gos_rt_rc_alloc_move_plain" | "gos_rt_rc_alloc_copy_plain"
+        );
+        if !plain {
+            // `noalias`: the RC block is freshly allocated, so nothing else
+            // live at this point addresses it.
+            let heap = self.fresh();
+            writeln!(
+                self.out,
+                "  {heap} = call noalias ptr @{allocator}(i64 {bytes}, ptr {meta}, ptr {src})"
+            )
+            .unwrap();
+            return heap;
+        }
+        self.runtime_refs
+            .insert("@gos_rt_instrumentation = external dso_local global i8".to_string());
+        let block = format!("@\"{}\"", region_bump::PROGRAM_BLOCK_SYMBOL);
+        let probe = self.fresh_label("bump_probe");
+        let fast = self.fresh_label("bump_fast");
+        let slow = self.fresh_label("bump_slow");
+        let done = self.fresh_label("bump_done");
+        let armed = self.fresh();
+        let armed_b = self.fresh();
+        writeln!(
+            self.out,
+            "  {armed} = load atomic i8, ptr @gos_rt_instrumentation monotonic, align 1"
+        )
+        .unwrap();
+        writeln!(self.out, "  {armed_b} = icmp ne i8 {armed}, 0").unwrap();
+        writeln!(self.out, "  br i1 {armed_b}, label %{slow}, label %{probe}").unwrap();
+        writeln!(self.out, "{probe}:").unwrap();
+        let align = region_bump::ALIGN.cast_unsigned();
+        // A region copy carries no header: see `region_bump_copy`.
+        let need = bytes.max(align).div_ceil(align) * align;
+        let field = |this: &mut Self, offset: i64| {
+            let at = this.fresh();
+            writeln!(
+                this.out,
+                "  {at} = getelementptr inbounds i8, ptr {block}, i64 {offset}"
+            )
+            .unwrap();
+            at
+        };
+        let base_p = field(self, region_bump::BASE_OFFSET);
+        let cur_p = field(self, region_bump::CUR_OFFSET);
+        let end_p = field(self, region_bump::END_OFFSET);
+        let (base, cur, end, next, has, fits, ok) = (
+            self.fresh(),
+            self.fresh(),
+            self.fresh(),
+            self.fresh(),
+            self.fresh(),
+            self.fresh(),
+            self.fresh(),
+        );
+        writeln!(self.out, "  {base} = load ptr, ptr {base_p}, align 8").unwrap();
+        writeln!(self.out, "  {cur} = load i64, ptr {cur_p}, align 8").unwrap();
+        writeln!(self.out, "  {end} = load i64, ptr {end_p}, align 8").unwrap();
+        writeln!(self.out, "  {next} = add i64 {cur}, {need}").unwrap();
+        writeln!(self.out, "  {has} = icmp ne ptr {base}, null").unwrap();
+        writeln!(self.out, "  {fits} = icmp ule i64 {next}, {end}").unwrap();
+        writeln!(self.out, "  {ok} = and i1 {has}, {fits}").unwrap();
+        writeln!(self.out, "  br i1 {ok}, label %{fast}, label %{slow}").unwrap();
+        writeln!(self.out, "{fast}:").unwrap();
+        writeln!(self.out, "  store i64 {next}, ptr {cur_p}, align 8").unwrap();
+        let objs_p = field(self, region_bump::OBJS_OFFSET);
+        let (objs, objs_next) = (self.fresh(), self.fresh());
+        writeln!(self.out, "  {objs} = load i64, ptr {objs_p}, align 8").unwrap();
+        writeln!(self.out, "  {objs_next} = add i64 {objs}, 1").unwrap();
+        writeln!(self.out, "  store i64 {objs_next}, ptr {objs_p}, align 8").unwrap();
+        let payload = self.fresh();
+        writeln!(
+            self.out,
+            "  {payload} = getelementptr inbounds i8, ptr {base}, i64 {cur}"
+        )
+        .unwrap();
+        if src == "null" {
+            writeln!(
+                self.out,
+                "  call void @llvm.memset.p0.i64(ptr align 8 {payload}, i8 0, i64 {bytes}, i1 false)"
+            )
+            .unwrap();
+            self.runtime_refs
+                .insert("declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)".to_string());
+        } else {
+            writeln!(
+                self.out,
+                "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 {payload}, ptr align 8 {src}, i64 {bytes}, i1 false)"
+            )
+            .unwrap();
+        }
+        writeln!(self.out, "  br label %{done}").unwrap();
+        writeln!(self.out, "{slow}:").unwrap();
+        let called = self.fresh();
+        writeln!(
+            self.out,
+            "  {called} = call noalias ptr @{allocator}(i64 {bytes}, ptr {meta}, ptr {src})"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{done}").unwrap();
+        writeln!(self.out, "{done}:").unwrap();
+        let heap = self.fresh();
+        writeln!(
+            self.out,
+            "  {heap} = phi ptr [ {payload}, %{fast} ], [ {called}, %{slow} ]"
+        )
+        .unwrap();
+        heap
+    }
+
     /// If `place`'s final projection is an `Index` whose
     /// preceding type resolves to `String` / `&String`, emit
     /// a runtime call to `gos_rt_str_byte_at(ptr, idx) ->
@@ -428,24 +558,18 @@ impl<'a> Lowerer<'a> {
         let bytes = u64::from(own_slots.max(1)) * 8;
         // The copy meta names the counted children the copy takes a share of;
         // a leaf aggregate has none and passes `null`.
-        let meta = match self.tcx.aggr_copy_meta(local_ty) {
+        let copy_meta = self.tcx.aggr_copy_meta(local_ty).map(str::to_owned);
+        let meta = match copy_meta.as_deref() {
             Some(sym) if !sym.is_empty() => format!("@\"{sym}\""),
             _ => "null".to_string(),
         };
-        declare_rt(&mut self.runtime_refs, "gos_rt_rc_alloc_copy");
+        let allocator = self.rc_alloc_entry(false, copy_meta.as_deref());
         let src = if own_slots == 0 {
             "null".to_string()
         } else {
             local_slot(place.local)
         };
-        // `noalias`: the block is freshly allocated, so nothing else live at
-        // this point addresses it.
-        let heap = self.fresh();
-        writeln!(
-            self.out,
-            "  {heap} = call noalias ptr @gos_rt_rc_alloc_copy(i64 {bytes}, ptr {meta}, ptr {src})"
-        )
-        .unwrap();
+        let heap = self.emit_rc_alloc(allocator, bytes, &meta, &src);
         let heap_i64 = self.fresh();
         writeln!(self.out, "  {heap_i64} = ptrtoint ptr {heap} to i64").unwrap();
         Some(heap_i64)
@@ -749,21 +873,9 @@ impl<'a> Lowerer<'a> {
             } else {
                 format!("@\"{sym}\"")
             };
-            let allocator = if moved {
-                "gos_rt_rc_alloc_move"
-            } else {
-                "gos_rt_rc_alloc_copy"
-            };
-            declare_rt(&mut self.runtime_refs, allocator);
+            let allocator = self.rc_alloc_entry(moved, Some(&sym));
             let src = local_slot(place.local);
-            // `noalias`: the RC block is freshly allocated, so nothing else
-            // live at this point addresses it.
-            let heap = self.fresh();
-            writeln!(
-                self.out,
-                "  {heap} = call noalias ptr @{allocator}(i64 {bytes}, ptr {meta}, ptr {src})"
-            )
-            .unwrap();
+            let heap = self.emit_rc_alloc(allocator, bytes, &meta, &src);
             let heap_i64 = self.fresh();
             writeln!(self.out, "  {heap_i64} = ptrtoint ptr {heap} to i64").unwrap();
             return Some(heap_i64);
