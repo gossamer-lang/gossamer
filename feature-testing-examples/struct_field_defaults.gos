@@ -50,6 +50,19 @@ struct Point {
     note: String = "none"
 }
 
+// A default on a const-generic struct is evaluated at the literal's own
+// const arguments: it may ignore them, read them, or take them forwarded
+// from the generic body that builds the literal.
+struct Window<const N: usize> {
+    cells: [i64; N]
+    cursor: i64 = 0
+    width: i64 = N as i64
+}
+
+fn window_of<const N: usize>(cells: [i64; N]) -> Window<N> {
+    Window { cells }
+}
+
 fn main() {
     let mut a = Sieve { limit: 10 }
     let b = Sieve { limit: 20, result: 7, label: "custom" }
@@ -80,4 +93,8 @@ fn main() {
     let q = json::decode::<Point>("{\"x\": 1.0, \"y\": 9.0, \"note\": \"set\"}").unwrap()
     println(f"{p.x} {p.y} {p.note} {q.x} {q.y} {q.note}")
     println(f"{a}")
+
+    let fixed = Window { cells: [0; 3] }
+    let built = window_of([1, 2, 3, 4, 5])
+    println(f"{fixed.cursor} {fixed.width} {built.cursor} {built.width} {built.cells}")
 }

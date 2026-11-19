@@ -256,23 +256,18 @@ impl Desugar<'_> {
 
     /// The type an `impl` of `name` is for: the name applied to its own
     /// parameters, `Stack<T>` for `struct Stack<T>`.
+    // A const parameter is spelled as a type path, the way the parser reads
+    // `Ring<N>` in a written `impl`, so it resolves to the impl's parameter.
     fn self_type(&mut self, name: &str, generics: &Generics, span: Span) -> Type {
         let args = generics
             .params
             .iter()
             .filter_map(|param| match param {
-                GenericParam::Type { name, .. } => Some(GenericArg::Type(Type::new(
-                    self.ids.next(),
-                    span,
-                    TypeKind::Path(TypePath::single(name.name.clone())),
-                ))),
-                GenericParam::Const { name, .. } => {
-                    Some(GenericArg::Const(gossamer_ast::Expr::new(
+                GenericParam::Type { name, .. } | GenericParam::Const { name, .. } => {
+                    Some(GenericArg::Type(Type::new(
                         self.ids.next(),
                         span,
-                        gossamer_ast::ExprKind::Path(gossamer_ast::PathExpr::single(
-                            name.name.clone(),
-                        )),
+                        TypeKind::Path(TypePath::single(name.name.clone())),
                     )))
                 }
                 GenericParam::Lifetime { .. } => None,

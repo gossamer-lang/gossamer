@@ -1171,6 +1171,66 @@ impl TypeChecker<'_> {
         })
     }
 
+    /// Checks the default calls a const-generic struct literal holds, each
+    /// instantiated at the literal's own generic arguments. A literal whose
+    /// const arguments went uninferred has reported that already, so its
+    /// defaults take a placeholder rather than a second report.
+    pub(super) fn check_field_default_calls(
+        &mut self,
+        calls: &[(&Expr, Option<Ty>)],
+        literal_ty: Ty,
+        consts: &LiteralConsts,
+        types: &[Ty],
+    ) {
+        if calls.is_empty() {
+            return;
+        }
+        let substs: Vec<crate::GenericArg> = match self.tcx.kind_of(literal_ty) {
+            TyKind::Adt { substs, .. } => substs.as_slice().to_vec(),
+            _ => (0..consts.mask.len())
+                .map(|i| {
+                    if consts.mask[i] {
+                        crate::GenericArg::Const(0)
+                    } else {
+                        types.get(i).map_or(crate::GenericArg::Const(0), |ty| {
+                            crate::GenericArg::Type(*ty)
+                        })
+                    }
+                })
+                .collect(),
+        };
+        let values: Vec<Option<i128>> = substs
+            .iter()
+            .map(|arg| match arg {
+                crate::GenericArg::Const(value) => Some(*value),
+                _ => None,
+            })
+            .collect();
+        let forwarded: Vec<Option<crate::ParamIdx>> = substs
+            .iter()
+            .map(|arg| match arg {
+                crate::GenericArg::ConstParam(param) => Some(*param),
+                _ => None,
+            })
+            .collect();
+        let substs = crate::Substs::from_args(substs);
+        for (value, declared) in calls {
+            if let ExprKind::Call { callee, .. } = &value.kind {
+                self.field_default_call_substs
+                    .insert(callee.id, substs.clone());
+            }
+            let declared = declared.map(|ty| {
+                let ty = self.subst_generics_in_ty(ty, types, &values);
+                self.forward_const_params(ty, &forwarded)
+            });
+            let expected = declared.map_or(Expectation::None, Expectation::HasType);
+            let value_ty = self.check_expr_expecting(value, expected);
+            if let Some(declared) = declared {
+                self.unify(declared, value_ty, value.span);
+            }
+        }
+    }
+
     /// `Ring::capacity(r)` spells the method call `r.capacity()`, so it hands
     /// the method's `impl` block the same const arguments, read from the
     /// receiver argument when the path names that receiver's own type.

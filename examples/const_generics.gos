@@ -29,9 +29,7 @@ fn describe<const N: usize>(xs: [i64; N]) -> String {
 struct Ring<const N: usize> {
     items: [i64; N]
     head: i64
-}
 
-impl<const N: usize> Ring<N> {
     fn capacity(&self) -> i64 {
         N as i64
     }

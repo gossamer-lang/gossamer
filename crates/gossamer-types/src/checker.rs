@@ -1158,6 +1158,10 @@ struct TypeChecker<'a> {
     /// as a VALUE, which is only legal for the
     /// [`crate::std_fn_values`] tabled set (GT0015 otherwise).
     callee_path_nodes: std::collections::HashSet<NodeId>,
+    /// Callee path of each field-default call a const-generic struct literal
+    /// holds, with that literal's generic arguments: the call instantiates
+    /// the default at them, since it has no argument to infer them from.
+    field_default_call_substs: HashMap<NodeId, crate::Substs>,
     /// Bound import name by use declaration id to its full module path. Used
     /// so `use std::iter::skip_while` lets a bare `skip_while(...)` type-check
     /// as the qualified `iter::skip_while(...)` call.
@@ -1443,6 +1447,7 @@ impl<'a> TypeChecker<'a> {
             write_arg_bindings: HashMap::new(),
             param_type_spans: HashMap::new(),
             callee_path_nodes: std::collections::HashSet::new(),
+            field_default_call_substs: HashMap::new(),
             import_targets: HashMap::new(),
             user_type_decls: std::collections::HashSet::new(),
             root_type_names: std::collections::HashSet::new(),

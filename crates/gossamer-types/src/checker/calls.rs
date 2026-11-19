@@ -539,7 +539,12 @@ impl TypeChecker<'_> {
                 _ => None,
             })
             .collect();
-        let mut forwarded: Vec<Option<crate::ParamIdx>> = vec![None; n];
+        let mut forwarded: Vec<Option<crate::ParamIdx>> = (0..n)
+            .map(|i| match explicit_substs.as_slice().get(i) {
+                Some(crate::GenericArg::ConstParam(param)) => Some(*param),
+                _ => None,
+            })
+            .collect();
         // An explicit `f::<N>(..)` argument is authoritative: inference fills
         // only the positions the call site left open, so an argument of a
         // different length reports a mismatch against the written `N`.
@@ -550,7 +555,7 @@ impl TypeChecker<'_> {
                 if idx >= n
                     || matches!(
                         explicit_substs.as_slice().get(idx),
-                        Some(crate::GenericArg::Const(_))
+                        Some(crate::GenericArg::Const(_) | crate::GenericArg::ConstParam(_))
                     )
                 {
                     continue;
@@ -1530,7 +1535,13 @@ impl TypeChecker<'_> {
         // return type to the callee's signature instead of returning
         // a fresh inference variable that never gets bound.
         let callee_item = match self.tcx.kind(resolved) {
-            Some(TyKind::FnDef { def, substs }) => Some((*def, substs.clone())),
+            Some(TyKind::FnDef { def, substs }) => {
+                let substs = match self.field_default_call_substs.get(&callee.id) {
+                    Some(literal) if substs.is_empty() => literal.clone(),
+                    _ => substs.clone(),
+                };
+                Some((*def, substs))
+            }
             _ => None,
         };
         let sig_lookup: Option<FnSig> = match kind {

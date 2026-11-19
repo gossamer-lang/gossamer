@@ -46,6 +46,7 @@ pub use items::{
     PARTITION_POINT_PREFIX, Receiver, STATIC_INIT_FN, STRUCTURAL_COMPARATOR_PREFIX, StaticDecl,
     StructBody, StructDecl, StructField, TraitBound, TraitDecl, TraitItem, TupleField,
     TypeAliasDecl, USER_COMPARATOR_PREFIX, WhereClause, WherePredicate, field_default_fn_name,
+    is_field_default_fn_name,
 };
 pub use node_id::{NodeId, NodeIdGenerator};
 pub use path::{Path, Segment};

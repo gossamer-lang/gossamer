@@ -23,9 +23,7 @@
 
 use std::http
 
-struct App { }
-
-impl App {
+struct App {
     fn serve(&self, request: http::Request) -> Result<http::Response, http::Error> {
         if request.path == "/echo" {
             return Ok(http::Response::text(200, f"echo: {request.body}"))

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.82.1 - Const generics in type bodies and field defaults
+
+- A method written in the body of a const-generic type (`struct Ring<const N: usize> { .. fn push(&mut self, v: i64) { .. } }`) reads the type's own `N`, as the same method in an `impl<const N: usize> Ring<N>` block does; it read 0, so an index through `N` went out of bounds.
+- A struct literal of a const-generic type may leave a defaulted field out: the default is evaluated at the literal's own const arguments, so it may ignore them or read them (`width: i64 = N as i64`), including inside a generic function that forwards its own `N`. It was rejected with `GT0088`.
+- The docs say where a method goes: a type's primary API (constructors, accessors, invariant checks, core operations) in its body, and its extended API (trait implementations, optional or platform-specific code, large method groups) in `impl` blocks, as Swift and C# split them. Both forms remain the same program.
+
 ## 0.82.0 - Field defaults, methods in the type body, smaller and faster objects
 
 - `use {bench::Bench, config::Config, std::{fs, env}}` imports several paths in one declaration, as Rust's root `use { .. }` group does; `gos fmt` keeps a group as written.

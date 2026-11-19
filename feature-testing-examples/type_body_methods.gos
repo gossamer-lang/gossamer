@@ -63,6 +63,19 @@ struct Step {
     }
 }
 
+// A const parameter is a value in the body's methods, as in a written
+// `impl<const N: usize> Ring<N>`.
+struct Ring<const N: usize> {
+    items: [i64; N]
+    head: i64 = 0
+
+    fn capacity(&self) -> i64 { N as i64 }
+    fn push(&mut self, value: i64) {
+        self.items[self.head] = value
+        self.head = (self.head + 1) % (N as i64)
+    }
+}
+
 fn total<B: Bench>(b: &mut B) -> u32 {
     b.run(1)
     b.checksum()
@@ -80,4 +93,7 @@ fn main() {
     for x in down { seen.push(x) }
     println(seen)
     println(Step::spin(1000))
+    let mut ring = Ring { items: [0; 3] }
+    for value in 1..6 { ring.push(value) }
+    println(f"{ring.items} {ring.capacity()} {ring.items.len()}")
 }

@@ -1150,6 +1150,7 @@ impl TypeChecker<'_> {
                 }
                 let mut literal_consts =
                     LiteralConsts::new(self.fn_generic_const_mask_of_ty(struct_ty));
+                let mut default_calls: Vec<(&Expr, Option<Ty>)> = Vec::new();
                 for (field_idx, field) in fields.iter().enumerate() {
                     if let Some(value) = &field.value {
                         // Substitute `Param { idx }` slots with the
@@ -1179,6 +1180,13 @@ impl TypeChecker<'_> {
                         });
                         let dty_sub =
                             dty_sub.map(|dty| self.subst_params_in_ty(dty, &substs_table));
+                        // A default has no argument to take the literal's
+                        // const arguments from, so it is checked once the
+                        // written fields have fixed them.
+                        if literal_consts.has_const_positions() && is_field_default_call(value) {
+                            default_calls.push((value, dty_sub));
+                            continue;
+                        }
                         // An array field whose length is a const parameter
                         // takes the length the value has; only the element
                         // type is expected of the value.
@@ -1205,13 +1213,20 @@ impl TypeChecker<'_> {
                     self.check_expr(base);
                 }
                 if literal_consts.has_const_positions() {
-                    self.finish_struct_literal_consts(
+                    let literal_ty = self.finish_struct_literal_consts(
                         struct_ty,
                         &literal_consts,
                         expected,
                         path,
                         expr.span,
-                    )
+                    );
+                    self.check_field_default_calls(
+                        &default_calls,
+                        literal_ty,
+                        &literal_consts,
+                        &substs_table,
+                    );
+                    literal_ty
                 } else {
                     struct_ty
                 }
@@ -1744,4 +1759,21 @@ impl TypeChecker<'_> {
         }
         tys
     }
+}
+
+/// Whether `value` is the call the resolver writes for a field a struct
+/// literal leaves to its declared default.
+fn is_field_default_call(value: &Expr) -> bool {
+    matches!(
+        &value.kind,
+        ExprKind::Call { callee, args }
+            if args.is_empty()
+                && matches!(
+                    &callee.kind,
+                    ExprKind::Path(path)
+                        if path.segments.last().is_some_and(|segment| {
+                            gossamer_ast::is_field_default_fn_name(&segment.name.name)
+                        })
+                )
+    )
 }
