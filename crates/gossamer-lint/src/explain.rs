@@ -32,8 +32,12 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
             Single-arm `match` is almost always a half-written exhaustive match."
         }
         "shadowed_binding" => {
-            "A `let` binding in the same block shadows an earlier one. Rename\n\
-            one of them to make the data flow obvious."
+            "A `let` binding shadows an earlier one: in the same block, or in a\n\
+            nested block over a `let mut` of an enclosing one. The nested case\n\
+            is usually an assignment written as a declaration: `let status =\n\
+            \"done\"` inside an `if` leaves the outer `status` as it was. Assign\n\
+            it with `status = ..`, or rename one of them to make the data flow\n\
+            obvious."
         }
         "unchecked_result" => {
             "`let _ = expr?` silently discards an error. Either handle the\n\

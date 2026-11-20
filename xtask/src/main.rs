@@ -1503,6 +1503,18 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "binding read before it is assigned",
         "A binding declared without a value (`let mut x: i64`) is read on a path that has not assigned it. The value a `let` leaves out is supplied by an assignment after it, so every path that reaches a read has to assign the binding first: `if n > 5 { x = 10 }` followed by a read of `x` reaches the read with no value when `n <= 5`. Give the binding a value where it is declared, assign it in every branch (an `else` included), or move the read inside the branch that assigns it. A closure or a `defer` reads its bindings where it is written, so they have to be assigned before it.",
     ),
+    (
+        "GT0130",
+        "Types",
+        "string written by index",
+        "A `String`'s character is written by index: `s[0] = 'j'`. A `String` is read by index (`s[i]` is a `char`) and never written in place, since a character's UTF-8 width can differ from the one it would replace. Build the new text instead: `s = s.replacen(old, new, 1)`, or edit a `Vec<char>` from `s.chars().collect()` and join it back with `cs.map(|c| c.to_string()).join(\"\")`.",
+    ),
+    (
+        "GT0131",
+        "Types",
+        "user type written by index",
+        "A user type is written by index: `w[0] = 2` where `W` implements `Index`. Its `index` method answers a value, so `w[i]` reads it but names no storage to write. Write the field `index` reads from (`w.items[i] = v`), or give the type a method that sets an element.",
+    ),
 ];
 
 fn render_diagnostics_page(entries: &[(&str, &str, &str, &str)]) -> String {

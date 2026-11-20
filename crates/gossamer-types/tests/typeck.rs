@@ -5616,3 +5616,70 @@ fn main() {
         .collect();
     assert_eq!(lines, vec![8, 9, 10, 11]);
 }
+
+#[test]
+fn a_vec_keys_a_set_or_map_literal_as_insert_keys_it() {
+    let checked = run("fn main() {\n\
+         let s = #{#[0], #[1, 2]}\n\
+         let m = {#[1, 2]: 1}\n\
+         let mut t = Set::new()\n\
+         t.insert(#[3])\n\
+         println(s.len() + m.len() + t.len())\n\
+         }\n");
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+}
+
+#[test]
+fn a_float_keys_a_set_or_map_literal_as_insert_keys_it() {
+    let checked = run("fn main() {\n\
+         let a = #{1.5, -0.0}\n\
+         let b = #{(1, 2.5)}\n\
+         let c = {#[0.5]: 1, #[1.5]: 2}\n\
+         let mut d: Map<f32, i64> = Map::new()\n\
+         d[1.5] = 1\n\
+         println(a.len() + b.len() + c.len() + d.len())\n\
+         }\n");
+    let rejected: Vec<&TypeError> = checked
+        .diagnostics
+        .iter()
+        .map(|d| &d.error)
+        .filter(|e| matches!(e, TypeError::TraitBoundNotSatisfied { bound, .. } if bound == "Hash"))
+        .collect();
+    assert!(rejected.is_empty(), "{rejected:?}");
+}
+
+#[test]
+fn writes_no_tier_can_perform_are_rejected_at_check() {
+    let checked = run("struct W { xs: Vec<i64> }\n\
+         impl Index for W { fn index(self, i: i64) -> i64 { self.xs[i] } }\n\
+         struct P { x: i64 }\n\
+         fn make() -> P { P { x: 1 } }\n\
+         fn main() {\n\
+         let mut s = \"hello\"\n\
+         s[0] = 'j'\n\
+         let mut w = W { xs: #[1] }\n\
+         w[0] = 2\n\
+         make().x = 3\n\
+         let mut m = {\"a\": P { x: 0 }}\n\
+         m.or_insert(\"b\", P { x: 0 }).x = 4\n\
+         let mut xs = #[1, 2, 3]\n\
+         xs[1..3][0] = 5\n\
+         println(f\"{s} {w.xs} {m.len()} {xs}\")\n\
+         }\n");
+    let found: Vec<&str> = checked
+        .diagnostics
+        .iter()
+        .map(|d| match &d.error {
+            TypeError::StringIndexWrite { .. } => "string",
+            TypeError::UserIndexWrite { .. } => "user",
+            TypeError::InvalidAssignTarget { .. } => "temporary",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        found,
+        vec!["string", "user", "temporary"],
+        "{:?}",
+        checked.diagnostics
+    );
+}

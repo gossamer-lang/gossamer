@@ -51,8 +51,12 @@ pub const REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "GL0008",
-        "A `let` binding in the same block shadows an earlier one. Rename\n\
-            one of them to make the data flow obvious.",
+        "A `let` binding shadows an earlier one: in the same block, or in a\n\
+            nested block over a `let mut` of an enclosing one. The nested case\n\
+            is usually an assignment written as a declaration: `let status =\n\
+            \"done\"` inside an `if` leaves the outer `status` as it was. Assign\n\
+            it with `status = ..`, or rename one of them to make the data flow\n\
+            obvious.",
     ),
     (
         "GL0009",
@@ -1988,6 +1992,22 @@ pub const REGISTRY: &[(&str, &str)] = &[
             every branch (an `else` included), or move the read inside the\n\
             branch that assigns it. A closure or a `defer` reads its bindings\n\
             where it is written, so they have to be assigned before it.",
+    ),
+    (
+        "GT0130",
+        "A `String`'s character is written by index: `s[0] = 'j'`. A `String`\n\
+            is read by index (`s[i]` is a `char`) and never written in place,\n\
+            since a character's UTF-8 width can differ from the one it would\n\
+            replace. Build the new text instead: `s = s.replacen(old, new, 1)`,\n\
+            or edit a `Vec<char>` from `s.chars().collect()` and join it back\n\
+            with `cs.map(|c| c.to_string()).join(\"\")`.",
+    ),
+    (
+        "GT0131",
+        "A user type is written by index: `w[0] = 2` where `W` implements\n\
+            `Index`. Its `index` method answers a value, so `w[i]` reads it but\n\
+            names no storage to write. Write the field `index` reads from\n\
+            (`w.items[i] = v`), or give the type a method that sets an element.",
     ),
     (
         "GX0001",

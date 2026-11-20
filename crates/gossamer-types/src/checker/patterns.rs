@@ -1135,37 +1135,34 @@ impl TypeChecker<'_> {
     }
 
     /// True when a value of `ty` can be hashed and compared by value, the
-    /// requirement every `Map` / `Set` key must satisfy. Mirrors the
-    /// hashable-key list in the language reference: scalars, `String`,
-    /// tuples, fixed arrays, structs, and enums are hashable when every
-    /// piece they carry is; `Vec`, `Map`, `Set`, closures, references, and
-    /// runtime handles are not - the language has no `Hash` impl for a
-    /// heap container or a value with no stable identity to hash.
+    /// requirement every `Map` / `Set` key must satisfy: scalars, floats,
+    /// `String`, tuples, fixed arrays, `Vec`s, structs, and enums are
+    /// hashable when every piece they carry is; `Map`, `Set`, closures,
+    /// references, and runtime handles are not - a heap table or a value
+    /// with no stable identity has nothing to hash. A float keys by IEEE
+    /// total order, so `-0.0` and `0.0` are two keys and a NaN finds itself.
     /// Unresolved (`Var`/`Error`/alias) types are treated as hashable so
-    /// this never rejects a type the checker hasn't pinned down yet - except
-    /// an unsuffixed float literal (`{1.5: 2}`), which is still an
-    /// unresolved `Var` at this point (numeric-literal defaulting runs
-    /// later) but can only ever default to `f64`.
+    /// this never rejects a type the checker hasn't pinned down yet.
     pub(super) fn is_hashable_ty(&mut self, ty: Ty) -> bool {
-        if self.infer.is_float_literal_var(self.tcx, ty) {
-            return false;
-        }
-        let resolved = self.infer.resolve(self.tcx, ty);
         let mut seen = std::collections::HashSet::new();
-        self.is_hashable_ty_rec(resolved, &mut seen)
+        self.is_hashable_ty_rec(ty, &mut seen)
     }
 
+    /// Whether `ty` can key a map or set, resolving each element type as it
+    /// is reached.
     pub(super) fn is_hashable_ty_rec(
-        &self,
+        &mut self,
         ty: Ty,
         seen: &mut std::collections::HashSet<gossamer_resolve::DefId>,
     ) -> bool {
-        match self.tcx.kind(ty) {
+        let ty = self.infer.resolve(self.tcx, ty);
+        match self.tcx.kind(ty).cloned() {
             Some(
                 TyKind::Bool
                 | TyKind::Char
                 | TyKind::String
                 | TyKind::Int(_)
+                | TyKind::Float(_)
                 | TyKind::Unit
                 | TyKind::Never,
             ) => true,
@@ -1173,21 +1170,24 @@ impl TypeChecker<'_> {
             // is no key layout to fold it into.
             Some(TyKind::DynValue) => false,
             Some(TyKind::Tuple(elems)) => elems
-                .iter()
-                .all(|elem| self.is_hashable_ty_rec(*elem, seen)),
-            Some(TyKind::Array { elem, .. } | TyKind::Simd { elem, .. }) => {
-                self.is_hashable_ty_rec(*elem, seen)
+                .into_iter()
+                .all(|elem| self.is_hashable_ty_rec(elem, seen)),
+            // A sequence hashes and compares by its elements, and a container
+            // keeps a value of its own, so a later write to the binding never
+            // reaches a stored key.
+            Some(TyKind::Array { elem, .. } | TyKind::Simd { elem, .. } | TyKind::Vec(elem)) => {
+                self.is_hashable_ty_rec(elem, seen)
             }
             // A nominal alias hashes and compares exactly as the value it
             // erases to, so it is a key wherever its representation is.
-            Some(TyKind::Nominal { repr, .. }) => self.is_hashable_ty_rec(*repr, seen),
+            Some(TyKind::Nominal { repr, .. }) => self.is_hashable_ty_rec(repr, seen),
             Some(TyKind::Adt { def, substs }) => {
                 match def.local {
                     RESULT_DEF_LOCAL | OPTION_DEF_LOCAL => {
                         return substs
                             .types()
-                            .iter()
-                            .all(|t| self.is_hashable_ty_rec(*t, seen));
+                            .into_iter()
+                            .all(|t| self.is_hashable_ty_rec(t, seen));
                     }
                     HASH_SET_DEF_LOCAL
                     | BTREE_SET_DEF_LOCAL
@@ -1207,19 +1207,21 @@ impl TypeChecker<'_> {
                 // reason a type ISN'T hashable, since every concrete value
                 // is still finite, so let it pass and let the other fields
                 // decide.
-                if !seen.insert(*def) {
+                if !seen.insert(def) {
                     return true;
                 }
-                if let Some(fields) = self.tcx.adt_field_tys(*def, substs) {
+                if let Some(fields) = self.tcx.adt_field_tys(def, &substs) {
+                    let fields: Vec<Ty> = fields.to_vec();
                     return fields
-                        .iter()
-                        .all(|field| self.is_hashable_ty_rec(*field, seen));
+                        .into_iter()
+                        .all(|field| self.is_hashable_ty_rec(field, seen));
                 }
-                if let Some(variants) = self.tcx.enum_variant_tys(*def) {
-                    return variants.iter().all(|fields| {
+                if let Some(variants) = self.tcx.enum_variant_tys(def) {
+                    let variants: Vec<Vec<Ty>> = variants.to_vec();
+                    return variants.into_iter().all(|fields| {
                         fields
-                            .iter()
-                            .all(|field| self.is_hashable_ty_rec(*field, seen))
+                            .into_iter()
+                            .all(|field| self.is_hashable_ty_rec(field, seen))
                     });
                 }
                 // Unregistered def (a generic template body, or a shape the
@@ -1228,9 +1230,7 @@ impl TypeChecker<'_> {
                 true
             }
             Some(
-                TyKind::Float(_)
-                | TyKind::Vec(_)
-                | TyKind::Slice(_)
+                TyKind::Slice(_)
                 | TyKind::Iterator(_)
                 | TyKind::Range(_)
                 | TyKind::HashMap { .. }
@@ -1375,8 +1375,8 @@ impl TypeChecker<'_> {
 
     /// Emits `GT0017` at the first set element's span when `elem_ty` fails
     /// [`Self::is_hashable_ty`]. Shared by both `check_set_literal` return
-    /// paths so an explicitly-annotated `Set<Vec<i64>>` and an
-    /// inference-only `#{v1, v2}` are rejected the same way.
+    /// paths so an explicitly-annotated `Set<Map<i64, i64>>` and an
+    /// inference-only `#{m1, m2}` are rejected the same way.
     pub(super) fn check_hashable_elem_ty(&mut self, elem_ty: Ty, entries: &[Expr]) {
         if !self.is_hashable_ty(elem_ty)
             && let Some(entry) = entries.first()

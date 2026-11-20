@@ -2631,8 +2631,83 @@ impl TypeChecker<'_> {
         self.suppressed.borrow_read_conflict = true;
         let ty = self.check_expr(target);
         self.suppressed.borrow_read_conflict = previous_suppression;
-        self.check_place_writable(target);
+        self.check_write_target(target);
         ty
+    }
+
+    /// Every check a written place passes: it is writable, a tier can write
+    /// it by index, and it is rooted in storage rather than a temporary.
+    fn check_write_target(&mut self, place: &Expr) {
+        self.check_place_writable(place);
+        self.check_string_index_write(place);
+        self.check_temporary_root(place);
+    }
+
+    /// Reports a write to a field or element of a call's result: the value
+    /// is a temporary, so the write reaches nothing. `m.or_insert(k, d)`
+    /// names the map's entry and is written through.
+    fn check_temporary_root(&mut self, target: &Expr) {
+        let mut root = target;
+        loop {
+            match &root.kind {
+                ExprKind::FieldAccess { receiver, .. } => root = receiver,
+                ExprKind::Index { base, .. } => root = base,
+                _ => break,
+            }
+        }
+        if std::ptr::eq(root, target) {
+            return;
+        }
+        let temporary = match &root.kind {
+            ExprKind::Call { .. } => true,
+            ExprKind::MethodCall { name, .. } => name.name != "or_insert",
+            _ => false,
+        };
+        if temporary {
+            self.emit(
+                TypeError::InvalidAssignTarget {
+                    target: Self::place_display(target),
+                },
+                target.span,
+            );
+        }
+    }
+
+    /// Reports a write by index that no tier performs: a `String`'s
+    /// character, or an element of a user type reached through its `index`
+    /// method, which answers a value rather than a place.
+    fn check_string_index_write(&mut self, target: &Expr) {
+        let ExprKind::Index { base, .. } = &target.kind else {
+            return;
+        };
+        let Some(base_ty) = self.table.get(base.id) else {
+            return;
+        };
+        let mut base_ty = self.infer.resolve(self.tcx, base_ty);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(base_ty) {
+            base_ty = self.infer.resolve(self.tcx, *inner);
+        }
+        match self.tcx.kind(base_ty).cloned() {
+            Some(TyKind::String) => self.emit(
+                TypeError::StringIndexWrite {
+                    target: Self::place_display(base),
+                },
+                target.span,
+            ),
+            Some(TyKind::Adt { .. } | TyKind::Nominal { .. })
+                if self.adt_op_method_ret(base_ty, "index", 1).is_some() =>
+            {
+                let ty = self.render_public_ty(base_ty);
+                self.emit(
+                    TypeError::UserIndexWrite {
+                        ty,
+                        target: Self::place_display(base),
+                    },
+                    target.span,
+                );
+            }
+            _ => {}
+        }
     }
 
     /// Type-checks `a, b.c, xs[i] = rhs`, whose targets are the elements of
@@ -2764,7 +2839,7 @@ impl TypeChecker<'_> {
         self.suppressed.borrow_read_conflict = true;
         let place_ty = self.check_expr(place);
         self.suppressed.borrow_read_conflict = previous_suppression;
-        self.check_place_writable(place);
+        self.check_write_target(place);
         self.check_ffi_field_write(place);
         let place_resolved = self.infer.resolve(self.tcx, place_ty);
         let place_is_reference = matches!(self.tcx.kind(place_resolved), Some(TyKind::Ref { .. }));

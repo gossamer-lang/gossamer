@@ -577,6 +577,11 @@ fn container_handle_print_kind_seen(
             match name.as_str() {
                 "gos_rt_set_insert_i64" => set_symbol = Some("gos_rt_set_format_i64"),
                 "gos_rt_set_insert" => set_symbol = Some("gos_rt_set_format_string"),
+                // An aggregate or enum element is rendered through its value
+                // descriptor, which only the bytecode and LLVM tiers build.
+                "gos_rt_set_insert_skey" | "gos_rt_set_insert_ekey" => {
+                    return Some(PrintKind::Unsupported("set of aggregates"));
+                }
                 _ => {}
             }
         }

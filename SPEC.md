@@ -626,7 +626,10 @@ range has exactly one - the part that overlaps. It is also the rule
 **A `String` slice takes byte offsets** (§3.2), the same index space
 `substring`, `byte_at`, and `as_bytes` use, and snaps outward to codepoint
 boundaries so the result is always valid text. `s.len()` and `s[i]` count
-Unicode scalars, so do not mix the two spellings on non-ASCII text.
+Unicode scalars, so do not mix the two spellings on non-ASCII text. A
+`String` is read by index and never written by one: `s[i] = c` is GT0130,
+since a character's UTF-8 width can differ from the one it would replace;
+build the new text (`s.replacen(old, new, 1)`) instead.
 Neither index space follows what a reader sees as one character: a
 grapheme cluster such as `"👍🏽"` (a thumbs-up and a skin-tone modifier) or
 `"é"` written as `e` plus a combining accent is several scalars, and a cut
@@ -671,6 +674,12 @@ row[0] = 7
 - A window of a window narrows the same storage.
 - A named window takes its bounds, and every index on the way to its
   sequence, where it is named.
+- A write through a range is a write through its window:
+  `xs[lo..hi][i] = v`, `xs[lo..hi][i] += v`, `vs[lo..hi][i].field = v`,
+  `&mut xs[lo..hi][i]`, and a mutating method on `g[lo..hi][i]` all reach
+  `xs[lo + i]` (and its fields), below a map entry as anywhere else. The
+  bounds clamp as a range read's do, and an index outside the window panics
+  as indexing it would (`vec index out of bounds: the len is ..`).
 - Only the mutable form is a window. `&xs[lo..hi]` and `&mut s[lo..hi]` on a
   `String` would reference a copy, and are GT0075.
 
@@ -1495,10 +1504,14 @@ struct-payload (`Rect { w, h }`) variants may be mixed freely:
 `Default` (which selects the `#[default]` unit variant) all derive and
 run identically on every tier.
 
-A struct / tuple used as a `Map` / `Set` key is hashed and compared by
-value on every tier - so two equal-valued keys at distinct allocations resolve
-to the same entry - with no `#[derive(Hash)]`; hashing is automatic, and
-`#[derive(Hash)]` is rejected (`GT0025`).
+A struct, tuple, fixed array, `Vec`, or float used as a `Map` / `Set` key is
+hashed and compared by value on every tier - so two equal-valued keys at distinct
+allocations resolve to the same entry - with no `#[derive(Hash)]`; hashing is
+automatic, and `#[derive(Hash)]` is rejected (`GT0025`). The container keeps a
+key of its own, so writing the binding a key came from afterwards never moves
+a stored key. Float keys compare by IEEE total order, unlike Rust, which
+has no float keys: `-0.0` and `0.0` are two keys, a NaN key finds itself, and
+a `BTreeMap` orders negatives, `-0.0`, `0.0`, positives, then NaN.
 
 ---
 
@@ -2156,6 +2169,15 @@ one impl of an operator per right-hand type: `impl Mul for V2` answers
 `v * w`, and `impl Mul<f64> for V2` answers `v * 2.0`, the right operand's type
 choosing between them. An impl may write `type Output = T`, which must name
 the type its method returns.
+
+`value[i]` on a user type calls the `index` method of its `impl Index`
+(`IndexMut` is the same contract under another name), and answers what the
+method returns. The answer is a value, not a place, so `value[i] = v` on such
+a type is GT0131: write the field `index` reads from, or give the type a
+method that sets an element. Likewise a field or element of a call's result
+(`make().x = 1`) is a temporary and cannot be assigned (GT0078);
+`m.or_insert(k, d).field = v` is the one call that names a place, the map's
+entry.
 
 ```gossamer
 struct V2 { x: f64, y: f64 }

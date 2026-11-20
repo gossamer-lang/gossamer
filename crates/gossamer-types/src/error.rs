@@ -1082,6 +1082,23 @@ pub enum TypeError {
         /// Rendering of the offending target expression.
         target: String,
     },
+    /// An assignment writes a `String`'s character by index (`s[i] = c`). A
+    /// `String` is read by index and never written in place: a character's
+    /// UTF-8 width can differ from the one it replaces.
+    #[error("a `String` cannot be written by index")]
+    StringIndexWrite {
+        /// The string's binding, as written.
+        target: String,
+    },
+    /// An assignment writes `value[i]` on a user type, whose `index` method
+    /// answers a value: the indexed place has no storage to write.
+    #[error("`{ty}` is read by index through its `index` method and cannot be written by index")]
+    UserIndexWrite {
+        /// The indexed type, as rendered.
+        ty: String,
+        /// The indexed value, as written.
+        target: String,
+    },
     /// An assignment targets a place reached through a shared `&T`
     /// reference. The reference binding's own `mut` qualifier cannot make
     /// its referent writable.
@@ -1343,6 +1360,8 @@ impl TypeError {
             Self::AssignToImmutable { .. } => "assign-to-immutable",
             Self::AssignThroughSharedReference { .. } => "assign-through-shared-reference",
             Self::InvalidAssignTarget { .. } => "invalid-assign-target",
+            Self::StringIndexWrite { .. } => "string-index-write",
+            Self::UserIndexWrite { .. } => "user-index-write",
             Self::MutableReferenceToImmutable { .. } => "mutable-reference-to-immutable",
             Self::MutableReferenceConflict { .. } => "mutable-reference-conflict",
             Self::ReferenceEscapeUnsupported { .. } => "reference-escape-unsupported",
@@ -1491,6 +1510,8 @@ impl TypeError {
             Self::SerdeTypeParameter { .. } => "GT0126",
             Self::TraitImplSignatureMismatch { .. } => "GT0127",
             Self::FnItemTypeArgsUninferred { .. } => "GT0128",
+            Self::StringIndexWrite { .. } => "GT0130",
+            Self::UserIndexWrite { .. } => "GT0131",
         }
     }
 }
@@ -2511,6 +2532,20 @@ impl TypeDiagnostic {
                         inner.clone(),
                     ));
                 let _ = wrapper;
+            }
+            TypeError::UserIndexWrite { ty, target } => {
+                out = out.with_help(format!(
+                    "write the field `index` reads from (`{target}.items[i] = v`), or give \
+                     `{ty}` a method that sets an element: `fn set(&mut self, i: i64, v: T)`"
+                ));
+            }
+            TypeError::StringIndexWrite { target } => {
+                out = out.with_help(format!(
+                    "build the new text: `{target} = {target}.replacen(old, new, 1)`, \
+                     or edit a `Vec<char>` and join it back: \
+                     `let mut cs: Vec<char> = {target}.chars().collect()`, then \
+                     `{target} = cs.map(|c| c.to_string()).join(\"\")`"
+                ));
             }
             TypeError::InvalidAssignTarget { target } => {
                 out = out

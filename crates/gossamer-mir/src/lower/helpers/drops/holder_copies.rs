@@ -461,20 +461,10 @@ fn slot_table_shape(
 }
 
 fn container_store_value(name: &str, args: &[Operand]) -> Option<usize> {
-    if super::param_reads::is_channel_send(name) {
-        return (args.len() >= 2).then_some(1);
+    if name == "gos_rt_vec_set_slots" {
+        return (args.len() >= 2).then(|| args.len() - 1);
     }
-    let stores = name.starts_with("gos_rt_vec_push")
-        || name.starts_with("gos_rt_deque_push")
-        || matches!(
-            name,
-            "gos_rt_vec_set" | "gos_rt_vec_set_i64" | "gos_rt_vec_set_i64_unchecked"
-        )
-        || name.starts_with("gos_rt_vec_insert")
-        || name.starts_with("gos_rt_map_insert")
-        || name.starts_with("gos_rt_map_or_insert")
-        || name == "gos_rt_vec_set_slots";
-    (stores && args.len() >= 2).then(|| args.len() - 1)
+    super::param_reads::stored_value_index(name, args)
 }
 
 fn new_local(body: &mut Body, ty: gossamer_types::Ty) -> Local {

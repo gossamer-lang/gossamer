@@ -5,7 +5,14 @@
 - New lint `signed_remainder` (`GL0064`): `x % k == r` with a positive `r` while `x` is signed and may be negative, which is false for every negative `x` because `%` keeps the sign of the value it divides. The help gives `x % 2 != 0` for oddness and `x.rem_euclid(k) == r`. It reports in `gos check`, `gos lint`, the language server, and MCP.
 - New lint `unjoined_task` (`GL0065`): a handle bound by `let task = spawn(..)` and never used, so nothing waits for the task's work. It takes the place of the `unused_variable` report there, whose help and `--fix` renamed the handle to `_task`.
 - Goroutines `main` leaves parked on channels, locks, or joins that nothing left can serve are named and left as soon as `main` returns, on every tier, instead of after the 30 second exit drain.
-- A VM program with more than 1024 goroutines blocked at once no longer hangs: a goroutine spawned after them waited for a worker that never came.
+- A VM program with more than 1024 goroutines blocked at once no longer hangs when only a goroutine spawned after them can move it: the VM starts a thread for that goroutine, up to what the system allows, and says so once at that limit.
+- `Set::insert`, `BTreeSet::insert`, and a heap's `push` keep a value of their own on the native tiers, as `Vec::push` and `Map::insert` do: writing the binding afterwards left the stored element changed under its old hash, so the set held an element it could not find.
+- The JIT prints a set of vectors, tuples, structs, or enums as the other tiers do, instead of `#{}`.
+- A `Vec` or a float keys a set or map literal (`#{#[1, 2]}`, `{2.5: "a"}`, `#{(1, 0.5)}`) as it keys `insert` and `m[k] = v`, where the literal was `GT0017`. Float keys compare by IEEE total order on every tier, as maps and sets built with `insert` already did.
+- A write through a range of a sequence lands in the sequence on every tier: `xs[1..3][0] = 9`, `+=` through one, a field below one (`vs[0..2][1].n = 7`), a window of a window, `&mut xs[1..3][0]`, a mutating method on `g[0..2][1]`, and any of these below a map entry. Native code dropped most of these writes and the VM dropped others; a field write through a range stopped native compilation with an internal error.
+- `s[i] = c` on a `String` is `GT0130`, where it passed the checker, failed on the VM, and did nothing natively. `w[i] = v` on a type with `impl Index` is `GT0131`, where it failed on the VM and faulted natively. A field or element of a call's result (`make().x = 1`) is `GT0078`, where the write was accepted and lost.
+- `shadowed_binding` (`GL0008`) also reports a `let` in a nested block that hides a `let mut` of an enclosing one, which leaves the outer binding unchanged where an assignment was meant.
+- `type Output = T` in an `impl Index` that agrees with `index`'s return is accepted, where it was reported as a mismatch between two identical types.
 - SPEC and SKILL say that string slices and indices can split a grapheme cluster, and how to cut display text with `unicode::graphemes`.
 
 ## 0.82.2 - Checked casts, weak captures, definite assignment

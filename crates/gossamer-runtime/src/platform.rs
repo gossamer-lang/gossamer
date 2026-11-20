@@ -98,3 +98,50 @@ pub fn temp_dir() -> std::path::PathBuf {
 pub fn temp_dir() -> std::path::PathBuf {
     std::path::PathBuf::from("/tmp")
 }
+
+/// Threads the system lets this process run at once, or `None` where it
+/// reports no limit.
+#[must_use]
+pub fn thread_limit() -> Option<usize> {
+    static LIMIT: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(read_thread_limit)
+}
+
+// macOS bounds the threads of one task.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn read_thread_limit() -> Option<usize> {
+    let mut value: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    // SAFETY: the name is a NUL-terminated literal, `value` is a writable
+    // `c_int` whose size `size` states, and no new value is written.
+    let status = unsafe {
+        libc::sysctlbyname(
+            c"kern.num_taskthreads".as_ptr(),
+            (&raw mut value).cast(),
+            &raw mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (status == 0).then(|| usize::try_from(value).ok()).flatten()
+}
+
+// Other Unix systems bound a user's processes and threads together.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
+fn read_thread_limit() -> Option<usize> {
+    // SAFETY: an all-zero `rlimit` is a valid value for `getrlimit` to fill.
+    let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+    // SAFETY: `limit` is a valid, writable `rlimit`.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NPROC, &raw mut limit) } != 0
+        || limit.rlim_cur == libc::RLIM_INFINITY
+    {
+        return None;
+    }
+    usize::try_from(limit.rlim_cur).ok()
+}
+
+// Windows and the browser report no thread limit; memory bounds them.
+#[cfg(not(unix))]
+fn read_thread_limit() -> Option<usize> {
+    None
+}

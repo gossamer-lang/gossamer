@@ -207,7 +207,8 @@ extend(&mut items)     // items is now #[1, 2, 1]
 - `"""` strings dedent to their closing delimiter; `f"""..."""` interpolates.
 - Two index spaces: `s.len()`, `s[i]` (a `char`), and `for c in s` count
   Unicode scalars; `s.byte_len()`, `s.byte_at(i)` (an `i64`), `s.bytes()`,
-  `s.substring(a, b)` use byte offsets. Never mix them. Neither is a
+  `s.substring(a, b)` use byte offsets. Never mix them. `s[i] = c` is
+  GT0130: build new text (`s.replacen(old, new, 1)`). Neither is a
   grapheme cluster (`"👍🏽"` is two scalars): cut display text with
   `unicode::graphemes(s).take(n).join("")`.
 - `s.to_i64()` / `to_f64()` / `to_bool()` are strict parses answering an
@@ -278,8 +279,8 @@ extend(&mut items)     // items is now #[1, 2, 1]
   `BinaryHeap` are rejected.
 - A parameter `[T]` takes an array, a `Vec`, or a view; `&mut [T]` writes
   through. `&mut xs[lo..hi]` is a window of `xs` (`fill(&mut px[2..6], 0)`),
-  and `xs[1..4].sort()` sorts that part in place; a bare `xs[lo..hi]` is a
-  copy. Only `Vec` resizes; `insert` / `remove` answer a `Result`.
+  and `xs[1..4].sort()` sorts that part in place, as `xs[1..4][0] = 9`
+  writes `xs[1]`; a bare `xs[lo..hi]` read is a copy. Only `Vec` resizes; `insert` / `remove` answer a `Result`.
 - `for x in xs` over any collection - no `.iter()`, no `*x`. A `Result` or
   `Option` is not iterable: take the value first. The loop walks `xs` as it
   was when the loop began; changing `xs` in the body changes it afterwards.

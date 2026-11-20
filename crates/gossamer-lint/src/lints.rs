@@ -775,8 +775,62 @@ fn does_nothing(body: &Expr) -> bool {
     }
 }
 
+/// `let` bindings in a block nested inside another that hide a `let mut`
+/// of an enclosing block: the inner `let` declares a new binding where an
+/// assignment to the outer one was meant, and the outer keeps its value.
+struct NestedShadows<'a> {
+    scopes: Vec<Vec<(String, Mutability)>>,
+    out: &'a mut Vec<Finding>,
+}
+
+impl gossamer_ast::visitor::Visitor for NestedShadows<'_> {
+    fn visit_block(&mut self, block: &Block) {
+        self.scopes.push(Vec::new());
+        gossamer_ast::visitor::walk_block(self, block);
+        self.scopes.pop();
+    }
+
+    fn visit_stmt(&mut self, stmt: &Stmt) {
+        gossamer_ast::visitor::walk_stmt(self, stmt);
+        if let StmtKind::Let { pattern, init, .. } = &stmt.kind
+            && let Some((name, span, mutability)) = ident_name(pattern)
+        {
+            let rebind = init
+                .as_ref()
+                .is_some_and(|init| expr_mentions_name(init, name));
+            let enclosing = self.scopes.len().saturating_sub(1);
+            let hides_mutable = self.scopes[..enclosing].iter().any(|scope| {
+                scope
+                    .iter()
+                    .any(|(outer, m)| outer == name && matches!(m, Mutability::Mutable))
+            });
+            if hides_mutable && !rebind && !name.starts_with('_') {
+                self.out.push((
+                    span,
+                    format!(
+                        "`{name}` declares a new binding in this block, hiding the mutable `{name}` outside it, which keeps its value"
+                    ),
+                    Some(format!(
+                        "assign the outer binding with `{name} = ..`, or give this one another name"
+                    )),
+                ));
+            }
+            if let Some(scope) = self.scopes.last_mut() {
+                scope.push((name.to_string(), mutability));
+            }
+        }
+    }
+}
+
 fn lint_shadowed_binding(sf: &SourceFile) -> Vec<Finding> {
     let mut out = Vec::new();
+    each_fn_body(sf, |body| {
+        let mut nested = NestedShadows {
+            scopes: Vec::new(),
+            out: &mut out,
+        };
+        gossamer_ast::visitor::Visitor::visit_expr(&mut nested, body);
+    });
     each_fn_body(sf, |body| {
         let Some(block) = as_block(body) else {
             return;

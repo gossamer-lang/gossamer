@@ -221,7 +221,7 @@ impl Lowerer<'_> {
         }))
     }
 
-    fn conv_text(&mut self, text: String, span: Span) -> HirExpr {
+    pub(super) fn conv_text(&mut self, text: String, span: Span) -> HirExpr {
         HirExpr {
             id: self.fresh(),
             span,
@@ -231,7 +231,7 @@ impl Lowerer<'_> {
     }
 
     /// `let name = value`.
-    fn conv_let(&mut self, name: &str, value: HirExpr, span: Span) -> HirStmt {
+    pub(super) fn conv_let(&mut self, name: &str, value: HirExpr, span: Span) -> HirStmt {
         let ty = value.ty;
         HirStmt {
             id: self.fresh(),
@@ -363,7 +363,7 @@ impl Lowerer<'_> {
         }))
     }
 
-    fn conv_path(&mut self, name: &str, ty: Ty, span: Span) -> HirExpr {
+    pub(super) fn conv_path(&mut self, name: &str, ty: Ty, span: Span) -> HirExpr {
         HirExpr {
             id: self.fresh(),
             span,
@@ -389,7 +389,13 @@ impl Lowerer<'_> {
 
     /// The integer `magnitude` (negated when `negative`) as a literal of
     /// `ty`.
-    fn conv_int_literal(&mut self, negative: bool, magnitude: u128, ty: Ty, span: Span) -> HirExpr {
+    pub(super) fn conv_int_literal(
+        &mut self,
+        negative: bool,
+        magnitude: u128,
+        ty: Ty,
+        span: Span,
+    ) -> HirExpr {
         let literal = HirExpr {
             id: self.fresh(),
             span,
@@ -410,7 +416,13 @@ impl Lowerer<'_> {
         }
     }
 
-    fn conv_compare(&mut self, op: HirBinaryOp, lhs: HirExpr, rhs: HirExpr, span: Span) -> HirExpr {
+    pub(super) fn conv_compare(
+        &mut self,
+        op: HirBinaryOp,
+        lhs: HirExpr,
+        rhs: HirExpr,
+        span: Span,
+    ) -> HirExpr {
         HirExpr {
             id: self.fresh(),
             span,

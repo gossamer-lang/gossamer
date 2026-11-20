@@ -1,0 +1,45 @@
+// A set, a heap, and a map keep values of their own: writing the binding
+// that was stored afterwards leaves the stored element where its hash put
+// it. A `Vec` or a float keys a set or map literal as it keys `insert`;
+// floats compare by IEEE total order.
+use std::collections::BTreeSet
+
+fn main() {
+    let mut seen = Set::new()
+    let mut key = #[1, 2]
+    seen.insert(key)
+    key[0] = 9
+    println(f"{seen} {key}")
+    for e in seen {
+        println(f"{e} {seen.contains(e)} {seen.contains(#[1, 2])} {seen.contains(#[9, 2])}")
+    }
+
+    let mut ordered = BTreeSet::new()
+    let mut item = #[2, 1]
+    ordered.insert(item)
+    item[0] = 0
+    ordered.insert(item)
+    println(f"{ordered} {ordered.contains(#[2, 1])}")
+
+    let mut heap = MinHeap::new()
+    let mut entry = #[5, 5]
+    heap.push(entry)
+    entry[0] = 1
+    println(f"{heap.peek()} {entry}")
+
+    let mut counts = Map::new()
+    let mut k = #[3]
+    counts.insert(k, 1)
+    k[0] = 4
+    println(f"{counts} {counts.contains_key(#[3])}")
+
+    let literal = #{ #[0], #[1, 2], #[0] }
+    let keyed = { #[1, 2]: "a", #[3]: "b" }
+    println(f"{literal.len()} {literal.contains(#[1, 2])} {keyed[#[3]]}")
+
+    let nan = f64::NAN
+    let floats = #{ 1.5, -0.0, 0.0, 1.5, nan }
+    let priced = { 2.5: "a", -1.0: "b" }
+    let pairs = #{ (1, 2.5), (1, 2.5), (2, 0.5) }
+    println(f"{floats.len()} {floats.contains(-0.0)} {floats.contains(nan)} {priced[2.5]} {pairs.len()}")
+}

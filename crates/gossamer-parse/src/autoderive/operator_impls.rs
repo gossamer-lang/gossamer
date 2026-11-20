@@ -28,6 +28,9 @@ const BINARY_OPERATORS: &[(&str, &str)] = &[
 /// Operator traits with one operand, which take no right-hand type.
 const UNARY_OPERATORS: &[(&str, &str)] = &[("Neg", "neg"), ("Not", "not")];
 
+/// Indexing traits, whose `Output` restates what `index` answers.
+const INDEX_OPERATORS: &[(&str, &str)] = &[("Index", "index"), ("IndexMut", "index")];
+
 /// Rewrites every operator impl in `sf` as described in the module docs.
 pub(crate) fn rewrite_operator_impls(sf: &mut SourceFile) {
     rewrite_items(&mut sf.items);
@@ -58,7 +61,8 @@ fn rewrite_impl(decl: &mut ImplDecl) {
         .iter()
         .find(|(name, _)| *name == trait_name);
     let unary = UNARY_OPERATORS.iter().find(|(name, _)| *name == trait_name);
-    let Some(&(_, method)) = binary.or(unary) else {
+    let indexing = INDEX_OPERATORS.iter().find(|(name, _)| *name == trait_name);
+    let Some(&(_, method)) = binary.or(unary).or(indexing) else {
         return;
     };
     let self_text = render(&decl.self_ty);

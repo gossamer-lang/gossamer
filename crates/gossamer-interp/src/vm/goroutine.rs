@@ -158,6 +158,11 @@ pub(crate) struct GoroutinePool {
     /// Worker threads created so far, counted at creation rather than on
     /// thread entry so a growth decision cannot race a starting worker.
     workers: AtomicUsize,
+    /// Most worker threads the pool holds, parked ones included: three
+    /// quarters of what the system allows the process, leaving the rest to
+    /// the runtime's own threads, and lowered to the count reached when the
+    /// system refuses one.
+    thread_ceiling: AtomicUsize,
     /// Workers parked waiting for a task. Read and written under `inner`,
     /// so the watchdog sees an accurate count when deciding whether to grow.
     idle: AtomicUsize,
@@ -244,6 +249,7 @@ impl GoroutinePool {
             drain_cv: parking_lot::Condvar::new(),
             outstanding: AtomicU64::new(0),
             workers: AtomicUsize::new(0),
+            thread_ceiling: AtomicUsize::new(initial_thread_ceiling()),
             idle: AtomicUsize::new(0),
             completions: AtomicU64::new(0),
             spawned: AtomicU64::new(0),
@@ -305,11 +311,12 @@ impl GoroutinePool {
                 }
             });
             if let Err(e) = spawned {
-                // A pool below its requested size starves blocking
-                // goroutines (e.g. `go http::serve`); say so instead
-                // of failing silently.
-                pool.workers.fetch_sub(1, Ordering::Relaxed);
-                eprintln!("gossamer-worker spawn failed: {e}");
+                // The system refused a thread: the pool holds as many as it
+                // can, and a queued goroutine waits for one of them to free.
+                let workers = pool.workers.fetch_sub(1, Ordering::Relaxed) - 1;
+                pool.thread_ceiling
+                    .fetch_min(workers.max(1), Ordering::Relaxed);
+                warn_thread_ceiling_once(workers, Some(&e));
             }
         }
     }
@@ -385,8 +392,21 @@ impl GoroutinePool {
         if pool.idle.load(Ordering::Relaxed) > 0 {
             pool.cv.notify_one();
         } else if workers - inner.parked < inner.target {
-            Self::start_worker(pool);
+            if workers >= pool.thread_ceiling.load(Ordering::Relaxed) {
+                warn_thread_ceiling_once(workers, None);
+            } else if workers < MAX_WORKERS || only_queued_can_move(inner) {
+                Self::start_worker(pool);
+            }
         }
+    }
+
+    /// Starts a worker for a queued goroutine when the program can move no
+    /// other way, for `main` entering a wait: a parking worker checks the
+    /// same as it parks.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn admit_for_waiting_main(pool: &Arc<Self>) {
+        let inner = pool.inner.lock();
+        Self::admit_queued(pool, &inner);
     }
 
     /// wasm runs every goroutine at its spawn, so no worker ever parks.
@@ -517,13 +537,30 @@ impl GoroutinePool {
 static POOL: OnceLock<Arc<GoroutinePool>> = OnceLock::new();
 
 const DEFAULT_MAX_WORKERS: usize = 4;
-/// Ceiling on goroutines running at once, the most the starvation watchdog
-/// grows `target` to. A worker parked in a counted wait (a channel, a lock,
-/// a join) gives up its slot and a fresh worker takes it, so parked workers
-/// are not bounded here: like a blocked goroutine in the compiled tiers,
-/// each costs only memory, its stack's used pages, since the 16 MiB it
-/// reserves is address space.
+/// Worker threads the pool grows to on its own, and the most goroutines the
+/// starvation watchdog lets run at once. A worker parked in a counted wait
+/// (a channel, a lock, a join) gives up its slot, and past this many threads
+/// a fresh one takes it only when nothing else can move the program
+/// ([`only_queued_can_move`]): each thread holds its stack's used pages and
+/// an interpreter, so a program whose parked goroutines are about to be
+/// served waits for one of them rather than growing a thread per goroutine.
 const MAX_WORKERS: usize = 1024;
+
+/// Whether every participant that is not queued waits on a channel, a lock,
+/// or a join that no channel stands ready to complete, so only a queued
+/// goroutine can move the program, and a worker must be found for it. Call
+/// with the pool's `inner` locked.
+#[cfg(not(target_arch = "wasm32"))]
+fn only_queued_can_move(inner: &PoolInner) -> bool {
+    if inner.queue.is_empty() || PENDING_HANDOFFS.load(Ordering::Acquire) > 0 {
+        return false;
+    }
+    let waiting =
+        (CHANNEL_WAITERS.load(Ordering::Acquire) + JOIN_WAITERS.load(Ordering::Acquire)) as u64;
+    let participants =
+        participants_besides_main() + u64::from(!MAIN_RETURNED.load(Ordering::Acquire));
+    waiting + inner.queue.len() as u64 >= participants
+}
 
 /// How long the starvation watchdog waits between progress checks. Short
 /// enough that resolving a genuine deadlock is not a noticeable pause even
@@ -561,6 +598,27 @@ fn default_worker_count() -> usize {
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(DEFAULT_MAX_WORKERS)
         .min(DEFAULT_MAX_WORKERS)
+}
+
+/// The pool's starting thread ceiling: three quarters of the system's
+/// limit, or no ceiling where none is reported.
+fn initial_thread_ceiling() -> usize {
+    gossamer_runtime::platform::thread_limit().map_or(usize::MAX, |limit| limit - limit / 4)
+}
+
+/// Says once that the pool holds every worker thread the system allows, as
+/// its ceiling or as the system's refusal of one more (`refused`), so a
+/// goroutine spawned now waits for a worker to finish.
+#[cfg(not(target_arch = "wasm32"))]
+fn warn_thread_ceiling_once(workers: usize, refused: Option<&std::io::Error>) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        let why = refused.map_or_else(String::new, |error| format!(" ({error})"));
+        eprintln!(
+            "gossamer: {workers} goroutine worker threads in use, as many as the system \
+             allows{why}; further goroutines wait for one to finish"
+        );
+    });
 }
 
 /// Says once that the pool cannot grow further. A goroutine queued in this
@@ -690,6 +748,20 @@ fn park_worker() -> bool {
     inner.parked += 1;
     GoroutinePool::admit_queued(pool, &inner);
     true
+}
+
+/// [`park_worker`] for a wait being entered: a thread that is not a pool
+/// worker, `main`, holds no slot, but its wait can leave a queued goroutine
+/// the only thing able to move the program.
+fn park_or_admit() -> bool {
+    if park_worker() {
+        return true;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(pool) = POOL.get() {
+        GoroutinePool::admit_for_waiting_main(pool);
+    }
+    false
 }
 
 /// Runs the goroutine behind join handle `handle` on the calling worker when
@@ -857,7 +929,7 @@ impl ChannelWait {
             return Some(Self {
                 stuck: true,
                 cohort,
-                parked: park_worker(),
+                parked: park_or_admit(),
             });
         }
         if stuck {
@@ -877,7 +949,7 @@ impl ChannelWait {
         Some(Self {
             stuck: false,
             cohort,
-            parked: park_worker(),
+            parked: park_or_admit(),
         })
     }
 }
@@ -981,7 +1053,7 @@ impl JoinWait {
             return None;
         }
         Some(Self {
-            parked: park_worker(),
+            parked: park_or_admit(),
         })
     }
 }
