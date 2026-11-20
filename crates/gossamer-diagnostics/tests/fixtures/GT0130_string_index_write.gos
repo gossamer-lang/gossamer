@@ -1,0 +1,7 @@
+// ERROR: GT0130
+
+fn main() {
+    let mut greeting = "hello"
+    greeting[0] = 'j'
+    println(greeting)
+}

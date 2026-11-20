@@ -194,10 +194,14 @@ impl Lowerer<'_> {
         // the map as it stands.
         let (bind, written) = self.bind_entry_operand(value, span);
         let entry = self.open_entry(place, None, span)?;
-        let target = entry.target.clone();
+        let mut writes = Vec::new();
+        let mut target = entry.target.clone();
+        if self.writes_through_window(&target) {
+            target = self.flatten_window_place(target, &mut writes);
+        }
         let kind = self.assign_kind(op, target, written, span);
-        let write = self.unit_stmt(kind, span);
-        let closed = self.close_entry(entry, vec![write], None, span);
+        writes.push(self.unit_stmt(kind, span));
+        let closed = self.close_entry(entry, writes, None, span);
         Some(self.prefixed(bind, closed, span).kind)
     }
 
@@ -236,8 +240,12 @@ impl Lowerer<'_> {
                     cur = receiver;
                 }
                 AstExprKind::Index { base, index } => {
+                    // A range below the entry is a window of the entry's
+                    // value, written in place inside the opened entry.
                     if matches!(index.kind, AstExprKind::Range { .. }) {
-                        return None;
+                        steps.push(cur);
+                        cur = base;
+                        continue;
                     }
                     let base_ty = self.ty_of(base.id);
                     if self.is_map_ty(base_ty) {
@@ -279,6 +287,20 @@ impl Lowerer<'_> {
         for step in steps.iter().rev() {
             let ty = self.ty_of(step.id);
             target = match &step.kind {
+                AstExprKind::Index { index, .. }
+                    if matches!(index.kind, AstExprKind::Range { .. }) =>
+                {
+                    let range = self.lower_expr(index);
+                    HirExpr {
+                        id: self.fresh(),
+                        span,
+                        ty,
+                        kind: HirExprKind::Index {
+                            base: Box::new(target),
+                            index: Box::new(range),
+                        },
+                    }
+                }
                 AstExprKind::Index { index, .. } => {
                     let index = self.lower_expr(index);
                     let index_ty = index.ty;
@@ -666,7 +688,7 @@ impl Lowerer<'_> {
     }
 
     /// `receiver.name(args)` typed `ty`.
-    fn method_call(
+    pub(super) fn method_call(
         &mut self,
         receiver: HirExpr,
         name: &str,
@@ -911,6 +933,7 @@ impl Lowerer<'_> {
         let entry = self.open_entry(receiver, None, span)?;
         let target = entry.target.clone();
         let call = self.method_call(target, name.name.as_str(), lowered_args, outer_ty, span);
+        let call = self.hoist_window_writes(call);
         let closed = self.close_entry(entry, Vec::new(), Some(call), span);
         Some(self.prefixed(binds, closed, span))
     }

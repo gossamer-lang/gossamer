@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.82.3 - Remainder and task lints, goroutines left blocked at exit
+
+- New lint `signed_remainder` (`GL0064`): `x % k == r` with a positive `r` while `x` is signed and may be negative, which is false for every negative `x` because `%` keeps the sign of the value it divides. The help gives `x % 2 != 0` for oddness and `x.rem_euclid(k) == r`. It reports in `gos check`, `gos lint`, the language server, and MCP.
+- New lint `unjoined_task` (`GL0065`): a handle bound by `let task = spawn(..)` and never used, so nothing waits for the task's work. It takes the place of the `unused_variable` report there, whose help and `--fix` renamed the handle to `_task`.
+- A send on a channel whose every `Receiver` has been released completes at once and drops its value, on every tier, and a sender already waiting is released the same way. A goroutine racing others to answer one `recv` used to wait, holding its value, for the life of the program; a program doing that 20,000 times now stays at its working size instead of growing by gigabytes. `try_send` answers `false` on such a channel.
+- Releasing a channel's last `Sender` closes it, on every tier: a `recv` drains what was sent and then answers `None`, where a goroutine waiting on input nobody could send waited forever.
+- `tx.try_send(v)` works on the VM, where it passed the checker and failed at run time.
+- The VM releases a block's bindings when the block ends, a binding nothing reads as soon as it is bound, a binding a `spawn` captured after the spawn, and the value a `let` destructures once its parts are bound, as the compiled tiers do. Native code releases the pair `channel()` answers once it is destructured, rather than at the function's return.
+- Goroutines `main` leaves parked on channels, locks, or joins that nothing left can serve are named and left as soon as `main` returns, on every tier, instead of after the 30 second exit drain.
+- A VM program with more than 1024 goroutines blocked at once no longer hangs when only a goroutine spawned after them can move it: the VM starts a thread for that goroutine, up to what the system allows, and says so once at that limit.
+- `Set::insert`, `BTreeSet::insert`, and a heap's `push` keep a value of their own on the native tiers, as `Vec::push` and `Map::insert` do: writing the binding afterwards left the stored element changed under its old hash, so the set held an element it could not find.
+- The JIT prints a set of vectors, tuples, structs, or enums as the other tiers do, instead of `#{}`.
+- A `Vec` or a float keys a set or map literal (`#{#[1, 2]}`, `{2.5: "a"}`, `#{(1, 0.5)}`) as it keys `insert` and `m[k] = v`, where the literal was `GT0017`. Float keys compare by IEEE total order on every tier, as maps and sets built with `insert` already did.
+- A write through a range of a sequence lands in the sequence on every tier: `xs[1..3][0] = 9`, `+=` through one, a field below one (`vs[0..2][1].n = 7`), a window of a window, `&mut xs[1..3][0]`, a mutating method on `g[0..2][1]`, and any of these below a map entry. Native code dropped most of these writes and the VM dropped others; a field write through a range stopped native compilation with an internal error.
+- `s[i] = c` on a `String` is `GT0130`, where it passed the checker, failed on the VM, and did nothing natively. `w[i] = v` on a type with `impl Index` is `GT0131`, where it failed on the VM and faulted natively. A field or element of a call's result (`make().x = 1`) is `GT0078`, where the write was accepted and lost.
+- `shadowed_binding` (`GL0008`) also reports a `let` in a nested block that hides a `let mut` of an enclosing one, which leaves the outer binding unchanged where an assignment was meant.
+- `type Output = T` in an `impl Index` that agrees with `index`'s return is accepted, where it was reported as a mismatch between two identical types.
+- SPEC and SKILL say that string slices and indices can split a grapheme cluster, and how to cut display text with `unicode::graphemes`.
+
 ## 0.82.2 - Checked casts, weak captures, definite assignment
 
 - `as` checks that a value fits its target and panics with `cast overflow` when it does not, as `+` panics on overflow: `300 as u8`, `-1 as u64`, `1e20 as i64`, and a NaN cast to an integer all stop the program on every tier, where they wrapped or saturated silently. `as%` is the explicit wrapping cast (`300 as% u8 == 44`), saturating a float; `v.clamp(lo, hi) as T` saturates. The test is compiled only where the operand may not fit.

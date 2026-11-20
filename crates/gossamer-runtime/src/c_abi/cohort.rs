@@ -480,9 +480,24 @@ const ROOT_DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(
 /// root drain runs on. Answers the number still outstanding, which is
 /// zero when they all finished.
 fn wait_for_drain_bounded(node: &Arc<Cohort>, deadline: std::time::Duration) -> i64 {
+    wait_for_drain_unless(node, deadline, &AtomicBool::new(false))
+}
+
+/// [`wait_for_drain_bounded`] that also stops once `blocked` is set, and
+/// answers the children still outstanding then. Whoever sets `blocked`
+/// takes the cohort's state lock to notify its progress, so the flag read
+/// under that lock is never missed.
+fn wait_for_drain_unless(
+    node: &Arc<Cohort>,
+    deadline: std::time::Duration,
+    blocked: &AtomicBool,
+) -> i64 {
     let until = crate::platform::Instant::now() + deadline;
     let mut state = node.state.lock();
     while state.outstanding > 0 {
+        if blocked.load(Ordering::Acquire) {
+            return state.outstanding;
+        }
         let now = crate::platform::Instant::now();
         if now >= until {
             return state.outstanding;
@@ -831,18 +846,39 @@ pub fn close_root() {
     };
     // The root drain runs on the main OS thread, after `main` has
     // returned: a goroutine still running here is one nothing joined.
+    let blocked = Arc::new(AtomicBool::new(false));
     let outstanding = if crate::sched_global::current_gid().is_some() {
         wait_for_drain(&node);
         0
     } else {
-        wait_for_drain_bounded(&node, ROOT_DRAIN_DEADLINE)
+        // Goroutines parked where nothing left in the program can wake them
+        // will never finish, so the drain stops for them at once rather
+        // than at its bound.
+        let drained = Arc::clone(&node);
+        let notified = Arc::clone(&node);
+        let flag = Arc::clone(&blocked);
+        crate::sched_global::main_drains(
+            "the drain of `main`'s goroutines",
+            Arc::new(move || drained.state.lock().outstanding > 0),
+            Arc::new(move || {
+                flag.store(true, Ordering::Release);
+                let _state = notified.state.lock();
+                notified.progress.notify_all();
+            }),
+        );
+        let outstanding = wait_for_drain_unless(&node, ROOT_DRAIN_DEADLINE, &blocked);
+        crate::sched_global::end_main_wait();
+        outstanding
     };
     if outstanding > 0 {
         eprintln!(
-            "gossamer: {outstanding} spawned goroutine(s) had not finished {} seconds after \
-             `main` returned; exiting without them{}",
-            ROOT_DRAIN_DEADLINE.as_secs(),
-            unfinished_children(&node)
+            "{}",
+            abandoned_message(
+                outstanding,
+                blocked.load(Ordering::Acquire),
+                ROOT_DRAIN_DEADLINE,
+                &unfinished_children(&node)
+            )
         );
     }
     let orphaned: Vec<String> = {
@@ -859,6 +895,31 @@ pub fn close_root() {
     }
     node.state.lock().joined = true;
     pop_current();
+}
+
+/// The report for the goroutines `main` left that the program exits
+/// without: ones that can never finish when `blocked`, else ones still
+/// running at the drain's bound. `children` names their spawn indices.
+#[must_use]
+pub fn abandoned_message(
+    outstanding: i64,
+    blocked: bool,
+    bound: std::time::Duration,
+    children: &str,
+) -> String {
+    if blocked {
+        format!(
+            "gossamer: {outstanding} spawned goroutine(s) can never finish: each waits on a \
+             channel or lock that nothing left after `main` returned can serve; exiting \
+             without them{children}"
+        )
+    } else {
+        format!(
+            "gossamer: {outstanding} spawned goroutine(s) had not finished {} seconds after \
+             `main` returned; exiting without them{children}",
+            bound.as_secs()
+        )
+    }
 }
 
 /// Returns unused registry capacity after native main and its children finish.

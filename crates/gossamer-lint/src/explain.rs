@@ -32,8 +32,12 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
             Single-arm `match` is almost always a half-written exhaustive match."
         }
         "shadowed_binding" => {
-            "A `let` binding in the same block shadows an earlier one. Rename\n\
-            one of them to make the data flow obvious."
+            "A `let` binding shadows an earlier one: in the same block, or in a\n\
+            nested block over a `let mut` of an enclosing one. The nested case\n\
+            is usually an assignment written as a declaration: `let status =\n\
+            \"done\"` inside an `if` leaves the outer `status` as it was. Assign\n\
+            it with `status = ..`, or rename one of them to make the data flow\n\
+            obvious."
         }
         "unchecked_result" => {
             "`let _ = expr?` silently discards an error. Either handle the\n\
@@ -288,6 +292,26 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
             `o` is, inside the body, an `Option` that is `Some` while the value\n\
             lives and `None` once it is gone. `o.downgrade()` written before the\n\
             closure and upgraded inside it is the same capture."
+        }
+        "signed_remainder" => {
+            "A remainder compared with a positive number while the value divided\n\
+            may be negative: `n % 2 == 1`. `%` answers a remainder with the sign\n\
+            of the value it divides, as in C, Rust, and Go, so `-3 % 2` is `-1`\n\
+            and the comparison is false for every negative odd `n`. Test\n\
+            oddness with `n % 2 != 0`, or compare the remainder in `0..k` with\n\
+            `n.rem_euclid(k) == r`, the same for every sign. A value shown to be\n\
+            at least zero (an unsigned type, a mask, a literal `clamp`, `abs`,\n\
+            `rem_euclid`, a `for` over a range from zero, an `enumerate` index)\n\
+            is not reported."
+        }
+        "unjoined_task" => {
+            "A task's handle bound by `let task = spawn(..)` and never used.\n\
+            Nothing joins the task, so the program goes on without waiting for\n\
+            it, and `main` can print, or return, before the task's work is done.\n\
+            Call `task.join()` where that work must be finished, which also\n\
+            answers the task's result. A task meant to run on its own is spawned\n\
+            without a binding, `spawn(..)`; inside a `cohort { }` the cohort\n\
+            joins every task when it ends."
         }
         "non_upper_case_globals" => {
             "A const or static whose name is not `SCREAMING_SNAKE_CASE`, as Rust\n\

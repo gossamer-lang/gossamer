@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0131]: A user type is written by index: `w[0] = 2` where `W` implements - here
+--- framed ---
+error[GT0131]: A user type is written by index: `w[0] = 2` where `W` implements
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

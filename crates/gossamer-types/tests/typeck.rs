@@ -5576,3 +5576,112 @@ fn main() {
         .collect();
     assert_eq!(lines, vec![10, 12, 14]);
 }
+
+#[test]
+fn signed_remainder_reports_only_a_dividend_that_may_be_negative() {
+    let source = r"struct P { n: i64 }
+
+fn main() {
+    let n: i64 = -3
+    let k: i64 = 4
+    let p = P { n: 5 }
+    let u: u64 = 3
+    println(n % 2 == 1)
+    println(n % 3 != 2)
+    println(n % k == 1)
+    println(p.n % 2 == 1)
+    println(u % 2 == 1)
+    println(n % 2 == 0)
+    println(n % 2 == -1)
+    println((n & 7) % 2 == 1)
+    println(n % 2 == 2)
+    for i in 0..10 { println(i % 2 == 1) }
+    for (i, x) in #[5, 6].iter().enumerate() { println(i % 2 == 1 && x > 0) }
+    for i in (1..10).rev() { println(i % 3 == 1) }
+    let c = 4
+    println(c % 2 == 1)
+    let a = (n % 1000).abs()
+    println(a % 10 == 1 && n.abs() % 2 == 1 && n.rem_euclid(7) % 3 == 1)
+}
+";
+    let mut map = SourceMap::new();
+    let file = map.add_file("test.gos", source.to_string());
+    let (mut sf, parse_diags) = parse_source_file(source, file);
+    assert!(parse_diags.is_empty(), "parse errors: {parse_diags:?}");
+    let (mut resolutions, _) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
+    let mut tcx = TyCtxt::new();
+    let (table, _) = typecheck_source_file(&sf, &resolutions, &mut tcx);
+    let lines: Vec<usize> = gossamer_types::find_signed_remainders(&sf, &resolutions, &table, &tcx)
+        .iter()
+        .map(|found| source[..found.span.start as usize].lines().count())
+        .collect();
+    assert_eq!(lines, vec![8, 9, 10, 11]);
+}
+
+#[test]
+fn a_vec_keys_a_set_or_map_literal_as_insert_keys_it() {
+    let checked = run("fn main() {\n\
+         let s = #{#[0], #[1, 2]}\n\
+         let m = {#[1, 2]: 1}\n\
+         let mut t = Set::new()\n\
+         t.insert(#[3])\n\
+         println(s.len() + m.len() + t.len())\n\
+         }\n");
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+}
+
+#[test]
+fn a_float_keys_a_set_or_map_literal_as_insert_keys_it() {
+    let checked = run("fn main() {\n\
+         let a = #{1.5, -0.0}\n\
+         let b = #{(1, 2.5)}\n\
+         let c = {#[0.5]: 1, #[1.5]: 2}\n\
+         let mut d: Map<f32, i64> = Map::new()\n\
+         d[1.5] = 1\n\
+         println(a.len() + b.len() + c.len() + d.len())\n\
+         }\n");
+    let rejected: Vec<&TypeError> = checked
+        .diagnostics
+        .iter()
+        .map(|d| &d.error)
+        .filter(|e| matches!(e, TypeError::TraitBoundNotSatisfied { bound, .. } if bound == "Hash"))
+        .collect();
+    assert!(rejected.is_empty(), "{rejected:?}");
+}
+
+#[test]
+fn writes_no_tier_can_perform_are_rejected_at_check() {
+    let checked = run("struct W { xs: Vec<i64> }\n\
+         impl Index for W { fn index(self, i: i64) -> i64 { self.xs[i] } }\n\
+         struct P { x: i64 }\n\
+         fn make() -> P { P { x: 1 } }\n\
+         fn main() {\n\
+         let mut s = \"hello\"\n\
+         s[0] = 'j'\n\
+         let mut w = W { xs: #[1] }\n\
+         w[0] = 2\n\
+         make().x = 3\n\
+         let mut m = {\"a\": P { x: 0 }}\n\
+         m.or_insert(\"b\", P { x: 0 }).x = 4\n\
+         let mut xs = #[1, 2, 3]\n\
+         xs[1..3][0] = 5\n\
+         println(f\"{s} {w.xs} {m.len()} {xs}\")\n\
+         }\n");
+    let found: Vec<&str> = checked
+        .diagnostics
+        .iter()
+        .map(|d| match &d.error {
+            TypeError::StringIndexWrite { .. } => "string",
+            TypeError::UserIndexWrite { .. } => "user",
+            TypeError::InvalidAssignTarget { .. } => "temporary",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        found,
+        vec!["string", "user", "temporary"],
+        "{:?}",
+        checked.diagnostics
+    );
+}

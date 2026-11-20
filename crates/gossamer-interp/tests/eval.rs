@@ -817,6 +817,7 @@ fn main() {
         v = rx.recv() => println("recv"),
         default => println("default"),
     }
+    tx.close()
 }
 "#;
     let out = run_program(source);
@@ -835,6 +836,7 @@ fn main() {
         v = rx_b.recv() => println("b"),
         default => println("default"),
     }
+    tx_a.send(0i64)
 }
 "#;
     let out = run_program(source);

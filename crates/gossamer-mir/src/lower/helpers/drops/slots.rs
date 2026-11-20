@@ -1305,9 +1305,10 @@ pub(crate) fn insert_signed_vec_marks(
 /// Locals that appear in an `Rvalue::Ref` are pinned (released at
 /// return only): the borrow's pointer value could outlive the last
 /// direct mention.
-/// One pending early release: insert after statement `usize` for `Local`,
-/// via the named release intrinsic with an optional meta symbol.
-pub(super) type PendingRelease = (usize, Local, &'static str, Option<String>);
+/// One pending early release: insert after statement `usize` for `Local`
+/// (or the tuple field of it the last `Option<u32>` names), via the named
+/// release intrinsic with an optional meta symbol.
+pub(super) type PendingRelease = (usize, Local, &'static str, Option<String>, Option<u32>);
 
 /// True for the RC retain intrinsics [`insert_aggr_copy_drops`] anchors to
 /// the statement whose destination they cover.

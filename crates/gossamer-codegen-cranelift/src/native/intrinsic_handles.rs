@@ -1129,9 +1129,22 @@ pub(super) fn lower_intrinsic_call_handles(
             };
             let call = builder.ins().call(fref, &[elem, cap]);
             let chan_ptr = builder.inst_results(call)[0];
-            // 16-byte tuple slot; write chan_ptr to offsets 0
-            // and 8 so both `Sender` and `Receiver` projections
-            // observe the same handle.
+            // The receiver is a node of its own holding a second share of the
+            // channel, so the release of its last copy is the moment no send
+            // can be taken again.
+            let receiver_fn =
+                intrinsics.extern_fn(module, "gos_rt_chan_receiver", &[ptr_ty], &[ptr_ty])?;
+            let receiver_ref = module.declare_func_in_func(receiver_fn, builder.func);
+            let receiver_call = builder.ins().call(receiver_ref, &[chan_ptr]);
+            let receiver_ptr = builder.inst_results(receiver_call)[0];
+            // The sender end takes over the channel's first share, so the
+            // release of its last copy closes the channel.
+            let sender_fn =
+                intrinsics.extern_fn(module, "gos_rt_chan_sender", &[ptr_ty], &[ptr_ty])?;
+            let sender_ref = module.declare_func_in_func(sender_fn, builder.func);
+            let sender_call = builder.ins().call(sender_ref, &[chan_ptr]);
+            let sender_ptr = builder.inst_results(sender_call)[0];
+            // 16-byte tuple slot: the sender at offset 0, the receiver at 8.
             let slot = builder.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
                 16,
@@ -1140,13 +1153,13 @@ pub(super) fn lower_intrinsic_call_handles(
             let base = builder.ins().stack_addr(ptr_ty, slot, 0);
             builder.ins().store(
                 MemFlagsData::trusted(),
-                chan_ptr,
+                sender_ptr,
                 base,
                 ir::immediates::Offset32::new(0),
             );
             builder.ins().store(
                 MemFlagsData::trusted(),
-                chan_ptr,
+                receiver_ptr,
                 base,
                 ir::immediates::Offset32::new(8),
             );

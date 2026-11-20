@@ -1,0 +1,13 @@
+// ERROR: GT0131
+
+struct Row { items: Vec<i64> }
+
+impl Index for Row {
+    fn index(self, i: i64) -> i64 { self.items[i] }
+}
+
+fn main() {
+    let mut row = Row { items: #[1, 2] }
+    row[0] = 5
+    println(row.items)
+}

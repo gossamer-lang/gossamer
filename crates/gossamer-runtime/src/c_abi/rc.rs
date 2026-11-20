@@ -1587,6 +1587,16 @@ pub fn finalized_meta<T: 'static>() -> [i64; 2] {
     ]
 }
 
+/// Whether `payload` is a node [`alloc_managed`] built for `T`.
+///
+/// # Safety
+///
+/// `payload` is a live counted node.
+pub(crate) unsafe fn is_managed<T: ManagedHandle>(payload: *mut u8) -> bool {
+    // SAFETY: forwarded from this function's own contract.
+    unsafe { meta_of(header_ptr(payload)) == T::meta() }
+}
+
 /// Allocates `value` as the payload of a counted node holding one share for
 /// the caller. The node never lives in an arena region: a region frees its
 /// blocks wholesale, which would skip the finalizer.

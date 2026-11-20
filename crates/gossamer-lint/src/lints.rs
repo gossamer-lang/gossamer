@@ -22,6 +22,7 @@ use crate::naming;
 pub(crate) fn run_lint(id: &str, sf: &SourceFile, src: &str) -> Vec<Finding> {
     match id {
         "unused_variable" => lint_unused_variable(sf),
+        "unjoined_task" => lint_unjoined_task(sf),
         "unused_import" => lint_unused_import(sf),
         "unused_mut_variable" => lint_unused_mut_variable(sf),
         "needless_return" => lint_needless_return(sf),
@@ -371,33 +372,72 @@ impl gossamer_ast::visitor::Visitor for NameUseScan<'_> {
 // Lints
 // ---------------------------------------------------------------------
 
+/// The `let` bindings of a function body's own statements that nothing in
+/// the body names, each with whether it binds the handle of a `spawn`.
+fn unused_let_bindings(block: &Block) -> Vec<(String, Span, bool)> {
+    let mut bindings: Vec<(String, Span, bool)> = Vec::new();
+    for stmt in &block.stmts {
+        if let StmtKind::Let { pattern, init, .. } = &stmt.kind
+            && let Some((name, span, _)) = ident_name(pattern)
+            && !name.starts_with('_')
+        {
+            let spawned = init.as_ref().is_some_and(|init| is_spawn_call(init));
+            bindings.push((name.to_string(), span, spawned));
+        }
+    }
+    let mut used: BTreeSet<String> = BTreeSet::new();
+    {
+        let mut scan = NameUseScan { used: &mut used };
+        gossamer_ast::visitor::Visitor::visit_block(&mut scan, block);
+    }
+    bindings.retain(|(name, _, _)| !used.contains(name));
+    bindings
+}
+
+/// Whether `expr` is a call of `spawn`, which answers the task's join handle.
+pub(crate) fn is_spawn_call(expr: &Expr) -> bool {
+    matches!(
+        &expr.kind,
+        ExprKind::Call { callee, .. }
+            if matches!(&callee.kind, ExprKind::Path(path) if last_path_seg(path) == Some("spawn"))
+    )
+}
+
 fn lint_unused_variable(sf: &SourceFile) -> Vec<Finding> {
     let mut out = Vec::new();
     each_fn_body(sf, |body| {
         let Some(block) = as_block(body) else {
             return;
         };
-        let mut bindings: Vec<(String, Span)> = Vec::new();
-        for stmt in &block.stmts {
-            if let StmtKind::Let { pattern, .. } = &stmt.kind {
-                if let Some((name, span, _)) = ident_name(pattern) {
-                    if !name.starts_with('_') {
-                        bindings.push((name.to_string(), span));
-                    }
-                }
-            }
-        }
-        let mut used: BTreeSet<String> = BTreeSet::new();
-        {
-            let mut scan = NameUseScan { used: &mut used };
-            gossamer_ast::visitor::Visitor::visit_block(&mut scan, block);
-        }
-        for (name, span) in bindings {
-            if !used.contains(&name) {
+        for (name, span, spawned) in unused_let_bindings(block) {
+            if !spawned {
                 out.push((
                     span,
                     format!("unused variable `{name}`"),
                     Some(format!("prefix with `_` to silence: `_{name}`")),
+                ));
+            }
+        }
+    });
+    out
+}
+
+fn lint_unjoined_task(sf: &SourceFile) -> Vec<Finding> {
+    let mut out = Vec::new();
+    each_fn_body(sf, |body| {
+        let Some(block) = as_block(body) else {
+            return;
+        };
+        for (name, span, spawned) in unused_let_bindings(block) {
+            if spawned {
+                out.push((
+                    span,
+                    format!(
+                        "`{name}` is never joined: nothing waits for its task, so the program goes on, and can finish, before the task's work is done"
+                    ),
+                    Some(format!(
+                        "call `{name}.join()` where the task's work must be done; a task meant to run on its own is spawned without a binding: `spawn(..)`"
+                    )),
                 ));
             }
         }
@@ -735,8 +775,62 @@ fn does_nothing(body: &Expr) -> bool {
     }
 }
 
+/// `let` bindings in a block nested inside another that hide a `let mut`
+/// of an enclosing block: the inner `let` declares a new binding where an
+/// assignment to the outer one was meant, and the outer keeps its value.
+struct NestedShadows<'a> {
+    scopes: Vec<Vec<(String, Mutability)>>,
+    out: &'a mut Vec<Finding>,
+}
+
+impl gossamer_ast::visitor::Visitor for NestedShadows<'_> {
+    fn visit_block(&mut self, block: &Block) {
+        self.scopes.push(Vec::new());
+        gossamer_ast::visitor::walk_block(self, block);
+        self.scopes.pop();
+    }
+
+    fn visit_stmt(&mut self, stmt: &Stmt) {
+        gossamer_ast::visitor::walk_stmt(self, stmt);
+        if let StmtKind::Let { pattern, init, .. } = &stmt.kind
+            && let Some((name, span, mutability)) = ident_name(pattern)
+        {
+            let rebind = init
+                .as_ref()
+                .is_some_and(|init| expr_mentions_name(init, name));
+            let enclosing = self.scopes.len().saturating_sub(1);
+            let hides_mutable = self.scopes[..enclosing].iter().any(|scope| {
+                scope
+                    .iter()
+                    .any(|(outer, m)| outer == name && matches!(m, Mutability::Mutable))
+            });
+            if hides_mutable && !rebind && !name.starts_with('_') {
+                self.out.push((
+                    span,
+                    format!(
+                        "`{name}` declares a new binding in this block, hiding the mutable `{name}` outside it, which keeps its value"
+                    ),
+                    Some(format!(
+                        "assign the outer binding with `{name} = ..`, or give this one another name"
+                    )),
+                ));
+            }
+            if let Some(scope) = self.scopes.last_mut() {
+                scope.push((name.to_string(), mutability));
+            }
+        }
+    }
+}
+
 fn lint_shadowed_binding(sf: &SourceFile) -> Vec<Finding> {
     let mut out = Vec::new();
+    each_fn_body(sf, |body| {
+        let mut nested = NestedShadows {
+            scopes: Vec::new(),
+            out: &mut out,
+        };
+        gossamer_ast::visitor::Visitor::visit_expr(&mut nested, body);
+    });
     each_fn_body(sf, |body| {
         let Some(block) = as_block(body) else {
             return;

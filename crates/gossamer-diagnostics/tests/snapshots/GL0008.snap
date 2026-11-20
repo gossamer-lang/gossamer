@@ -3,9 +3,9 @@ source: crates/gossamer-diagnostics/tests/snapshots.rs
 expression: rendered
 ---
 --- plain ---
-error[GL0008]: A `let` binding in the same block shadows an earlier one. Rename - here
+error[GL0008]: A `let` binding shadows an earlier one: in the same block, or in a - here
 --- framed ---
-error[GL0008]: A `let` binding in the same block shadows an earlier one. Rename
+error[GL0008]: A `let` binding shadows an earlier one: in the same block, or in a
   --> snap.gos:2:5
      2 |     let x = 1
        |     ^^^^^

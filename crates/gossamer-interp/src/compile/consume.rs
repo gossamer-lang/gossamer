@@ -685,16 +685,19 @@ struct BlockLastUse {
     duplicate_or_shadowed: HashSet<String>,
     captured: HashSet<String>,
     last_stmt: HashMap<String, usize>,
+    /// The statement that binds each local.
+    declared_at: HashMap<String, usize>,
 }
 
 impl BlockLastUse {
     fn new(block: &HirBlock) -> Self {
         let mut this = Self::default();
-        for stmt in &block.stmts {
+        for (idx, stmt) in block.stmts.iter().enumerate() {
             if let HirStmtKind::Let { pattern, .. } = &stmt.kind {
                 let mut names = HashSet::new();
                 collect_pattern_names(pattern, &mut names);
                 for name in names {
+                    this.declared_at.insert(name.clone(), idx);
                     if !this.locals.insert(name.clone()) {
                         this.duplicate_or_shadowed.insert(name);
                     }
@@ -800,8 +803,28 @@ impl BlockLastUse {
             }
             HirExprKind::Call { callee, args } => {
                 self.visit_expr(callee, stmt_idx, shadowed, captured);
+                // A spawned closure takes a snapshot of its captures at the
+                // spawn, so each is read here like an argument and the
+                // binding is free after this statement.
+                let spawned = matches!(&callee.kind, HirExprKind::Path { segments, .. }
+                    if segments.last().is_some_and(|s| s.name == "spawn"));
                 for arg in args {
-                    self.visit_expr(arg, stmt_idx, shadowed, captured);
+                    match &arg.kind {
+                        HirExprKind::Closure { params, body, .. } if spawned => {
+                            let snapshot = shadowed.clone();
+                            for param in params {
+                                self.shadow_pattern(&param.pattern, shadowed);
+                            }
+                            self.visit_expr(body, stmt_idx, shadowed, captured);
+                            *shadowed = snapshot;
+                        }
+                        HirExprKind::LiftedClosure { captures, .. } if spawned => {
+                            for cap in captures {
+                                self.visit_expr(cap, stmt_idx, shadowed, captured);
+                            }
+                        }
+                        _ => self.visit_expr(arg, stmt_idx, shadowed, captured),
+                    }
                 }
             }
             HirExprKind::MethodCall { receiver, args, .. } => {
@@ -936,6 +959,17 @@ impl BlockLastUse {
             }
         }
         let mut clears = vec![Vec::new(); block.stmts.len()];
+        // A local nothing reads is free as soon as it is bound, as the
+        // compiled tiers release it there.
+        for (name, idx) in &self.declared_at {
+            if !self.last_stmt.contains_key(name)
+                && !self.duplicate_or_shadowed.contains(name)
+                && !self.captured.contains(name)
+                && let Some(slot) = clears.get_mut(*idx)
+            {
+                slot.push(name.clone());
+            }
+        }
         for (name, idx) in self.last_stmt {
             if self.duplicate_or_shadowed.contains(&name) || self.captured.contains(&name) {
                 continue;

@@ -225,3 +225,46 @@ fn a_sender_whose_value_was_taken_keeps_a_race_join_alive() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Goroutines `main` leaves parked on channels nothing can serve any more
+/// are reported and left the moment `main` returns, on every tier, rather
+/// than waited on until the drain's bound. Each goroutine waits to receive
+/// on a channel whose only sender it holds itself. More of them are parked than the VM's
+/// soft limit on worker threads, past which it grows only when a queued
+/// goroutine is all that can move the program.
+#[test]
+fn goroutines_left_blocked_past_main_are_reported_at_once() {
+    let name = "left_blocked";
+    let source = r#"use std::sync::channel
+
+fn wait_on_itself() {
+    let tx, rx = channel::<i64>()
+    let got = rx.recv()
+    tx.send(0)
+}
+
+fn main() {
+    for i in 0..1100 {
+        spawn(|| wait_on_itself())
+    }
+    println("done 1100")
+}
+"#;
+    let dir = std::env::temp_dir().join(format!("gos-deadlock-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    for (tier, output) in run_every_tier(&dir, name, source) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{tier} stderr:\n{stderr}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "done 1100\n",
+            "{tier} stdout"
+        );
+        assert!(
+            stderr.starts_with("gossamer: 1100 spawned goroutine(s) can never finish"),
+            "{tier} report differs:\n{stderr}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

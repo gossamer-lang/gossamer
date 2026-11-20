@@ -1,0 +1,76 @@
+// A send on a channel whose every receiver is gone completes at once and
+// drops its value: no receive can ever take it. A sender already parked
+// when the last receiver goes is released the same way. The last sender
+// going closes the channel, so a receive drains what was sent and then
+// answers `None`.
+use std::errors
+use std::sync::{channel, Shared}
+
+fn produce(tx: Sender<i64>, from: i64) {
+    for i in from..from + 3 {
+        tx.send(i)
+    }
+}
+
+fn round(i: i64, done: Shared<i64>) -> Result<(), errors::Error> {
+    cohort {
+        {
+            let tx, rx = channel()
+            spawn(|| {
+                tx.send(#[i; 4])
+                done.update(|n| n + 1)
+            })
+            spawn(|| {
+                tx.send(#[i + 1; 4])
+                done.update(|n| n + 1)
+            })
+            let first = rx.recv()
+            println(first.is_some())
+        }
+    }
+}
+
+fn main() {
+    let done = Shared::new(0)
+    let mut failed = 0
+    for i in 0..3 {
+        if round(i, done).is_err() {
+            failed += 1
+        }
+    }
+    println(f"senders done {done.get()} failed {failed}")
+
+    let orphan = {
+        let tx, rx = channel()
+        tx
+    }
+    orphan.send(5)
+    println(f"try_send {orphan.try_send(6)}")
+
+    let room, held = channel(1)
+    println(f"try_send with room {room.try_send(1)} when full {room.try_send(2)}")
+    println(f"{held.recv()}")
+
+    let bounded = {
+        let tx, rx = channel(1)
+        tx.send(#[1])
+        tx
+    }
+    bounded.send(#[2])
+    bounded.send(#[3])
+    println("bounded sends done")
+
+    let feed, drain = channel()
+    spawn(|| produce(feed, 0))
+    spawn(|| produce(feed, 10))
+    let mut total = 0
+    let mut count = 0
+    while let Some(v) = drain.recv() {
+        total += v
+        count += 1
+    }
+    println(f"drained {count} values, total {total}")
+
+    let lone, waiting = channel::<i64>()
+    println(f"{waiting.recv()}")
+}

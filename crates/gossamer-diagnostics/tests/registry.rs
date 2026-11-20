@@ -33,7 +33,7 @@ const EMITTED_CODES: &[&str] = &[
     "GT0092", "GT0097", "GT0098", "GT0099", "GT0100", "GT0101", "GT0102", "GT0103", "GT0104",
     "GT0105", "GT0106", "GT0107", "GT0108", "GT0109", "GT0110", "GT0111", "GT0112", "GT0113",
     "GT0116", "GT0117", "GT0118", "GT0119", "GT0120", "GT0121", "GT0122", "GT0123", "GT0124",
-    "GT0125", "GT0126", "GT0127", "GT0128", "GT0129", "GM0001",
+    "GT0125", "GT0126", "GT0127", "GT0128", "GT0129", "GT0130", "GT0131", "GM0001",
     "GM0002", // Arena-escape safety (gossamer-types/src/arena_escape.rs).
     "GM0003", // Runtime (gossamer-interp/src/value.rs).
     "GX0001", "GX0002", "GX0003", "GX0004", "GX0005", "GX0006", "GX0007", "GX0008", "GX0009",
@@ -45,7 +45,7 @@ const EMITTED_CODES: &[&str] = &[
     "GL0029", "GL0030", "GL0031", "GL0032", "GL0033", "GL0034", "GL0035", "GL0036", "GL0037",
     "GL0038", "GL0039", "GL0040", "GL0041", "GL0042", "GL0043", "GL0044", "GL0045", "GL0046",
     "GL0047", "GL0048", "GL0049", "GL0050", "GL0051", "GL0052", "GL0055", "GL0056", "GL0060",
-    "GL0061", "GL0062", "GL0063",
+    "GL0061", "GL0062", "GL0063", "GL0064", "GL0065",
 ];
 
 #[test]

@@ -31,6 +31,47 @@ fn unused_variable_fires_on_let_without_use() {
 }
 
 #[test]
+fn unjoined_task_fires_on_a_spawn_handle_never_used() {
+    let diags = lint("fn main() {\n let task = spawn(|| 1i64)\n println(1)\n}\n");
+    assert!(has_code(&diags, "GL0065"), "got {:?}", diags_codes(&diags));
+    assert!(!has_code(&diags, "GL0001"), "got {:?}", diags_codes(&diags));
+}
+
+#[test]
+fn unjoined_task_silenced_when_joined_or_unbound() {
+    let joined = lint("fn main() {\n let task = spawn(|| 1i64)\n let _n = task.join()\n}\n");
+    assert!(!has_code(&joined, "GL0065"), "{:?}", diags_codes(&joined));
+    let unbound = lint("fn main() {\n spawn(|| 1i64)\n}\n");
+    assert!(!has_code(&unbound, "GL0065"), "{:?}", diags_codes(&unbound));
+    let ignored = lint("fn main() {\n let _task = spawn(|| 1i64)\n}\n");
+    assert!(!has_code(&ignored, "GL0065"), "{:?}", diags_codes(&ignored));
+}
+
+#[test]
+fn shadowed_binding_fires_on_a_nested_let_hiding_an_outer_let_mut() {
+    let diags = lint(
+        "fn main() {\n let ok = true\n let mut status = 1i64\n if ok {\n let status = 2i64\n println(status)\n }\n println(status)\n}\n",
+    );
+    assert!(has_code(&diags, "GL0008"), "got {:?}", diags_codes(&diags));
+}
+
+#[test]
+fn shadowed_binding_allows_a_nested_let_over_an_immutable_or_derived_binding() {
+    let immutable = lint(
+        "fn main() {\n let n = 1i64\n if n > 0 {\n let n = 2i64\n println(n)\n }\n println(n)\n}\n",
+    );
+    assert!(
+        !has_code(&immutable, "GL0008"),
+        "{:?}",
+        diags_codes(&immutable)
+    );
+    let derived = lint(
+        "fn main() {\n let mut s = 1i64\n s += 1\n if s > 0 {\n let s = s * 2\n println(s)\n }\n}\n",
+    );
+    assert!(!has_code(&derived, "GL0008"), "{:?}", diags_codes(&derived));
+}
+
+#[test]
 fn unused_variable_silenced_by_underscore_prefix() {
     let diags = lint("fn main() { let _x = 1i64 }\n");
     assert!(!has_code(&diags, "GL0001"));

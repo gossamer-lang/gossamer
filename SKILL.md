@@ -207,7 +207,10 @@ extend(&mut items)     // items is now #[1, 2, 1]
 - `"""` strings dedent to their closing delimiter; `f"""..."""` interpolates.
 - Two index spaces: `s.len()`, `s[i]` (a `char`), and `for c in s` count
   Unicode scalars; `s.byte_len()`, `s.byte_at(i)` (an `i64`), `s.bytes()`,
-  `s.substring(a, b)` use byte offsets. Never mix them.
+  `s.substring(a, b)` use byte offsets. Never mix them. `s[i] = c` is
+  GT0130: build new text (`s.replacen(old, new, 1)`). Neither is a
+  grapheme cluster (`"👍🏽"` is two scalars): cut display text with
+  `unicode::graphemes(s).take(n).join("")`.
 - `s.to_i64()` / `to_f64()` / `to_bool()` are strict parses answering an
   `Option`. `String + String` copies; build long text with `+=` on a
   `String::with_capacity(n)` or a `bytes::Builder`.
@@ -221,6 +224,9 @@ extend(&mut items)     // items is now #[1, 2, 1]
   that may not fit becomes: `v as% u8` keeps the low bits (and saturates a
   float), `v.clamp(0, 255) as u8` saturates, `v.try_into()` answers a
   `Result` between integer types. GL0062 marks each `as` that can panic.
+- `%` keeps the sign of the value it divides, as in Rust: `-3 % 2 == -1`.
+  Test oddness with `n % 2 != 0`; `n.rem_euclid(k)` answers `0..k` for
+  every sign. GL0064 marks `n % 2 == 1` on a value that may be negative.
 - `+ - *` panic on overflow on every tier and profile; `+%` `-%` `*%` (and
   `+%=`...) wrap at the declared width, and are the only way to wrap. Divide
   by zero panics, and so does a shift amount outside `0..BITS`; `<<%` /
@@ -273,8 +279,8 @@ extend(&mut items)     // items is now #[1, 2, 1]
   `BinaryHeap` are rejected.
 - A parameter `[T]` takes an array, a `Vec`, or a view; `&mut [T]` writes
   through. `&mut xs[lo..hi]` is a window of `xs` (`fill(&mut px[2..6], 0)`),
-  and `xs[1..4].sort()` sorts that part in place; a bare `xs[lo..hi]` is a
-  copy. Only `Vec` resizes; `insert` / `remove` answer a `Result`.
+  and `xs[1..4].sort()` sorts that part in place, as `xs[1..4][0] = 9`
+  writes `xs[1]`; a bare `xs[lo..hi]` read is a copy. Only `Vec` resizes; `insert` / `remove` answer a `Result`.
 - `for x in xs` over any collection - no `.iter()`, no `*x`. A `Result` or
   `Option` is not iterable: take the value first. The loop walks `xs` as it
   was when the loop began; changing `xs` in the body changes it afterwards.
@@ -369,6 +375,15 @@ fn main() {
 }
 ```
 
+- A send whose channel has no `Receiver` left completes at once and drops
+  its value, so a worker racing others to answer one `recv` finishes when
+  the receiver goes; `try_send` answers whether the value was taken. The
+  last `Sender` going closes the channel, so a `while let Some(v) =
+  rx.recv()` drain ends once every producer is done.
+- In `main`, join what you name: `let task = spawn(..)` never joined is
+  GL0065, and `main` goes on (and can exit) before the task's work is
+  done. Goroutines `main` leaves running get up to 30 s at exit; ones
+  parked where nothing can wake them are named and left at once.
 - Headers: `cohort(policy: Policy::CollectAll)` / `Policy::Race`,
   `timeout: ms`, `isolation: Isolation::Thread`, `on_error: OnError::Log`.
   Cancellation is cooperative: a cancelled `recv` answers `None`, `sleep`

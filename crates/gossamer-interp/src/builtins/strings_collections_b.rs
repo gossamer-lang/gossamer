@@ -1656,16 +1656,37 @@ fn builtin_channel_new(args: &[Value]) -> RuntimeResult<Value> {
         _ => 0,
     };
     let channel = crate::value::Channel::with_capacity(capacity);
-    let sender = Value::Channel(channel.clone());
-    let receiver = Value::Channel(channel);
+    let sender = Value::Channel(channel.sender());
+    let receiver = Value::Channel(channel.receiver());
     Ok(Value::Tuple(Arc::from(vec![sender, receiver])))
 }
 
 fn builtin_channel_unbounded(_args: &[Value]) -> RuntimeResult<Value> {
     let channel = crate::value::Channel::unbounded();
-    let sender = Value::Channel(channel.clone());
-    let receiver = Value::Channel(channel);
+    let sender = Value::Channel(channel.sender());
+    let receiver = Value::Channel(channel.receiver());
     Ok(Value::Tuple(Arc::from(vec![sender, receiver])))
+}
+
+/// `tx.try_send(v)`: hands `v` over when the channel can take it now,
+/// answering whether it did, as the compiled tiers' `gos_rt_chan_try_send`
+/// does. Sending into a closed channel panics as `send` does.
+fn builtin_channel_try_send(args: &[Value]) -> RuntimeResult<Value> {
+    let Some(Value::Channel(channel)) = args.first() else {
+        return Err(RuntimeError::Type(
+            "try_send: receiver must be a channel".to_string(),
+        ));
+    };
+    let value = args
+        .get(1)
+        .map_or(Value::Unit, crate::vm::run::map_like_deep_clone);
+    match channel.try_send(value) {
+        crate::value::SendOutcome::Sent => Ok(Value::Bool(true)),
+        crate::value::SendOutcome::Deadlocked => Ok(Value::Bool(false)),
+        crate::value::SendOutcome::Closed => Err(RuntimeError::Panic(
+            "send on closed channel".to_string(),
+        )),
+    }
 }
 
 fn builtin_channel_send(args: &[Value]) -> RuntimeResult<Value> {

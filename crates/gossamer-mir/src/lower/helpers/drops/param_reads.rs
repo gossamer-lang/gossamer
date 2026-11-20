@@ -374,18 +374,6 @@ pub(super) fn stores_table_value_copy(
 /// what the sender later writes.
 pub(crate) fn copy_stored_containers(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
     use gossamer_types::TyKind;
-    let stores_value = |name: &str| {
-        is_channel_send(name)
-            || name.starts_with("gos_rt_vec_push")
-            || name.starts_with("gos_rt_deque_push")
-            || matches!(
-                name,
-                "gos_rt_vec_set" | "gos_rt_vec_set_i64" | "gos_rt_vec_set_i64_unchecked"
-            )
-            || name.starts_with("gos_rt_vec_insert")
-            || name.starts_with("gos_rt_map_insert")
-            || name.starts_with("gos_rt_map_or_insert")
-    };
     let n_blocks = body.blocks.len();
     for bi in 0..n_blocks {
         let Terminator::Call {
@@ -396,11 +384,10 @@ pub(crate) fn copy_stored_containers(body: &mut Body, tcx: &gossamer_types::TyCt
         else {
             continue;
         };
-        if !stores_value(name) || args.len() < 2 {
+        let Some(value_index) = stored_value_index(name, args) else {
             continue;
-        }
+        };
         let channel = is_channel_send(name);
-        let value_index = if channel { 1 } else { args.len() - 1 };
         let (Some(Operand::Copy(receiver)), Some(Operand::Copy(value))) =
             (args.first(), args.get(value_index))
         else {
@@ -429,7 +416,12 @@ pub(crate) fn copy_stored_containers(body: &mut Body, tcx: &gossamer_types::TyCt
         while let TyKind::Ref { inner, .. } = tcx.kind_of(container) {
             container = *inner;
         }
+        // A set's element and a heap's are the argument itself, whatever
+        // the handle's own local is typed as.
+        let element_store =
+            name.starts_with("gos_rt_set_insert") || name.starts_with("gos_rt_bheap_");
         let elem = match tcx.kind_of(container) {
+            _ if element_store => decl.ty,
             TyKind::Sender(elem) if channel => *elem,
             TyKind::Vec(elem) | TyKind::Slice(elem) => *elem,
             TyKind::HashMap { value, .. } => *value,
@@ -507,6 +499,36 @@ pub(crate) fn copy_stored_containers(body: &mut Body, tcx: &gossamer_types::TyCt
             terminator_span,
             terminator_inlined,
         });
+    }
+}
+
+/// The argument a runtime entry keeps in its container: a channel's value,
+/// a set's element, a heap's element, or a vector's, deque's, or map's
+/// stored value. A set insert and a heap push carry the element's
+/// descriptor after it, so the element is the second argument there; the
+/// others take the value last.
+pub(super) fn stored_value_index(name: &str, args: &[Operand]) -> Option<usize> {
+    if args.len() < 2 {
+        return None;
+    }
+    let element_second = is_channel_send(name)
+        || name.starts_with("gos_rt_set_insert")
+        || (name.starts_with("gos_rt_bheap_") && name.contains("_push"));
+    let value_last = name.starts_with("gos_rt_vec_push")
+        || name.starts_with("gos_rt_deque_push")
+        || matches!(
+            name,
+            "gos_rt_vec_set" | "gos_rt_vec_set_i64" | "gos_rt_vec_set_i64_unchecked"
+        )
+        || name.starts_with("gos_rt_vec_insert")
+        || name.starts_with("gos_rt_map_insert")
+        || name.starts_with("gos_rt_map_or_insert");
+    if element_second {
+        Some(1)
+    } else if value_last {
+        Some(args.len() - 1)
+    } else {
+        None
     }
 }
 

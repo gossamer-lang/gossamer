@@ -299,6 +299,9 @@ const SPECS: &[Spec] = &[
     // `[weak o] || body` and a hand-written `downgrade()` capture: a
     // closure stored in the value it reads, and one outliving its value.
     spec("feature-testing-examples/weak_captures.gos"),
+    spec("feature-testing-examples/owned_set_keys.gos"),
+    spec("feature-testing-examples/window_writes.gos"),
+    spec("feature-testing-examples/channel_ends_released.gos"),
     // A callable's `Result` / `Option` return crosses the indirect call
     // through its env blob as the two-word carrier the compiled body
     // answers, rather than as the first of those two words.

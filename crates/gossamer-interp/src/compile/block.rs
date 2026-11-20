@@ -73,8 +73,46 @@ impl<'tcx> FnBuilder<'tcx> {
             self.finish_defer_edge()?;
         }
         self.pop_defer_frame()?;
+        if !diverges {
+            let kept = match result {
+                BlockResult::ValueIn(reg) => Some(reg),
+                _ => None,
+            };
+            self.clear_scope_bindings(kept);
+        }
         self.pop_scope();
         Ok(result)
+    }
+
+    /// Releases what the innermost scope's bindings hold as the scope ends,
+    /// as the compiled tiers release a block's locals at its end: a value
+    /// whose release the program can observe, such as a channel's last
+    /// `Receiver`, is released here rather than when the frame ends. The
+    /// block's own answer in `kept` and a reference alias's register, which
+    /// is the referent's, stay as they are.
+    fn clear_scope_bindings(&mut self, kept: Option<Reg>) {
+        let Some(scope) = self.scopes.last() else {
+            return;
+        };
+        let mut regs: Vec<Reg> = scope
+            .locals
+            .iter()
+            .filter(|(name, typed)| {
+                typed.kind == RegKind::Value
+                    && !scope.reference_bindings.contains(*name)
+                    && Some(typed.reg) != kept
+                    && !self.reference_alias_regs.contains(&typed.reg)
+            })
+            .map(|(_, typed)| typed.reg)
+            .collect();
+        regs.sort_unstable();
+        regs.dedup();
+        for reg in regs {
+            self.emit(Op::ClearRegs {
+                start: reg,
+                count: 1,
+            });
+        }
     }
 
     fn emit_last_use_clears(&mut self, names: &[String]) {

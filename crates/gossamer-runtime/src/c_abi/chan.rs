@@ -78,6 +78,130 @@ pub struct GosChan {
     /// OS threads waiting on this channel among other sources, raised on
     /// every change a waiter could be waiting for.
     wakers: crate::wake::WakerSet,
+    /// Set once every `Receiver` of the channel is gone: no send can ever be
+    /// taken again, so a send completes at once and gives its value back.
+    receivers_gone: std::sync::atomic::AtomicBool,
+}
+
+/// The `Receiver` end of a channel `channel()` built: a counted node of its
+/// own holding a share of the channel, so the moment its last copy is
+/// released is the moment nothing can receive from the channel again.
+pub struct GosRecvEnd {
+    chan: *mut GosChan,
+}
+
+// SAFETY: the end only names its channel, which is itself shared between
+// goroutines and synchronises every access.
+unsafe impl Send for GosRecvEnd {}
+// SAFETY: as above; the end holds no state of its own.
+unsafe impl Sync for GosRecvEnd {}
+
+super::rc::managed_handle!(GosRecvEnd);
+
+impl Drop for GosRecvEnd {
+    fn drop(&mut self) {
+        if self.chan.is_null() {
+            return;
+        }
+        // SAFETY: the end holds a share of its channel, given back here.
+        unsafe {
+            (*self.chan).receivers_left();
+            chan_release(self.chan);
+        }
+    }
+}
+
+/// The `Sender` end of a channel `channel()` built: a counted node of its own
+/// holding the channel's first share, so the release of its last copy is the
+/// moment nothing can send on the channel again, which closes it.
+pub struct GosSendEnd {
+    chan: *mut GosChan,
+}
+
+// SAFETY: the end only names its channel, which is itself shared between
+// goroutines and synchronises every access.
+unsafe impl Send for GosSendEnd {}
+// SAFETY: as above; the end holds no state of its own.
+unsafe impl Sync for GosSendEnd {}
+
+super::rc::managed_handle!(GosSendEnd);
+
+impl Drop for GosSendEnd {
+    fn drop(&mut self) {
+        if self.chan.is_null() {
+            return;
+        }
+        // SAFETY: the end holds a share of its channel, given back here.
+        unsafe {
+            chan_close_idempotent(&*self.chan);
+            chan_release(self.chan);
+        }
+    }
+}
+
+/// The channel a channel argument names: itself, or the channel a `Sender`
+/// or `Receiver` end reaches.
+///
+/// # Safety
+///
+/// `c` is null or a live channel or end.
+pub(crate) unsafe fn chan_of(c: *mut GosChan) -> *mut GosChan {
+    if c.is_null() {
+        return c;
+    }
+    // SAFETY: a non-null `c` is a live counted node (this function's contract).
+    if unsafe { super::rc::is_managed::<GosRecvEnd>(c.cast()) } {
+        // SAFETY: the node is a `GosRecvEnd`, checked above.
+        return unsafe { (*c.cast::<GosRecvEnd>()).chan };
+    }
+    // SAFETY: as above.
+    if unsafe { super::rc::is_managed::<GosSendEnd>(c.cast()) } {
+        // SAFETY: the node is a `GosSendEnd`, checked above.
+        return unsafe { (*c.cast::<GosSendEnd>()).chan };
+    }
+    c
+}
+
+/// The `Sender` end of channel `c`, taking over the caller's share of it;
+/// `channel()` answers it as the pair's first half.
+///
+/// # Safety
+///
+/// `c` is null or a live channel whose share the caller hands over.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_chan_sender(c: *mut GosChan) -> *mut GosChan {
+    ffi_entry!({
+        if c.is_null() {
+            return std::ptr::null_mut();
+        }
+        let end = super::rc::alloc_managed(GosSendEnd { chan: c });
+        // SAFETY: `end` is the counted node just allocated, or null, which
+        // `gos_rt_rc_mark_shared` accepts.
+        unsafe { super::rc::gos_rt_rc_mark_shared(end.cast()) };
+        end.cast()
+    })
+}
+
+/// The `Receiver` end of channel `c`, holding a share of it; `channel()`
+/// answers it as the pair's second half.
+///
+/// # Safety
+///
+/// `c` is null or a live channel.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_chan_receiver(c: *mut GosChan) -> *mut GosChan {
+    ffi_entry!({
+        if c.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: `c` is a live channel (this function's contract).
+        chan_retain(unsafe { &*c });
+        let end = super::rc::alloc_managed(GosRecvEnd { chan: c });
+        // SAFETY: `end` is the counted node just allocated, or null, which
+        // `gos_rt_rc_mark_shared` accepts.
+        unsafe { super::rc::gos_rt_rc_mark_shared(end.cast()) };
+        end.cast()
+    })
 }
 
 /// A goroutine suspended inside a send, and the value it is waiting to
@@ -112,6 +236,9 @@ impl GosChan {
         if *self.closed.lock() && (recvs > 0 || sends > 0) {
             return true;
         }
+        if sends > 0 && self.receivers_gone.load(Ordering::Acquire) {
+            return true;
+        }
         if recvs > 0 && queued > 0 {
             return true;
         }
@@ -126,6 +253,46 @@ impl GosChan {
             return recvs > 0 || queued == 0;
         }
         self.cap < 0 || (queued as i64) < self.cap
+    }
+
+    /// Records that no `Receiver` is left and releases every sender parked
+    /// on the channel, each of which gives its value back.
+    fn receivers_left(&self) {
+        self.receivers_gone.store(true, Ordering::Release);
+        {
+            let queued = storage_len(&self.buf.lock());
+            self.sync_ready(queued);
+        }
+        wake_all(self);
+    }
+
+    /// Gives back the share a send minted for `word`, a value no receiver
+    /// will ever take.
+    fn give_back(&self, word: i64) {
+        let kind = self.elem_kind.load(Ordering::Acquire);
+        if kind == 0 || word == 0 {
+            return;
+        }
+        let desc = self.elem_desc.lock().clone();
+        // SAFETY: the kind and descriptor the send recorded name the shape of
+        // the share `word` holds.
+        unsafe { release_sent_word(kind, &desc, word) };
+    }
+
+    /// [`Self::give_back`] for the element `val` addresses, which a send was
+    /// handed and never queued.
+    ///
+    /// # Safety
+    ///
+    /// `val` addresses one element of the channel's width.
+    unsafe fn give_back_element(&self, val: *const u8) {
+        // An element narrower than a word is a scalar, which owns nothing.
+        if self.elem_bytes < 8 {
+            return;
+        }
+        // SAFETY: the element is at least a word wide (checked above) and `val`
+        // addresses it (this function's contract).
+        self.give_back(unsafe { element_word(val) });
     }
 
     /// Re-reads this channel's readiness and applies the difference to the
@@ -169,6 +336,7 @@ pub extern "C" fn gos_rt_chan_new(elem_bytes: u32, cap: i64) -> *mut GosChan {
             elem_kind: AtomicI64::new(0),
             elem_desc: PlMutex::new(Vec::new()),
             wakers: crate::wake::WakerSet::new(),
+            receivers_gone: std::sync::atomic::AtomicBool::new(false),
         });
         // SAFETY: `chan` is the counted node just allocated, or null, which
         // `gos_rt_rc_mark_shared` accepts.
@@ -187,6 +355,8 @@ pub extern "C" fn gos_rt_chan_new(elem_bytes: u32, cap: i64) -> *mut GosChan {
 /// reaches the coroutine boundary rather than being converted to a sentinel.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_chan_send(c: *mut GosChan, val: *const u8) {
+    // SAFETY: a channel argument is null or a live channel or `Receiver` end.
+    let c = unsafe { chan_of(c) };
     let sent_on_closed = ffi_entry!({
         if c.is_null() || val.is_null() {
             return false;
@@ -196,6 +366,13 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_send(c: *mut GosChan, val: *const u8
         let chan = unsafe { &*c };
         if *chan.closed.lock() {
             return true;
+        }
+        // No receiver can ever take the value, so the send completes and
+        // gives it back rather than waiting forever.
+        if chan.receivers_gone.load(Ordering::Acquire) {
+            // SAFETY: `val` addresses one element of the channel's width (C-ABI contract).
+            unsafe { chan.give_back_element(val) };
+            return false;
         }
         let bytes_len = chan.elem_bytes as usize;
         let mut queued_unbuffered = false;
@@ -223,6 +400,25 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_send(c: *mut GosChan, val: *const u8
             // sending into one already closed.
             if *chan.closed.lock() {
                 return true;
+            }
+            // Every receiver went while this send waited: its value is taken
+            // back out of the channel, if it was queued, and given back.
+            if chan.receivers_gone.load(Ordering::Acquire) {
+                let queued = if queued_unbuffered {
+                    take_by_id(&mut guard, send_id)
+                } else {
+                    None
+                };
+                chan.sync_ready(storage_len(&guard));
+                drop(guard);
+                match queued {
+                    Some(word) => chan.give_back(word),
+                    // SAFETY: `val` addresses one element of the channel's width (C-ABI
+                    // contract).
+                    None if !queued_unbuffered => unsafe { chan.give_back_element(val) },
+                    None => {}
+                }
+                return false;
             }
             chan.sync_ready(storage_len(&guard));
             if chan.cap == 0 && !queued_unbuffered {
@@ -406,6 +602,8 @@ fn wake_all(chan: &GosChan) {
 /// blocking [`gos_rt_chan_send`] does.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_chan_try_send(c: *mut GosChan, val: *const u8) -> i32 {
+    // SAFETY: a channel argument is null or a live channel or `Receiver` end.
+    let c = unsafe { chan_of(c) };
     let outcome = ffi_entry!({
         if c.is_null() || val.is_null() {
             return 0;
@@ -415,6 +613,9 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_try_send(c: *mut GosChan, val: *cons
         let chan = unsafe { &*c };
         if *chan.closed.lock() {
             return CLOSED_SEND;
+        }
+        if chan.receivers_gone.load(Ordering::Acquire) {
+            return 0;
         }
         let bytes_len = chan.elem_bytes as usize;
         let mut guard = chan.buf.lock();
@@ -455,6 +656,8 @@ const CLOSED_SEND: i32 = -2;
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_chan_recv(c: *mut GosChan, out: *mut u8) -> i32 {
+    // SAFETY: a channel argument is null or a live channel or `Receiver` end.
+    let c = unsafe { chan_of(c) };
     ffi_entry!({
         if c.is_null() || out.is_null() {
             return 0;
@@ -539,6 +742,8 @@ pub unsafe extern "C" fn gos_rt_chan_recv(c: *mut GosChan, out: *mut u8) -> i32 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_chan_try_recv(c: *mut GosChan, out: *mut u8) -> i32 {
+    // SAFETY: a channel argument is null or a live channel or `Receiver` end.
+    let c = unsafe { chan_of(c) };
     ffi_entry!({
         if c.is_null() || out.is_null() {
             return 0;
@@ -564,6 +769,8 @@ pub unsafe extern "C" fn gos_rt_chan_try_recv(c: *mut GosChan, out: *mut u8) -> 
 /// disc=1 → None) so callers don't need to manage an out-pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_chan_recv_option(c: *mut GosChan) -> i128 {
+    // SAFETY: a channel argument is null or a live channel or `Receiver` end.
+    let c = unsafe { chan_of(c) };
     ffi_entry!({
         let mut out = 0i64;
         // SAFETY: `c` is this shim's argument, null or live for the call (C-ABI contract), which
@@ -579,6 +786,8 @@ pub unsafe extern "C" fn gos_rt_chan_recv_option(c: *mut GosChan) -> i128 {
 /// but non-blocking (returns None immediately when the buffer is empty).
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_chan_try_recv_option(c: *mut GosChan) -> i128 {
+    // SAFETY: a channel argument is null or a live channel or `Receiver` end.
+    let c = unsafe { chan_of(c) };
     ffi_entry_passthrough!({
         let mut out = 0i64;
         // SAFETY: `c` is this shim's argument, null or live for the call (C-ABI contract), which
@@ -654,6 +863,8 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_recv_ctx_option(
     c: *mut GosChan,
     ctx_handle: *const super::context::GosCtx,
 ) -> i128 {
+    // SAFETY: a channel argument is null or a live channel or `Receiver` end.
+    let c = unsafe { chan_of(c) };
     ffi_entry_passthrough!({
         // SAFETY: `c` is this shim's argument, null or live for the call (C-ABI contract).
         let (disc, payload) = unsafe { chan_recv_ctx_handle(c, ctx_handle) };
@@ -677,6 +888,8 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_recv_ctx(
     ctx_handle: *const super::context::GosCtx,
     out: *mut i64,
 ) -> i32 {
+    // SAFETY: a channel argument is null or a live channel or `Receiver` end.
+    let c = unsafe { chan_of(c) };
     ffi_entry_passthrough!({
         // SAFETY: `c` is this shim's argument, null or live for the call (C-ABI contract).
         let (disc, payload) = unsafe { chan_recv_ctx_handle(c, ctx_handle) };
@@ -735,6 +948,8 @@ unsafe fn chan_recv_ctx_handle(
 /// # Safety
 /// `c` is null or a live channel from `gos_rt_chan_new`.
 pub unsafe fn chan_recv_cancellable(c: *mut GosChan, source: &impl CancelSource) -> (i64, i64) {
+    // SAFETY: a channel argument is null or a live channel or `Receiver` end.
+    let c = unsafe { chan_of(c) };
     {
         // Check before parking: an already-cancelled context
         // short-circuits without touching the channel.
@@ -840,6 +1055,38 @@ fn storage_contains_id(storage: &ChanStorage, id: u64) -> bool {
     }
 }
 
+/// Removes the value queued under `id`, answering its element word.
+fn take_by_id(storage: &mut ChanStorage, id: u64) -> Option<i64> {
+    match storage {
+        ChanStorage::I64(d) => {
+            let at = d.iter().position(|(msg_id, _)| *msg_id == id)?;
+            d.remove(at).map(|(_, word)| word)
+        }
+        ChanStorage::Bytes(d) => {
+            let at = d.iter().position(|(msg_id, _)| *msg_id == id)?;
+            d.remove(at).map(|(_, bytes)| {
+                let mut tmp = [0u8; 8];
+                let n = bytes.len().min(8);
+                tmp[..n].copy_from_slice(&bytes[..n]);
+                i64::from_ne_bytes(tmp)
+            })
+        }
+    }
+}
+
+/// The element word an element's first eight bytes hold: the word whose share
+/// a send minted.
+///
+/// # Safety
+///
+/// `val` addresses at least eight readable bytes.
+unsafe fn element_word(val: *const u8) -> i64 {
+    let mut tmp = [0u8; 8];
+    // SAFETY: `val` addresses eight readable bytes (this function's contract).
+    unsafe { std::ptr::copy_nonoverlapping(val, tmp.as_mut_ptr(), 8) };
+    i64::from_ne_bytes(tmp)
+}
+
 /// # Safety
 ///
 /// `val` addresses `bytes_len` readable bytes.
@@ -942,6 +1189,8 @@ pub(crate) fn chan_close_idempotent(chan: &GosChan) -> bool {
 /// aborts the whole process. Callers may ignore the return value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_chan_close(c: *mut GosChan) -> i32 {
+    // SAFETY: a channel argument is null or a live channel or `Receiver` end.
+    let c = unsafe { chan_of(c) };
     // `None` = null channel, `Some(false)` = already closed. The close
     // itself runs under the FFI catch-guard; the double-close panic is
     // raised below, *outside* the guard, so a goroutine-scoped unwind
@@ -983,6 +1232,8 @@ pub unsafe extern "C" fn gos_rt_chan_drop(c: *mut GosChan) {
 /// type is known; writing the same kind again is the common case.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_chan_set_elem_kind(c: *mut GosChan, kind: i64) {
+    // SAFETY: a channel argument is null or a live channel or `Receiver` end.
+    let c = unsafe { chan_of(c) };
     ffi_entry!({
         if c.is_null() {
             return;
@@ -999,6 +1250,8 @@ pub unsafe extern "C" fn gos_rt_chan_set_elem_kind(c: *mut GosChan, kind: i64) {
 /// the teardown walks to give those back.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_chan_set_elem_desc(c: *mut GosChan, desc: *const std::ffi::c_char) {
+    // SAFETY: a channel argument is null or a live channel or `Receiver` end.
+    let c = unsafe { chan_of(c) };
     ffi_entry!({
         if c.is_null() || desc.is_null() {
             return;
@@ -1249,7 +1502,7 @@ impl Drop for SelectBuilder {
                         // SAFETY: the arm's registration keeps the channel live
                         // until the release below, and the element holds the
                         // share its send minted.
-                        unsafe { (**c).release_unsent(element) };
+                        unsafe { (*chan_of(*c)).release_unsent(element) };
                     }
                     // SAFETY: the arm's registration took this share.
                     unsafe { chan_release(*c) };
@@ -1260,11 +1513,12 @@ impl Drop for SelectBuilder {
     }
 }
 
-/// Takes the builder's share of an arm's channel.
+/// Takes the builder's share of an arm's channel or `Receiver` end.
 fn retain_arm(c: *mut GosChan) {
     if !c.is_null() {
-        // SAFETY: an arm channel is live for its registration (C-ABI contract).
-        chan_retain(unsafe { &*c });
+        // SAFETY: an arm's channel or end is a live counted node for its
+        // registration (C-ABI contract).
+        unsafe { super::rc::gos_rt_rc_retain(c.cast()) };
     }
 }
 
@@ -1293,6 +1547,9 @@ pub unsafe extern "C" fn gos_rt_select_arm_recv(
         if b.is_null() {
             return;
         }
+        // The arm holds what it was handed - a `Receiver` end keeps the
+        // channel's receiver alive while the select waits - and reaches the
+        // channel through it.
         retain_arm(c);
         // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &mut *b }.arms.push(SelectArmRt::Recv(c, accepts));
@@ -1317,11 +1574,13 @@ pub unsafe extern "C" fn gos_rt_chan_send_select_arm(
         if b.is_null() {
             return;
         }
-        let width = if c.is_null() {
+        // SAFETY: a channel argument is null or a live channel or end.
+        let chan = unsafe { chan_of(c) };
+        let width = if chan.is_null() {
             0
         } else {
             // SAFETY: a non-null arm channel is live for the call (C-ABI contract).
-            unsafe { &*c }.elem_bytes as usize
+            unsafe { &*chan }.elem_bytes as usize
         };
         let element = if val.is_null() {
             vec![0; width]
@@ -1388,8 +1647,13 @@ pub unsafe extern "C-unwind" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64
             .arms
             .iter()
             .map(|a| match a {
-                SelectArmRt::Recv(c, accepts) => (0u8, *c, *accepts),
-                SelectArmRt::Send(c, element) => (1u8, *c, element.as_ptr() as i64),
+                // SAFETY: the arm holds a share of a live channel or `Receiver` end.
+                SelectArmRt::Recv(c, accepts) => (0u8, unsafe { chan_of(*c) }, *accepts),
+                SelectArmRt::Send(c, element) => {
+                    // SAFETY: the arm holds a share of a live channel or `Sender` end.
+                    let chan = unsafe { chan_of(*c) };
+                    (1u8, chan, element.as_ptr() as i64)
+                }
                 SelectArmRt::Default => (2u8, std::ptr::null_mut(), 0i64),
             })
             .collect();

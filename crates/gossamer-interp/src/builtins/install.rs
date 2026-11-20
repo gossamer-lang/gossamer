@@ -2010,6 +2010,10 @@ fn install_concurrency_builtins(globals: &mut Vec<(&'static str, Value)>) {
         builtin("Channel::send", builtin_channel_send),
     ));
     globals.push((
+        "Channel::try_send",
+        builtin("Channel::try_send", builtin_channel_try_send),
+    ));
+    globals.push((
         "Channel::recv",
         builtin("Channel::recv", builtin_channel_recv),
     ));

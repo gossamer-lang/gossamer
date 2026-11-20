@@ -1,0 +1,9 @@
+// ERROR: GL0064
+
+fn is_odd(n: i64) -> bool {
+    n % 2 == 1
+}
+
+fn main() {
+    println(is_odd(-3))
+}

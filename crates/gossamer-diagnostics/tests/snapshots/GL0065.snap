@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GL0065]: A task's handle bound by `let task = spawn(..)` and never used. - here
+--- framed ---
+error[GL0065]: A task's handle bound by `let task = spawn(..)` and never used.
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

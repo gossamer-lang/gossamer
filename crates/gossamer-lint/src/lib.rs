@@ -182,15 +182,18 @@ pub const DAY_ONE_LINTS: &[&str] = &[
     "non_camel_case_types",
     "non_snake_case",
     "non_upper_case_globals",
+    // A spawned task's handle that nothing joins.
+    "unjoined_task",
     // Type-aware: reported from the checked program through [`leveled`].
     "lossy_cast",
     "closure_self_cycle",
+    "signed_remainder",
 ];
 
 /// Lints whose findings need the checked program's types. The syntax-only
 /// pass [`run`] reports none of them; a caller holding the types computes
 /// the findings and hands them to [`leveled`].
-pub const TYPED_LINTS: &[&str] = &["lossy_cast", "closure_self_cycle"];
+pub const TYPED_LINTS: &[&str] = &["lossy_cast", "closure_self_cycle", "signed_remainder"];
 
 /// Runs every enabled lint over `source_file` (parsed from `src`) and
 /// returns their diagnostics in deterministic order (lint code asc,
@@ -412,6 +415,8 @@ pub fn lint_code(id: &str) -> Code {
         "redundant_default_derive" => Code("GL0061"),
         "lossy_cast" => Code("GL0062"),
         "closure_self_cycle" => Code("GL0063"),
+        "signed_remainder" => Code("GL0064"),
+        "unjoined_task" => Code("GL0065"),
         "non_camel_case_types" => Code("GL0057"),
         "non_snake_case" => Code("GL0058"),
         "non_upper_case_globals" => Code("GL0059"),

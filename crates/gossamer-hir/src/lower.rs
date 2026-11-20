@@ -757,6 +757,7 @@ mod map_index;
 mod patterns;
 mod simd;
 mod try_op;
+mod window_place;
 
 struct Lowerer<'a> {
     resolutions: &'a Resolutions,
@@ -1237,7 +1238,14 @@ impl Lowerer<'_> {
         if let Some(wrapped) = self.lower_call_with_entry_args(expr) {
             return wrapped;
         }
-        self.lower_expr_plain(expr)
+        let lowered = self.lower_expr_plain(expr);
+        if matches!(
+            expr.kind,
+            AstExprKind::Call { .. } | AstExprKind::MethodCall { .. }
+        ) {
+            return self.hoist_window_writes(lowered);
+        }
+        lowered
     }
 
     /// A call passing `&mut` to a place below a map entry (`f(&mut m[k])`,
@@ -1286,6 +1294,7 @@ impl Lowerer<'_> {
             return None;
         }
         let mut call = self.lower_expr_plain(expr);
+        call = self.hoist_window_writes(call);
         for entry in entries.into_iter().rev() {
             call = self.close_entry(entry, Vec::new(), Some(call), expr.span);
         }
@@ -2155,7 +2164,27 @@ impl Lowerer<'_> {
         }
         let chosen = self.table.operator_method(place.id).map(str::to_string);
         let lowered_place = self.lower_expr(place);
+        if self.writes_through_window(&lowered_place) {
+            let mut stmts = Vec::new();
+            let place = self.flatten_window_place(lowered_place, &mut stmts);
+            let lowered_value = self.lower_expr(value);
+            let assign = self.assign_through(op, chosen, place, lowered_value, outer.span);
+            return self.with_window_bindings(stmts, assign, outer.span);
+        }
         let lowered_value = self.lower_expr(value);
+        self.assign_through(op, chosen, lowered_place, lowered_value, outer.span)
+    }
+
+    /// `place op value` over lowered operands, through the operator method
+    /// the checker chose for a compound assignment when there is one.
+    fn assign_through(
+        &mut self,
+        op: AssignOp,
+        chosen: Option<String>,
+        lowered_place: HirExpr,
+        lowered_value: HirExpr,
+        span: Span,
+    ) -> HirExprKind {
         if let Some(method) = chosen
             && !matches!(op, AssignOp::Assign)
         {
@@ -2164,7 +2193,7 @@ impl Lowerer<'_> {
             let ty = lowered_place.ty;
             let combined = HirExpr {
                 id: self.fresh(),
-                span: outer.span,
+                span,
                 ty,
                 kind: wrapping_call(&method, lowered_place.clone(), lowered_value),
             };
@@ -2173,7 +2202,7 @@ impl Lowerer<'_> {
                 value: Box::new(combined),
             };
         }
-        self.assign_kind(op, lowered_place, lowered_value, outer.span)
+        self.assign_kind(op, lowered_place, lowered_value, span)
     }
 
     /// `place op value` over already-lowered operands; a compound operator

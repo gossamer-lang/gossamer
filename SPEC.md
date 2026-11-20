@@ -413,6 +413,13 @@ of the model:
   `!5u8 == 250`, `200u8 << 2 == 32`, `-128i8 / -1 == -128`, and
   `i64::MIN / -1 == i64::MIN`. Unary `-` on an unsigned integer is GT0001:
   `0 -% x` is the value that wraps, `-(x as i64)` the signed negation.
+- `/` truncates toward zero and `%` answers a remainder with the sign of
+  the value it divides, as in C, Rust, and Go: `-7 / 2 == -3` and
+  `-7 % 2 == -1`. `x.rem_euclid(k)` answers the remainder in `0..k` for
+  every sign, and `x.div_euclid(k)` the matching quotient. A comparison of
+  `x % k` with a positive number, where `x` is signed and may be negative,
+  is the lint `GL0064`: `n % 2 == 1` is false for every negative odd `n`,
+  and `n % 2 != 0` is the test that holds for every sign.
 - `u64`/`usize` values use the same 64-bit payload as signed integers,
   but arithmetic, comparison, shifts, division/remainder, and display are
   type-aware on every tier. `as%` reinterprets or truncates to the target
@@ -619,7 +626,18 @@ range has exactly one - the part that overlaps. It is also the rule
 **A `String` slice takes byte offsets** (§3.2), the same index space
 `substring`, `byte_at`, and `as_bytes` use, and snaps outward to codepoint
 boundaries so the result is always valid text. `s.len()` and `s[i]` count
-Unicode scalars, so do not mix the two spellings on non-ASCII text.
+Unicode scalars, so do not mix the two spellings on non-ASCII text. A
+`String` is read by index and never written by one: `s[i] = c` is GT0130,
+since a character's UTF-8 width can differ from the one it would replace;
+build the new text (`s.replacen(old, new, 1)`) instead.
+Neither index space follows what a reader sees as one character: a
+grapheme cluster such as `"👍🏽"` (a thumbs-up and a skin-tone modifier) or
+`"é"` written as `e` plus a combining accent is several scalars, and a cut
+between them leaves half of it. Text cut for display, such as a name
+shortened to fit, is cut at cluster boundaries with
+`std::unicode::graphemes(s)`, which answers the clusters in order
+(`unicode::graphemes(name).take(n).join("")`), and measured with
+`unicode::grapheme_count` or, for terminal columns, `unicode::str_width`.
 
 ### 3.3b Mutable windows
 
@@ -656,6 +674,12 @@ row[0] = 7
 - A window of a window narrows the same storage.
 - A named window takes its bounds, and every index on the way to its
   sequence, where it is named.
+- A write through a range is a write through its window:
+  `xs[lo..hi][i] = v`, `xs[lo..hi][i] += v`, `vs[lo..hi][i].field = v`,
+  `&mut xs[lo..hi][i]`, and a mutating method on `g[lo..hi][i]` all reach
+  `xs[lo + i]` (and its fields), below a map entry as anywhere else. The
+  bounds clamp as a range read's do, and an index outside the window panics
+  as indexing it would (`vec index out of bounds: the len is ..`).
 - Only the mutable form is a window. `&xs[lo..hi]` and `&mut s[lo..hi]` on a
   `String` would reference a copy, and are GT0075.
 
@@ -1480,10 +1504,14 @@ struct-payload (`Rect { w, h }`) variants may be mixed freely:
 `Default` (which selects the `#[default]` unit variant) all derive and
 run identically on every tier.
 
-A struct / tuple used as a `Map` / `Set` key is hashed and compared by
-value on every tier - so two equal-valued keys at distinct allocations resolve
-to the same entry - with no `#[derive(Hash)]`; hashing is automatic, and
-`#[derive(Hash)]` is rejected (`GT0025`).
+A struct, tuple, fixed array, `Vec`, or float used as a `Map` / `Set` key is
+hashed and compared by value on every tier - so two equal-valued keys at distinct
+allocations resolve to the same entry - with no `#[derive(Hash)]`; hashing is
+automatic, and `#[derive(Hash)]` is rejected (`GT0025`). The container keeps a
+key of its own, so writing the binding a key came from afterwards never moves
+a stored key. Float keys compare by IEEE total order, unlike Rust, which
+has no float keys: `-0.0` and `0.0` are two keys, a NaN key finds itself, and
+a `BTreeMap` orders negatives, `-0.0`, `0.0`, positives, then NaN.
 
 ---
 
@@ -1812,6 +1840,17 @@ observed through its join handle is reported on stderr at exit instead of
 vanishing. The root's policy is `CollectAll`, so one child's failure never
 cancels another's work.
 
+When `main` returns, the root cohort drains: the program waits for the
+children `main` left running, up to 30 seconds, then exits without the ones
+still running and names them on stderr. Children parked where nothing left
+in the program can wake them (every remaining goroutine waiting on a
+channel, a lock, or a join, with no timer, I/O, or outside thread able to
+act) can never finish, so the drain names them and exits at once. The exit
+status is the one `main` gave either way. `main` is exempt from `cohort { }`
+for this reason, and so it is also where a task can be forgotten: a handle
+bound by `let task = spawn(..)` and never used is the lint `GL0065`, since
+nothing waits for that task's work before `main` goes on.
+
 The root cohort is `main`'s alone. Its extent is the process, which is the
 same extent `main` has, and is longer than any other function's - so a
 `spawn` in a function other than `main` must be written lexically inside a
@@ -2130,6 +2169,15 @@ one impl of an operator per right-hand type: `impl Mul for V2` answers
 `v * w`, and `impl Mul<f64> for V2` answers `v * 2.0`, the right operand's type
 choosing between them. An impl may write `type Output = T`, which must name
 the type its method returns.
+
+`value[i]` on a user type calls the `index` method of its `impl Index`
+(`IndexMut` is the same contract under another name), and answers what the
+method returns. The answer is a value, not a place, so `value[i] = v` on such
+a type is GT0131: write the field `index` reads from, or give the type a
+method that sets an element. Likewise a field or element of a call's result
+(`make().x = 1`) is a temporary and cannot be assigned (GT0078);
+`m.or_insert(k, d).field = v` is the one call that names a place, the map's
+entry.
 
 ```gossamer
 struct V2 { x: f64, y: f64 }
@@ -2861,6 +2909,8 @@ Channel operations (non-`select`):
 
 - `tx.send(v)` - blocks until a receiver is ready (unbuffered) or
   buffer has capacity.
+- `tx.try_send(v) -> bool` - hands `v` over only if the channel can take it
+  now, and answers whether it did.
 - `rx.recv() -> Option<T>` - blocks until a sender sends a value or
   the channel is closed; returns `None` when the channel is closed and
   drained.
@@ -2869,6 +2919,33 @@ Channel operations (non-`select`):
   Receives drain buffered values then return `None`.
 
 Channels are many-to-many. Close only once.
+
+**A send with no receiver left completes.** Every copy of a channel's
+`Receiver` counts, and the moment the last one is released no send on the
+channel can ever be taken. From then a `send` completes at once and drops
+its value, a sender already waiting is released the same way, and
+`try_send` answers `false`. Without this, a goroutine whose value nobody
+will ever take would wait, and hold that value, for the life of the program:
+
+```gossamer
+for i in 0..rounds {
+    let tx, rx = channel()
+    spawn(|| tx.send(work(i)))
+    spawn(|| tx.send(work(i + 1)))
+    let first = rx.recv()
+}   // `rx` goes here, so the slower worker's send completes
+```
+
+**The last sender going closes the channel.** Every copy of a channel's
+`Sender` counts the same way, and releasing the last one closes the channel
+as `tx.close()` does: a receive drains what was sent and then answers
+`None`, so `while let Some(v) = rx.recv()` ends once every producer is done
+with its sender.
+
+A binding is released when its block ends, or after its last use, on every
+tier; a spawned closure's captures are its own copies, so the spawning
+binding is free after the `spawn`. A channel end kept in a collection or a
+struct stays alive for as long as that value lives.
 
 **Deadlock is reported, not waited on.** When a channel operation would
 block and **no goroutine is left running**, the caller is the whole program:

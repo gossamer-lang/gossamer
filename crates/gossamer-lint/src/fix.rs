@@ -14,7 +14,7 @@ use gossamer_ast::{
 use gossamer_lex::Span;
 
 use crate::Registry;
-use crate::lints::{block_reassigns, walk_block, walk_expr};
+use crate::lints::{block_reassigns, is_spawn_call, walk_block, walk_expr};
 
 /// An auto-applicable source edit.
 #[derive(Debug, Clone)]
@@ -127,12 +127,14 @@ fn fix_unused_variable(sf: &SourceFile, source: &str, out: &mut Vec<Fix>) {
         };
         let mut bindings: Vec<(String, Span)> = Vec::new();
         for stmt in &block.stmts {
-            if let StmtKind::Let { pattern, .. } = &stmt.kind {
-                if let Some((name, span, _)) = ident_name(pattern) {
-                    if !name.starts_with('_') {
-                        bindings.push((name.to_string(), span));
-                    }
-                }
+            // A task's handle left unnamed is a task nothing joins; the
+            // `unjoined_task` lint answers it with `join`, not a rename.
+            if let StmtKind::Let { pattern, init, .. } = &stmt.kind
+                && !init.as_ref().is_some_and(|init| is_spawn_call(init))
+                && let Some((name, span, _)) = ident_name(pattern)
+                && !name.starts_with('_')
+            {
+                bindings.push((name.to_string(), span));
             }
         }
         let mut used: BTreeSet<String> = BTreeSet::new();
@@ -359,6 +361,13 @@ mod tests {
         let src = "fn f() { let foo = 1; }\n";
         let out = run(src);
         assert!(out.contains("let _foo = 1"), "got: {out}");
+    }
+
+    #[test]
+    fn unjoined_task_handle_is_not_renamed() {
+        let src = "fn main() { let task = spawn(|| 1); }\n";
+        let out = run(src);
+        assert!(out.contains("let task = spawn"), "got: {out}");
     }
 
     #[test]

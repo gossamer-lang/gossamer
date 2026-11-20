@@ -1,0 +1,42 @@
+// A write through a range of a sequence lands in the sequence itself:
+// `xs[lo..hi][i] = v` writes `xs[lo + i]`, with the range clamped as a slice
+// is and the index checked against the window. The same holds for a
+// compound assignment, a field or nested element below the window, a
+// window of a window, `&mut` of a window element, a mutating method on one,
+// and any of these below a map entry.
+struct S { n: i64 }
+
+fn bump(x: &mut i64) { *x += 100 }
+
+fn main() {
+    let mut xs = #[1, 2, 3, 4, 5, 6]
+    xs[1..3][0] = 9
+    xs[0..2][1] += 1
+    xs[1..5][1..=2][1] = 40
+    xs[4..99][0] = 7
+    (&mut xs[2..4])[1] *= 2
+    bump(&mut xs[1..3][1])
+    xs[0..3].sort()
+    println(xs)
+
+    let mut a = [1, 2, 3, 4]
+    a[1..3][1] = 8
+    println(a)
+
+    let mut vs = #[S { n: 1 }, S { n: 2 }]
+    vs[0..2][1].n = 7
+    println(vs[1].n)
+
+    let mut g = #[#[1, 2], #[3, 4]]
+    g[0..1][0][1] = 9
+    g[0..2][1].push(5)
+    println(g)
+
+    let mut m = { "k": #[1, 2, 3] }
+    m["k"][1..3][0] = 9
+    m["k"][0..2][1] += 1
+    bump(&mut m["k"][1..3][1])
+    let mut h = { "a": #[#[1], #[2]] }
+    h["a"][0..2][1].push(7)
+    println(f"{m} {h}")
+}

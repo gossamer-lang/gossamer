@@ -1288,20 +1288,25 @@ fn main() {
 ///
 /// The spawns are `main`'s own: it is the one function whose children may
 /// attach to the root cohort, everywhere else `GT0086` requires a block.
+/// Each goroutine waits to receive on a channel whose only sender it holds
+/// itself.
 #[test]
 fn stranded_goroutines_on_several_channels_still_exit() {
     let src = r#"
 use std::sync::channel
 
+fn wait_on_itself() {
+    let tx, rx = channel::<i64>()
+    let got = rx.recv()
+    tx.send(0)
+}
+
 fn main() {
     for r in 1..=3 {
-        let tx, rx = channel()
         for i in 0..2 {
-            let tx = tx
-            spawn(|| { tx.send(r * 10 + i) }, reason: "w")
+            spawn(|| wait_on_itself(), reason: "w")
         }
-        let first = rx.recv()
-        println("round {r}: {first}")
+        println("round {r}")
     }
     println("main done")
 }
@@ -1313,8 +1318,8 @@ fn main() {
     assert_eq!(run.2, Some(0), "vm did not exit: stderr={}", run.1);
     assert!(run.0.contains("main done"), "vm stdout: {:?}", run.0);
     assert!(
-        run.1.contains("had not finished"),
-        "the drain must name what it left running: {:?}",
+        run.1.contains("can never finish"),
+        "the drain must name what it left blocked: {:?}",
         run.1
     );
 
@@ -1330,7 +1335,7 @@ fn main() {
         native.1
     );
     assert!(
-        native.1.contains("had not finished"),
+        native.1.contains("can never finish"),
         "native drain report: {:?}",
         native.1
     );
