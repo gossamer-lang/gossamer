@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.82.3 - Remainder and task lints, goroutines left blocked at exit
+
+- New lint `signed_remainder` (`GL0064`): `x % k == r` with a positive `r` while `x` is signed and may be negative, which is false for every negative `x` because `%` keeps the sign of the value it divides. The help gives `x % 2 != 0` for oddness and `x.rem_euclid(k) == r`. It reports in `gos check`, `gos lint`, the language server, and MCP.
+- New lint `unjoined_task` (`GL0065`): a handle bound by `let task = spawn(..)` and never used, so nothing waits for the task's work. It takes the place of the `unused_variable` report there, whose help and `--fix` renamed the handle to `_task`.
+- Goroutines `main` leaves parked on channels, locks, or joins that nothing left can serve are named and left as soon as `main` returns, on every tier, instead of after the 30 second exit drain.
+- A VM program with more than 1024 goroutines blocked at once no longer hangs: a goroutine spawned after them waited for a worker that never came.
+- SPEC and SKILL say that string slices and indices can split a grapheme cluster, and how to cut display text with `unicode::graphemes`.
+
 ## 0.82.2 - Checked casts, weak captures, definite assignment
 
 - `as` checks that a value fits its target and panics with `cast overflow` when it does not, as `+` panics on overflow: `300 as u8`, `-1 as u64`, `1e20 as i64`, and a NaN cast to an integer all stop the program on every tier, where they wrapped or saturated silently. `as%` is the explicit wrapping cast (`300 as% u8 == 44`), saturating a float; `v.clamp(lo, hi) as T` saturates. The test is compiled only where the operand may not fit.

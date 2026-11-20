@@ -289,6 +289,25 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
             lives and `None` once it is gone. `o.downgrade()` written before the\n\
             closure and upgraded inside it is the same capture."
         }
+        "signed_remainder" => {
+            "A remainder compared with a positive number while the value divided\n\
+            may be negative: `n % 2 == 1`. `%` answers a remainder with the sign\n\
+            of the value it divides, as in C, Rust, and Go, so `-3 % 2` is `-1`\n\
+            and the comparison is false for every negative odd `n`. Test\n\
+            oddness with `n % 2 != 0`, or compare the remainder in `0..k` with\n\
+            `n.rem_euclid(k) == r`, the same for every sign. A value shown to be\n\
+            at least zero (an unsigned type, a mask, a literal `clamp`, a `for`\n\
+            over a range from zero, an `enumerate` index) is not reported."
+        }
+        "unjoined_task" => {
+            "A task's handle bound by `let task = spawn(..)` and never used.\n\
+            Nothing joins the task, so the program goes on without waiting for\n\
+            it, and `main` can print, or return, before the task's work is done.\n\
+            Call `task.join()` where that work must be finished, which also\n\
+            answers the task's result. A task meant to run on its own is spawned\n\
+            without a binding, `spawn(..)`; inside a `cohort { }` the cohort\n\
+            joins every task when it ends."
+        }
         "non_upper_case_globals" => {
             "A const or static whose name is not `SCREAMING_SNAKE_CASE`, as Rust\n\
             spells them. A single name in a pattern matches the const it names,\n\

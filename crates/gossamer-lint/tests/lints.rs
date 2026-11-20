@@ -31,6 +31,23 @@ fn unused_variable_fires_on_let_without_use() {
 }
 
 #[test]
+fn unjoined_task_fires_on_a_spawn_handle_never_used() {
+    let diags = lint("fn main() {\n let task = spawn(|| 1i64)\n println(1)\n}\n");
+    assert!(has_code(&diags, "GL0065"), "got {:?}", diags_codes(&diags));
+    assert!(!has_code(&diags, "GL0001"), "got {:?}", diags_codes(&diags));
+}
+
+#[test]
+fn unjoined_task_silenced_when_joined_or_unbound() {
+    let joined = lint("fn main() {\n let task = spawn(|| 1i64)\n let _n = task.join()\n}\n");
+    assert!(!has_code(&joined, "GL0065"), "{:?}", diags_codes(&joined));
+    let unbound = lint("fn main() {\n spawn(|| 1i64)\n}\n");
+    assert!(!has_code(&unbound, "GL0065"), "{:?}", diags_codes(&unbound));
+    let ignored = lint("fn main() {\n let _task = spawn(|| 1i64)\n}\n");
+    assert!(!has_code(&ignored, "GL0065"), "{:?}", diags_codes(&ignored));
+}
+
+#[test]
 fn unused_variable_silenced_by_underscore_prefix() {
     let diags = lint("fn main() { let _x = 1i64 }\n");
     assert!(!has_code(&diags, "GL0001"));

@@ -872,6 +872,9 @@ struct MainWait {
     /// channel wait has none of its own: the channel counts say whether it
     /// can complete.
     still_waiting: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    /// What a wait that can never complete does instead of stopping the
+    /// program with the deadlock report.
+    on_blocked: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 static MAIN_WAIT: Mutex<Option<MainWait>> = Mutex::new(None);
@@ -886,6 +889,7 @@ fn begin_main_wait(
         op: op.to_string(),
         on_channel,
         still_waiting,
+        on_blocked: None,
     });
 }
 
@@ -899,6 +903,32 @@ pub fn main_waits_on(op: &str, still_waiting: Arc<dyn Fn() -> bool + Send + Sync
         return;
     }
     begin_main_wait(op, false, Some(still_waiting));
+    check_program_blocked();
+}
+
+/// Records that `main`, having returned, waits for the goroutines it left
+/// running, which end only when `still_waiting` answers `false`. When every
+/// one of them is parked where nothing left in the program can wake it,
+/// `on_blocked` runs, on whichever thread notices, in place of the deadlock
+/// report: the program's work is done, and those goroutines are left as they
+/// are. Pair with [`end_main_wait`].
+pub fn main_drains(
+    op: &str,
+    still_waiting: Arc<dyn Fn() -> bool + Send + Sync>,
+    on_blocked: Arc<dyn Fn() + Send + Sync>,
+) {
+    if !is_main_thread() {
+        return;
+    }
+    {
+        let _change = begin_scheduler_change();
+        *MAIN_WAIT.lock() = Some(MainWait {
+            op: op.to_string(),
+            on_channel: false,
+            still_waiting: Some(still_waiting),
+            on_blocked: Some(on_blocked),
+        });
+    }
     check_program_blocked();
 }
 
@@ -926,12 +956,17 @@ pub fn check_program_blocked() {
     let Some(epoch) = settled_epoch() else {
         return;
     };
-    let (op, on_channel, still_waiting) = {
+    let (op, on_channel, still_waiting, on_blocked) = {
         let wait = MAIN_WAIT.lock();
         let Some(wait) = wait.as_ref() else {
             return;
         };
-        (wait.op.clone(), wait.on_channel, wait.still_waiting.clone())
+        (
+            wait.op.clone(),
+            wait.on_channel,
+            wait.still_waiting.clone(),
+            wait.on_blocked.clone(),
+        )
     };
     if PENDING_HANDOFFS.load(Ordering::Acquire) > 0 || EXTERNAL_ACTORS.load(Ordering::Acquire) > 0 {
         return;
@@ -960,7 +995,10 @@ pub fn check_program_blocked() {
     if !settled_since(epoch) {
         return;
     }
-    report_fatal_deadlock(&op);
+    match on_blocked {
+        Some(on_blocked) => on_blocked(),
+        None => report_fatal_deadlock(&op),
+    }
 }
 
 /// Threads and goroutines currently suspended inside a channel wait.

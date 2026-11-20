@@ -33,6 +33,7 @@ mod lossy_casts;
 mod normalize;
 pub mod printer;
 pub mod purity;
+mod signed_remainders;
 pub mod std_fn_eta;
 pub mod std_fn_values;
 pub mod stdlib_signatures;
@@ -98,6 +99,7 @@ pub use infer::{InferCtxt, UnifyError};
 pub use lossy_casts::{CastCheck, LOSSY_CAST_LINT, LossyCast, cast_check, find_lossy_casts};
 pub use normalize::normalize_caller_side_spellings;
 pub use printer::{public_type_name, render_public_ty, render_ty, stable_type_name};
+pub use signed_remainders::{SIGNED_REMAINDER_LINT, SignedRemainder, find_signed_remainders};
 pub use stdlib_signatures::{
     STD_FUNCTION_SIGNATURES, StdFunctionSignature, function_shape as stdlib_function_shape,
     function_signature as stdlib_function_signature,

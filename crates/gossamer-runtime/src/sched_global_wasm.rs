@@ -208,6 +208,15 @@ pub fn report_cancellable_wait_if_stuck(
 /// [`report_deadlock_if_stuck`].
 pub fn main_waits_on(_op: &str, _still_waiting: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) {}
 
+/// The browser settles every goroutine at its spawn, so `main` never drains
+/// one that is still waiting.
+pub fn main_drains(
+    _op: &str,
+    _still_waiting: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    _on_blocked: std::sync::Arc<dyn Fn() + Send + Sync>,
+) {
+}
+
 /// Records `main` leaving a wait. Inert on wasm.
 pub fn end_main_wait() {}
 

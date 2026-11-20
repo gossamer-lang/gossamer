@@ -9,11 +9,41 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 /// Called by the CLI entrypoint after `main` returns so spawned work
 /// has a chance to land before the process exits.
 pub fn join_outstanding_goroutines() {
-    MAIN_RETURNED.store(true, Ordering::Release);
+    mark_main_returned();
+    // Goroutines the root cohort's drain found that nothing left can wake
+    // are left parked, as it reported.
+    if crate::stdlib_builtins::cohort::root_left_blocked() {
+        return;
+    }
     crate::value::wake_all_channel_waiters();
     if let Some(pool) = POOL.get() {
         pool.drain_until(exit_drain_deadline);
     }
+}
+
+/// Records that `main` has returned: from here a goroutine parked where
+/// nothing left can wake it is abandoned rather than reported.
+pub(crate) fn mark_main_returned() {
+    MAIN_RETURNED.store(true, Ordering::Release);
+}
+
+/// Whether, with `main` returned, every outstanding goroutine is parked on a
+/// channel, a lock, or a join that nothing left in the program can serve.
+pub(crate) fn program_is_stuck_past_main() -> bool {
+    gossamer_runtime::platform::CAN_BLOCK
+        && outstanding_goroutines() > 0
+        && settles_terminal(
+            || {
+                let waiting =
+                    CHANNEL_WAITERS.load(Ordering::Acquire) + JOIN_WAITERS.load(Ordering::Acquire);
+                (waiting as u64, participants_besides_main())
+            },
+            || {
+                a_waiter_is_cancelled()
+                    || crate::stdlib_builtins::context::deadline_pending()
+                    || crate::stdlib_builtins::cohort::deadline_pending()
+            },
+        )
 }
 
 /// The instant every wait on the exit path is bounded by, starting the
@@ -354,7 +384,7 @@ impl GoroutinePool {
         let workers = pool.workers.load(Ordering::Relaxed);
         if pool.idle.load(Ordering::Relaxed) > 0 {
             pool.cv.notify_one();
-        } else if workers - inner.parked < inner.target && workers < MAX_WORKERS {
+        } else if workers - inner.parked < inner.target {
             Self::start_worker(pool);
         }
     }
@@ -487,12 +517,12 @@ impl GoroutinePool {
 static POOL: OnceLock<Arc<GoroutinePool>> = OnceLock::new();
 
 const DEFAULT_MAX_WORKERS: usize = 4;
-/// Ceiling on worker threads. A goroutine blocked in a channel operation
-/// holds its worker, so this bounds how many may block at once. Each worker
-/// reserves a 16 MiB stack, but the reservation is virtual and only the
-/// pages actually used are committed, so the ceiling costs address space
-/// rather than memory. Reaching it means the program has more
-/// simultaneously-blocked goroutines than the host can back with threads.
+/// Ceiling on goroutines running at once, the most the starvation watchdog
+/// grows `target` to. A worker parked in a counted wait (a channel, a lock,
+/// a join) gives up its slot and a fresh worker takes it, so parked workers
+/// are not bounded here: like a blocked goroutine in the compiled tiers,
+/// each costs only memory, its stack's used pages, since the 16 MiB it
+/// reserves is address space.
 const MAX_WORKERS: usize = 1024;
 
 /// How long the starvation watchdog waits between progress checks. Short
@@ -823,6 +853,7 @@ impl ChannelWait {
             if let Some(pool) = POOL.get() {
                 pool.notify_drain();
             }
+            crate::stdlib_builtins::cohort::notify_root_drain();
             return Some(Self {
                 stuck: true,
                 cohort,
@@ -859,7 +890,11 @@ impl ChannelWait {
 /// goroutine that finishes shrinks the participants without entering a wait,
 /// and the ones already waiting would never look again.
 fn report_if_left_waiting() {
-    if !gossamer_runtime::platform::CAN_BLOCK || MAIN_RETURNED.load(Ordering::Acquire) {
+    if !gossamer_runtime::platform::CAN_BLOCK {
+        return;
+    }
+    if MAIN_RETURNED.load(Ordering::Acquire) {
+        crate::stdlib_builtins::cohort::notify_root_drain();
         return;
     }
     if CHANNEL_WAITERS.load(Ordering::Acquire) + JOIN_WAITERS.load(Ordering::Acquire) == 0 {
@@ -924,6 +959,9 @@ impl JoinWait {
         let main_returned = MAIN_RETURNED.load(Ordering::Acquire);
         // Past `main`, leftover goroutines are abandoned rather than reported,
         // as a compiled binary leaves them.
+        if main_returned {
+            crate::stdlib_builtins::cohort::notify_root_drain();
+        }
         if !main_returned
             && settles_terminal(
                 || {

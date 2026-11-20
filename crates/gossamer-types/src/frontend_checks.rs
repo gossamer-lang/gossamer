@@ -181,6 +181,16 @@ pub fn typed_lints(
         &registry,
         cycles,
     ));
+    let remainders = crate::find_signed_remainders(sf, resolutions, table, tcx)
+        .into_iter()
+        .map(|found| (found.span, found.title, Some(found.help)))
+        .collect();
+    out.extend(gossamer_lint::leveled(
+        crate::SIGNED_REMAINDER_LINT,
+        sf,
+        &registry,
+        remainders,
+    ));
     // Code the toolchain appended, and a dependency's own code, are not the
     // program's to change.
     let dependencies = dependency_spans(&sf.items);

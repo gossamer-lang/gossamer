@@ -350,6 +350,23 @@ pub const REGISTRY: &[(&str, &str)] = &[
             `Option` that is `None` once the value is gone.",
     ),
     (
+        "GL0064",
+        "A remainder compared with a positive number while the value divided\n\
+            may be negative: `n % 2 == 1`. `%` keeps the sign of the value it\n\
+            divides, so `-3 % 2` is `-1` and the comparison is false for every\n\
+            negative odd `n`. Test oddness with `n % 2 != 0`, or compare the\n\
+            remainder in `0..k` with `n.rem_euclid(k) == r`. A value shown to be\n\
+            at least zero is not reported.",
+    ),
+    (
+        "GL0065",
+        "A task's handle bound by `let task = spawn(..)` and never used.\n\
+            Nothing joins the task, so `main` can go on, and finish, before the\n\
+            task's work is done. Call `task.join()` where that work must be\n\
+            finished; a task meant to run on its own is spawned without a\n\
+            binding.",
+    ),
+    (
         "GM0001",
         "Generic monomorphization received a type substitution that the\n\
                      compiler does not yet support - typically a generic parameter\n\

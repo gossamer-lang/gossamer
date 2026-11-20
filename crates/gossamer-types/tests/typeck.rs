@@ -5576,3 +5576,43 @@ fn main() {
         .collect();
     assert_eq!(lines, vec![10, 12, 14]);
 }
+
+#[test]
+fn signed_remainder_reports_only_a_dividend_that_may_be_negative() {
+    let source = r"struct P { n: i64 }
+
+fn main() {
+    let n: i64 = -3
+    let k: i64 = 4
+    let p = P { n: 5 }
+    let u: u64 = 3
+    println(n % 2 == 1)
+    println(n % 3 != 2)
+    println(n % k == 1)
+    println(p.n % 2 == 1)
+    println(u % 2 == 1)
+    println(n % 2 == 0)
+    println(n % 2 == -1)
+    println((n & 7) % 2 == 1)
+    println(n % 2 == 2)
+    for i in 0..10 { println(i % 2 == 1) }
+    for (i, x) in #[5, 6].iter().enumerate() { println(i % 2 == 1 && x > 0) }
+    for i in (1..10).rev() { println(i % 3 == 1) }
+    let c = 4
+    println(c % 2 == 1)
+}
+";
+    let mut map = SourceMap::new();
+    let file = map.add_file("test.gos", source.to_string());
+    let (mut sf, parse_diags) = parse_source_file(source, file);
+    assert!(parse_diags.is_empty(), "parse errors: {parse_diags:?}");
+    let (mut resolutions, _) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
+    let mut tcx = TyCtxt::new();
+    let (table, _) = typecheck_source_file(&sf, &resolutions, &mut tcx);
+    let lines: Vec<usize> = gossamer_types::find_signed_remainders(&sf, &resolutions, &table, &tcx)
+        .iter()
+        .map(|found| source[..found.span.start as usize].lines().count())
+        .collect();
+    assert_eq!(lines, vec![8, 9, 10, 11]);
+}

@@ -22,6 +22,7 @@ use crate::naming;
 pub(crate) fn run_lint(id: &str, sf: &SourceFile, src: &str) -> Vec<Finding> {
     match id {
         "unused_variable" => lint_unused_variable(sf),
+        "unjoined_task" => lint_unjoined_task(sf),
         "unused_import" => lint_unused_import(sf),
         "unused_mut_variable" => lint_unused_mut_variable(sf),
         "needless_return" => lint_needless_return(sf),
@@ -371,33 +372,72 @@ impl gossamer_ast::visitor::Visitor for NameUseScan<'_> {
 // Lints
 // ---------------------------------------------------------------------
 
+/// The `let` bindings of a function body's own statements that nothing in
+/// the body names, each with whether it binds the handle of a `spawn`.
+fn unused_let_bindings(block: &Block) -> Vec<(String, Span, bool)> {
+    let mut bindings: Vec<(String, Span, bool)> = Vec::new();
+    for stmt in &block.stmts {
+        if let StmtKind::Let { pattern, init, .. } = &stmt.kind
+            && let Some((name, span, _)) = ident_name(pattern)
+            && !name.starts_with('_')
+        {
+            let spawned = init.as_ref().is_some_and(|init| is_spawn_call(init));
+            bindings.push((name.to_string(), span, spawned));
+        }
+    }
+    let mut used: BTreeSet<String> = BTreeSet::new();
+    {
+        let mut scan = NameUseScan { used: &mut used };
+        gossamer_ast::visitor::Visitor::visit_block(&mut scan, block);
+    }
+    bindings.retain(|(name, _, _)| !used.contains(name));
+    bindings
+}
+
+/// Whether `expr` is a call of `spawn`, which answers the task's join handle.
+pub(crate) fn is_spawn_call(expr: &Expr) -> bool {
+    matches!(
+        &expr.kind,
+        ExprKind::Call { callee, .. }
+            if matches!(&callee.kind, ExprKind::Path(path) if last_path_seg(path) == Some("spawn"))
+    )
+}
+
 fn lint_unused_variable(sf: &SourceFile) -> Vec<Finding> {
     let mut out = Vec::new();
     each_fn_body(sf, |body| {
         let Some(block) = as_block(body) else {
             return;
         };
-        let mut bindings: Vec<(String, Span)> = Vec::new();
-        for stmt in &block.stmts {
-            if let StmtKind::Let { pattern, .. } = &stmt.kind {
-                if let Some((name, span, _)) = ident_name(pattern) {
-                    if !name.starts_with('_') {
-                        bindings.push((name.to_string(), span));
-                    }
-                }
-            }
-        }
-        let mut used: BTreeSet<String> = BTreeSet::new();
-        {
-            let mut scan = NameUseScan { used: &mut used };
-            gossamer_ast::visitor::Visitor::visit_block(&mut scan, block);
-        }
-        for (name, span) in bindings {
-            if !used.contains(&name) {
+        for (name, span, spawned) in unused_let_bindings(block) {
+            if !spawned {
                 out.push((
                     span,
                     format!("unused variable `{name}`"),
                     Some(format!("prefix with `_` to silence: `_{name}`")),
+                ));
+            }
+        }
+    });
+    out
+}
+
+fn lint_unjoined_task(sf: &SourceFile) -> Vec<Finding> {
+    let mut out = Vec::new();
+    each_fn_body(sf, |body| {
+        let Some(block) = as_block(body) else {
+            return;
+        };
+        for (name, span, spawned) in unused_let_bindings(block) {
+            if spawned {
+                out.push((
+                    span,
+                    format!(
+                        "`{name}` is never joined: nothing waits for its task, so the program goes on, and can finish, before the task's work is done"
+                    ),
+                    Some(format!(
+                        "call `{name}.join()` where the task's work must be done; a task meant to run on its own is spawned without a binding: `spawn(..)`"
+                    )),
                 ));
             }
         }

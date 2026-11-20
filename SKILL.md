@@ -207,7 +207,9 @@ extend(&mut items)     // items is now #[1, 2, 1]
 - `"""` strings dedent to their closing delimiter; `f"""..."""` interpolates.
 - Two index spaces: `s.len()`, `s[i]` (a `char`), and `for c in s` count
   Unicode scalars; `s.byte_len()`, `s.byte_at(i)` (an `i64`), `s.bytes()`,
-  `s.substring(a, b)` use byte offsets. Never mix them.
+  `s.substring(a, b)` use byte offsets. Never mix them. Neither is a
+  grapheme cluster (`"👍🏽"` is two scalars): cut display text with
+  `unicode::graphemes(s).take(n).join("")`.
 - `s.to_i64()` / `to_f64()` / `to_bool()` are strict parses answering an
   `Option`. `String + String` copies; build long text with `+=` on a
   `String::with_capacity(n)` or a `bytes::Builder`.
@@ -221,6 +223,9 @@ extend(&mut items)     // items is now #[1, 2, 1]
   that may not fit becomes: `v as% u8` keeps the low bits (and saturates a
   float), `v.clamp(0, 255) as u8` saturates, `v.try_into()` answers a
   `Result` between integer types. GL0062 marks each `as` that can panic.
+- `%` keeps the sign of the value it divides, as in Rust: `-3 % 2 == -1`.
+  Test oddness with `n % 2 != 0`; `n.rem_euclid(k)` answers `0..k` for
+  every sign. GL0064 marks `n % 2 == 1` on a value that may be negative.
 - `+ - *` panic on overflow on every tier and profile; `+%` `-%` `*%` (and
   `+%=`...) wrap at the declared width, and are the only way to wrap. Divide
   by zero panics, and so does a shift amount outside `0..BITS`; `<<%` /
@@ -369,6 +374,10 @@ fn main() {
 }
 ```
 
+- In `main`, join what you name: `let task = spawn(..)` never joined is
+  GL0065, and `main` goes on (and can exit) before the task's work is
+  done. Goroutines `main` leaves running get up to 30 s at exit; ones
+  parked where nothing can wake them are named and left at once.
 - Headers: `cohort(policy: Policy::CollectAll)` / `Policy::Race`,
   `timeout: ms`, `isolation: Isolation::Thread`, `on_error: OnError::Log`.
   Cancellation is cooperative: a cancelled `recv` answers `None`, `sleep`

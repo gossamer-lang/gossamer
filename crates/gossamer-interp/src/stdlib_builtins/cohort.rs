@@ -608,6 +608,69 @@ fn wait_for_drain_until(
     0
 }
 
+/// The root cohort while `main`'s goroutines are drained, or 0.
+static ROOT_DRAINING: AtomicI64 = AtomicI64::new(0);
+
+/// Set when the root drain left goroutines that nothing can ever wake.
+static ROOT_LEFT_BLOCKED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the root drain ended because the goroutines `main` left can never
+/// finish, so no later wait on them can end otherwise.
+pub(crate) fn root_left_blocked() -> bool {
+    ROOT_LEFT_BLOCKED.load(Ordering::Acquire)
+}
+
+/// Advances each time the program may have reached a state where none of
+/// `main`'s remaining goroutines can ever finish.
+static ROOT_DRAIN_EPOCH: AtomicI64 = AtomicI64::new(0);
+
+/// Wakes the root drain to judge again whether anything left can finish.
+pub(crate) fn notify_root_drain() {
+    ROOT_DRAIN_EPOCH.fetch_add(1, Ordering::AcqRel);
+    let id = ROOT_DRAINING.load(Ordering::Acquire);
+    if id != 0
+        && let Some(node) = node_of(id)
+    {
+        let _state = node.state.lock();
+        node.progress.notify_all();
+    }
+}
+
+/// Waits for the children `main` left, until they finish, the exit bound
+/// passes, or every goroutine left is parked where nothing can wake it.
+/// Answers the children still outstanding and whether they are blocked.
+///
+/// The blocked state is judged outside the cohort's lock, since judging it
+/// reads other cohorts; the epoch read before judging catches a change that
+/// lands between the judgement and the wait.
+fn wait_for_root_drain(node: &Arc<CohortNode>) -> (i64, bool) {
+    if node.state.lock().outstanding == 0 {
+        return (0, false);
+    }
+    let until = crate::vm::goroutine::exit_drain_deadline();
+    loop {
+        let epoch = ROOT_DRAIN_EPOCH.load(Ordering::Acquire);
+        let blocked = crate::vm::goroutine::program_is_stuck_past_main();
+        let mut state = node.state.lock();
+        if state.outstanding == 0 {
+            return (0, false);
+        }
+        if blocked {
+            return (state.outstanding, true);
+        }
+        if ROOT_DRAIN_EPOCH.load(Ordering::Acquire) != epoch {
+            continue;
+        }
+        let now = Instant::now();
+        if now >= until {
+            return (state.outstanding, false);
+        }
+        if node.progress.wait_for(&mut state, until - now).timed_out() && state.outstanding > 0 {
+            return (state.outstanding, false);
+        }
+    }
+}
+
 fn outcome_message(node: &Arc<CohortNode>) -> Option<String> {
     let mut state = node.state.lock();
     state.joined = true;
@@ -717,13 +780,20 @@ pub fn close_root() {
     };
     // The root drain runs after the program's own work is done: a
     // goroutine still running here is one nothing joined.
-    let outstanding = wait_for_drain_until(&node, crate::vm::goroutine::exit_drain_deadline);
+    crate::vm::goroutine::mark_main_returned();
+    ROOT_DRAINING.store(id, Ordering::Release);
+    let (outstanding, blocked) = wait_for_root_drain(&node);
+    ROOT_DRAINING.store(0, Ordering::Release);
+    ROOT_LEFT_BLOCKED.store(outstanding > 0 && blocked, Ordering::Release);
     if outstanding > 0 {
         eprintln!(
-            "gossamer: {outstanding} spawned goroutine(s) had not finished {} seconds after \
-             `main` returned; exiting without them{}",
-            ROOT_DRAIN_DEADLINE.as_secs(),
-            unfinished_children(&node)
+            "{}",
+            gossamer_runtime::c_abi::cohort::abandoned_message(
+                outstanding,
+                blocked,
+                ROOT_DRAIN_DEADLINE,
+                &unfinished_children(&node)
+            )
         );
     }
     let orphaned: Vec<String> = {

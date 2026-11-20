@@ -96,7 +96,7 @@ fn float_literal_value(text: &str) -> Option<f64> {
 }
 
 /// The value of an integer literal, or of a negated one.
-fn literal_int(expr: &Expr) -> Option<i128> {
+pub(crate) fn literal_int(expr: &Expr) -> Option<i128> {
     match &expr.kind {
         ExprKind::Literal(Literal::Int(text)) => int_literal_value(text),
         ExprKind::Unary {
@@ -428,6 +428,23 @@ pub fn cast_check(cast: &Expr, table: &TypeTable, tcx: &TyCtxt) -> Option<CastCh
         out: Vec::new(),
     };
     finder.needed_check(cast, value).map(|(check, _, _)| check)
+}
+
+/// The values an integer expression can take, narrowed by what its own
+/// form shows (a literal, a mask, a remainder, a shift, a literal `clamp`),
+/// or `None` when it is not an integer.
+pub(crate) fn int_value_range(
+    expr: &Expr,
+    table: &TypeTable,
+    tcx: &TyCtxt,
+) -> Option<(i128, i128)> {
+    let finder = Finder {
+        table,
+        tcx,
+        out: Vec::new(),
+    };
+    let ty = finder.int_of(expr)?;
+    Some(finder.value_range(expr, ty))
 }
 
 impl Visitor for Finder<'_> {

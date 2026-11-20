@@ -413,6 +413,13 @@ of the model:
   `!5u8 == 250`, `200u8 << 2 == 32`, `-128i8 / -1 == -128`, and
   `i64::MIN / -1 == i64::MIN`. Unary `-` on an unsigned integer is GT0001:
   `0 -% x` is the value that wraps, `-(x as i64)` the signed negation.
+- `/` truncates toward zero and `%` answers a remainder with the sign of
+  the value it divides, as in C, Rust, and Go: `-7 / 2 == -3` and
+  `-7 % 2 == -1`. `x.rem_euclid(k)` answers the remainder in `0..k` for
+  every sign, and `x.div_euclid(k)` the matching quotient. A comparison of
+  `x % k` with a positive number, where `x` is signed and may be negative,
+  is the lint `GL0064`: `n % 2 == 1` is false for every negative odd `n`,
+  and `n % 2 != 0` is the test that holds for every sign.
 - `u64`/`usize` values use the same 64-bit payload as signed integers,
   but arithmetic, comparison, shifts, division/remainder, and display are
   type-aware on every tier. `as%` reinterprets or truncates to the target
@@ -620,6 +627,14 @@ range has exactly one - the part that overlaps. It is also the rule
 `substring`, `byte_at`, and `as_bytes` use, and snaps outward to codepoint
 boundaries so the result is always valid text. `s.len()` and `s[i]` count
 Unicode scalars, so do not mix the two spellings on non-ASCII text.
+Neither index space follows what a reader sees as one character: a
+grapheme cluster such as `"👍🏽"` (a thumbs-up and a skin-tone modifier) or
+`"é"` written as `e` plus a combining accent is several scalars, and a cut
+between them leaves half of it. Text cut for display, such as a name
+shortened to fit, is cut at cluster boundaries with
+`std::unicode::graphemes(s)`, which answers the clusters in order
+(`unicode::graphemes(name).take(n).join("")`), and measured with
+`unicode::grapheme_count` or, for terminal columns, `unicode::str_width`.
 
 ### 3.3b Mutable windows
 
@@ -1811,6 +1826,17 @@ one: no goroutine outlives the program, and a child failure that nothing
 observed through its join handle is reported on stderr at exit instead of
 vanishing. The root's policy is `CollectAll`, so one child's failure never
 cancels another's work.
+
+When `main` returns, the root cohort drains: the program waits for the
+children `main` left running, up to 30 seconds, then exits without the ones
+still running and names them on stderr. Children parked where nothing left
+in the program can wake them (every remaining goroutine waiting on a
+channel, a lock, or a join, with no timer, I/O, or outside thread able to
+act) can never finish, so the drain names them and exits at once. The exit
+status is the one `main` gave either way. `main` is exempt from `cohort { }`
+for this reason, and so it is also where a task can be forgotten: a handle
+bound by `let task = spawn(..)` and never used is the lint `GL0065`, since
+nothing waits for that task's work before `main` goes on.
 
 The root cohort is `main`'s alone. Its extent is the process, which is the
 same extent `main` has, and is longer than any other function's - so a

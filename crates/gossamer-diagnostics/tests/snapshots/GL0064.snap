@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GL0064]: A remainder compared with a positive number while the value divided - here
+--- framed ---
+error[GL0064]: A remainder compared with a positive number while the value divided
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

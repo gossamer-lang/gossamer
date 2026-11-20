@@ -1313,8 +1313,8 @@ fn main() {
     assert_eq!(run.2, Some(0), "vm did not exit: stderr={}", run.1);
     assert!(run.0.contains("main done"), "vm stdout: {:?}", run.0);
     assert!(
-        run.1.contains("had not finished"),
-        "the drain must name what it left running: {:?}",
+        run.1.contains("can never finish"),
+        "the drain must name what it left blocked: {:?}",
         run.1
     );
 
@@ -1330,7 +1330,7 @@ fn main() {
         native.1
     );
     assert!(
-        native.1.contains("had not finished"),
+        native.1.contains("can never finish"),
         "native drain report: {:?}",
         native.1
     );
