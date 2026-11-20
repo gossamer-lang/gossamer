@@ -1,0 +1,12 @@
+// `total_cmp` orders floats by IEEE 754 total order and answers a sign, so it
+// is a `sort_by` comparator: -NaN < -inf < ... < -0.0 < 0.0 < ... < inf < NaN.
+
+fn main() {
+    let mut xs = #[3.5, f64::NAN, -0.0, 0.0, -f64::INFINITY, 1.0, -2.5, f64::INFINITY, -f64::NAN]
+    xs.sort_by(|a, b| a.total_cmp(b))
+    println(xs)
+    println(f"{1.0.total_cmp(2.0)} {2.0.total_cmp(1.0)} {f64::NAN.total_cmp(f64::NAN)} {(-0.0).total_cmp(0.0)}")
+    let mut ys: Vec<f32> = #[2.5, -1.0, f32::NAN, 0.5]
+    ys.sort_by(|a, b| a.total_cmp(b))
+    println(ys)
+}

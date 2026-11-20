@@ -107,6 +107,19 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Whether this body calls `runtime::backtrace()`.
+    fn body_reads_backtrace(&self) -> bool {
+        self.body.blocks.iter().any(|block| {
+            matches!(
+                &block.terminator,
+                gossamer_mir::Terminator::Call {
+                    callee: gossamer_mir::Operand::Const(gossamer_mir::ConstValue::Str(name)),
+                    ..
+                } if name == "gos_rt_runtime_backtrace"
+            )
+        })
+    }
+
     /// Whether this body answers its aggregate through the caller's storage.
     pub(crate) fn body_uses_sret(&self) -> Option<u64> {
         if !self.sret_bodies.contains(&self.body.name) {
@@ -350,9 +363,19 @@ impl<'a> Lowerer<'a> {
             // not `writeonly`.
             params.push_str("ptr noalias nocapture %sret");
         }
+        // A body that reads its own call stack keeps a frame of its own, so
+        // `runtime::backtrace()` names its caller in an optimized build: it is
+        // never inlined, its calls are never turned into jumps that would
+        // leave its frame before the stack is read, and it carries the unwind
+        // table the stack walk steps through it with.
+        let keep_frame = if self.body_reads_backtrace() {
+            " noinline uwtable \"disable-tail-calls\"=\"true\""
+        } else {
+            ""
+        };
         writeln!(
             self.out,
-            "define {ret_ty} @\"{name}\"({params}) #0{personality} {{",
+            "define {ret_ty} @\"{name}\"({params}) #0{keep_frame}{personality} {{",
             name = escape_ident(&mangle_fn_name(&self.body.name)),
             ret_ty = ret_ty,
             params = params,

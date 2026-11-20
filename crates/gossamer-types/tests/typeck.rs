@@ -5685,3 +5685,128 @@ fn writes_no_tier_can_perform_are_rejected_at_check() {
         checked.diagnostics
     );
 }
+
+#[test]
+fn an_imported_sync_map_is_the_shared_handle_wherever_it_is_named() {
+    let checked = run("use std::sync::Map\n\
+         fn fill(m: Map) { m.insert(\"k\", \"v\") }\n\
+         fn main() {\n\
+         let m = Map::new()\n\
+         fill(m)\n\
+         m.remove(\"k\")\n\
+         let plain = {\"a\": 1}\n\
+         println(f\"{m.len()} {plain}\")\n\
+         }\n");
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+}
+
+#[test]
+fn error_methods_answer_their_declared_types() {
+    let checked = run("use std::errors\n\
+         fn main() {\n\
+         let err = errors::wrap(errors::new(\"a\"), \"b\")\n\
+         let c: bool = err.cause()\n\
+         let m: bool = err.message()\n\
+         let ch: bool = err.chain()\n\
+         let f: bool = err.fields()\n\
+         let one: bool = err.field(\"k\")\n\
+         let w: bool = err.with_field(\"k\", \"v\")\n\
+         let ok: bool = err.is(\"a\")\n\
+         println(f\"{c} {m} {ch} {f} {one} {w} {ok}\")\n\
+         }\n");
+    let found: Vec<String> = checked
+        .diagnostics
+        .iter()
+        .filter_map(|d| match &d.error {
+            TypeError::TypeMismatch { found, .. } => Some(found.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            "Option<errors::Error>",
+            "String",
+            "Vec<errors::Error>",
+            "Vec<(String, String)>",
+            "Option<String>",
+            "errors::Error",
+        ],
+        "{:?}",
+        checked.diagnostics
+    );
+}
+
+#[test]
+fn a_closed_receiver_surface_rejects_names_another_type_declares() {
+    let checked = run("use std::{bytes, sync, time}\n\
+         use std::sync::channel\n\
+         fn main() {\n\
+         let d = time::Duration::from_millis(5)\n\
+         let a = d.checked_sub(d)\n\
+         let tx, rx = channel::<i64>()\n\
+         let b = rx.len()\n\
+         let c = rx.recv_timeout(5)\n\
+         let h = spawn(|| 1)\n\
+         let e = h.is_finished()\n\
+         let f = bytes::Builder::new().to_string()\n\
+         let g = sync::Map::new().to_string()\n\
+         let ok: bool = tx.try_send(1)\n\
+         println(f\"{a} {b} {c} {e} {f} {g} {ok}\")\n\
+         }\n");
+    let found: Vec<String> = checked
+        .diagnostics
+        .iter()
+        .map(|d| match &d.error {
+            TypeError::UnresolvedMethod { name, .. } => format!("unknown {name}"),
+            TypeError::ValueNotDisplayable { ty, .. } => format!("no text {ty}"),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            "unknown checked_sub",
+            "unknown len",
+            "unknown recv_timeout",
+            "unknown is_finished",
+            "no text bytes::Builder",
+            "unknown to_string",
+        ],
+        "{:?}",
+        checked.diagnostics
+    );
+}
+
+#[test]
+fn an_imported_standard_type_annotates_as_its_full_path() {
+    let checked = run("use std::time::{Duration, Instant}\n\
+         use std::encoding::json::Value\n\
+         use std::sync\n\
+         fn f(d: Duration, i: Instant, v: Value, m: sync::Map) {\n\
+         let a: bool = d\n\
+         let b: bool = i\n\
+         let c: bool = v\n\
+         let e: bool = m\n\
+         }\n\
+         fn main() {}\n");
+    let found: Vec<String> = checked
+        .diagnostics
+        .iter()
+        .filter_map(|d| match &d.error {
+            TypeError::TypeMismatch { found, .. } => Some(found.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            "time::Duration",
+            "time::Instant",
+            "json::Value",
+            "sync::Map"
+        ],
+        "{:?}",
+        checked.diagnostics
+    );
+}

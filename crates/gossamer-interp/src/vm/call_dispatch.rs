@@ -130,6 +130,18 @@ impl Vm {
             };
         let mut frames = Vec::new();
         for frame in self.call_stack.borrow().iter() {
+            // A frame still running reads its position now; a finished or
+            // faulted one kept the one it last recorded.
+            let mut frame = *frame;
+            if !frame.frozen
+                && let Some(live) = frame.live
+            {
+                // SAFETY: `live` is cleared by the frame's guard before its
+                // dispatch loop returns, so a set value points at a running loop.
+                let entry = unsafe { live.current() };
+                frame.location = entry.and_then(|entry| entry.location);
+                frame.inline_site = entry.and_then(|entry| entry.inline_site);
+            }
             // An inlined call has no frame of its own: the chain of sites the
             // position sits in, outermost first, names each function and the
             // call in it that led inward.
@@ -816,7 +828,9 @@ impl Vm {
     pub(crate) fn spawn_goroutine_native(&self, callee: Value, args: Vec<Value>) {
         let origin = Self::goroutine_origin(&callee);
         self.spawn_on_pool(origin, 0, move |vm| {
-            if let Err(err) = vm.as_comparator_host(|| vm.dispatch_call(&callee, args)) {
+            let result = vm.as_comparator_host(|| vm.dispatch_call(&callee, args));
+            end_program_on_overflow(&result);
+            if let Err(err) = result {
                 if !vm.invoke_panic_hook(&crate::panic_message(&err)) {
                     // Report an unobserved goroutine panic with the same single
                     // `error[GX0005]: panic: ...` line the compiled runtime
@@ -872,6 +886,7 @@ impl Vm {
                 },
                 SpawnTarget::Callable(callee) => vm.dispatch_call(&callee, args),
             };
+            end_program_on_overflow(&outcome);
             sink(outcome);
         });
     }
@@ -905,6 +920,7 @@ impl Vm {
         self.spawn_on_pool(origin, channel.identity(), move |vm| {
             crate::stdlib_builtins::cohort::enter_child(cohort);
             let result = vm.as_comparator_host(|| vm.dispatch_call(&callee, args));
+            end_program_on_overflow(&result);
             // A child fails by panicking or by answering `Err`, the same
             // two ways the compiled tier reports one.
             let failure = match &result {
@@ -1188,4 +1204,17 @@ extern "C" fn render_active_vm_trace() -> *mut std::ffi::c_char {
         index += repeats;
     }
     gossamer_runtime::c_abi::string::alloc_cstring(out.as_bytes())
+}
+
+/// Ends the program when a goroutine's recursion outgrew its stack. A stack
+/// overflow is not a failure the goroutine reports through `join()`: it ends
+/// the program with status 101 and runs no defers, on every tier, as it does
+/// on the main goroutine.
+fn end_program_on_overflow(result: &RuntimeResult<Value>) {
+    if let Err(err @ RuntimeError::StackOverflow(_)) = result
+        && gossamer_runtime::platform::CAN_END_PROCESS
+    {
+        eprintln!("{err}");
+        std::process::exit(101);
+    }
 }

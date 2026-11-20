@@ -1,0 +1,27 @@
+// A float's `try_into()` to an integer type answers `Err` exactly where `as`
+// would panic: NaN, infinity, or a truncation the target cannot hold.
+
+use std::errors
+
+fn convert(x: f64) -> Result<i64, errors::Error> { x.try_into() }
+
+fn main() {
+    let a: Result<i64, errors::Error> = f64::NAN.try_into()
+    println(a)
+    println(convert(2.9))
+    println(convert(-2.9))
+    println(convert(f64::INFINITY))
+    println(convert(9.3e18))
+    println(convert(-9.223372036854775808e18))
+    let c: Result<u8, errors::Error> = 300.0.try_into()
+    println(c)
+    let d: Result<u8, errors::Error> = (-0.5).try_into()
+    println(d)
+    let e: Result<i32, errors::Error> = (1.5f32).try_into()
+    println(e)
+    let mut total = 0
+    for i in 0..50 {
+        total += convert(i as f64 * 0.5).unwrap_or(-1)
+    }
+    println(total)
+}

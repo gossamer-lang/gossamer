@@ -305,6 +305,12 @@ pub(super) fn is_sync_primitive_def(local: u32) -> bool {
     offset == 35 || (SYNC_HANDLE_LO_OFFSET..SYNC_HANDLE_HI_OFFSET).contains(&offset)
 }
 
+/// True when `def` names a handle whose methods change only the state it
+/// shares, never the place holding it: a sync primitive or a `sync::Map`.
+pub(super) fn is_shared_state_handle_def(local: u32) -> bool {
+    is_sync_primitive_def(local) || u32::MAX - local == 34
+}
+
 /// True when `def` names a runtime handle rather than a value with a
 /// representation of its own.
 pub(super) fn is_opaque_handle_def(local: u32) -> bool {

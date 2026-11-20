@@ -1,0 +1,40 @@
+// `collections::IndexMap` iterates in insertion order and `collections::BitSet`
+// keeps one bit per integer, the same on every tier.
+
+use std::collections::{IndexMap, BitSet}
+
+fn tally(words: Vec<String>) -> IndexMap<String, i64> {
+    let mut seen = IndexMap::new()
+    for w in words {
+        let n = seen.get(w).unwrap_or(0)
+        seen.insert(w, n + 1)
+    }
+    seen
+}
+
+fn main() {
+    let mut m = IndexMap::new()
+    m.insert("c", 3)
+    m.insert("a", 1)
+    m.insert("b", 2)
+    println(m.keys())
+    println(m.insert("a", 10))
+    println(m.entries())
+    println(m.remove("c"))
+    println(f"{m.keys()} {m.get("b")} {m.get("z")} {m.len()} {m.contains_key("a")}")
+    println(tally(#["z", "y", "z", "x", "y", "z"]).entries())
+
+    let mut bits = BitSet::new()
+    println(bits.insert(1000))
+    println(bits.insert(1000))
+    bits.insert(3)
+    bits.insert(64)
+    println(f"{bits.contains(1000)} {bits.contains(999)} {bits.len()} {bits.to_vec()}")
+    println(bits.remove(64))
+    println(bits.to_vec())
+    let mut evens = BitSet::new()
+    for i in 0..200 {
+        if i % 2 == 0 { evens.insert(i) }
+    }
+    println(evens.len())
+}

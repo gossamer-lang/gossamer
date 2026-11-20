@@ -548,7 +548,7 @@ impl<'a> Builder<'a> {
                 self.tcx.intern(gossamer_types::TyKind::Vec(s))
             }
             "gos_rt_flag_set_parse" => self.result_vec_string_error_ty(),
-            "gos_rt_error_cause" => self.option_adt_ty(),
+            "gos_rt_error_cause" => self.option_error_adt_ty(),
             "gos_rt_error_chain" => {
                 let e = self.tcx.dyn_error_ty();
                 self.tcx.intern(gossamer_types::TyKind::Vec(e))

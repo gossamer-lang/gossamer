@@ -302,6 +302,22 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/owned_set_keys.gos"),
     spec("feature-testing-examples/window_writes.gos"),
     spec("feature-testing-examples/channel_ends_released.gos"),
+    spec("feature-testing-examples/sync_map_imported.gos"),
+    spec("feature-testing-examples/error_cause_methods.gos"),
+    spec("feature-testing-examples/std_type_receivers.gos"),
+    spec("feature-testing-examples/big_int_operators.gos"),
+    spec("feature-testing-examples/collections_index_map_bit_set.gos"),
+    spec("feature-testing-examples/float_try_into.gos"),
+    spec("feature-testing-examples/float_total_cmp.gos"),
+    spec("feature-testing-examples/runtime_backtrace.gos"),
+    spec("feature-testing-examples/math_decimal.gos"),
+    spec("feature-testing-examples/std_type_item_imports.gos"),
+    // A panic hook runs for a goroutine's panic and for `main`'s; the
+    // program still ends with status 101.
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/panic_hook_closure.gos")
+    },
     // A callable's `Result` / `Option` return crosses the indirect call
     // through its env blob as the two-word carrier the compiled body
     // answers, rather than as the first of those two words.
@@ -554,6 +570,12 @@ const SPECS: &[Spec] = &[
     Spec {
         allow_nonzero: true,
         ..spec("feature-testing-examples/stack_overflow_parity.gos")
+    },
+    // The same on a spawned goroutine's own stack: compiled recursion runs
+    // into the band below the goroutine's recursion budget.
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/goroutine_stack_overflow.gos")
     },
     // Copy-update carries every unnamed field from the base and leaves the
     // base usable, including through String and Vec fields.

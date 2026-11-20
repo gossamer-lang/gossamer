@@ -459,6 +459,13 @@ pub fn is_prelude_value(name: &str) -> bool {
     PRELUDE_VALUES.contains(&name)
 }
 
+/// Whether `name` is a prelude type: one every program can name without an
+/// import.
+#[must_use]
+pub fn is_prelude_type(name: &str) -> bool {
+    PRELUDE_TYPES.contains(&name)
+}
+
 pub(crate) fn prelude_suggestion_names() -> impl Iterator<Item = &'static str> {
     PRIMITIVE_TYPES
         .iter()

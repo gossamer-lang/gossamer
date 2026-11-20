@@ -296,6 +296,19 @@ impl TracebackLocationGuard<'_> {
     }
 }
 
+impl TracebackLocationGuard<'_> {
+    /// Lets a snapshot taken while this frame runs read its position.
+    fn go_live(&self) {
+        if let Some(frame) = self.call_stack.borrow_mut().get_mut(self.frame_index) {
+            frame.live = Some(LiveFramePosition {
+                next_instruction: self.next_instruction,
+                locations: std::ptr::from_ref(self.locations),
+            });
+            frame.inline_sites = self.inline_sites;
+        }
+    }
+}
+
 impl Drop for TracebackLocationGuard<'_> {
     fn drop(&mut self) {
         // SAFETY: `next_instruction` points to `run_with_frame`'s local `pc`.
@@ -308,12 +321,14 @@ impl Drop for TracebackLocationGuard<'_> {
                 .partition_point(|entry| entry.instruction <= instruction);
             after.checked_sub(1).map(|idx| self.locations[idx])
         });
-        if let Some(frame) = self.call_stack.borrow_mut().get_mut(self.frame_index)
-            && !frame.frozen
-        {
-            frame.location = entry.and_then(|entry| entry.location);
-            frame.inline_site = entry.and_then(|entry| entry.inline_site);
-            frame.inline_sites = self.inline_sites;
+        let mut stack = self.call_stack.borrow_mut();
+        if let Some(frame) = stack.get_mut(self.frame_index) {
+            frame.live = None;
+            if !frame.frozen {
+                frame.location = entry.and_then(|entry| entry.location);
+                frame.inline_site = entry.and_then(|entry| entry.inline_site);
+                frame.inline_sites = self.inline_sites;
+            }
         }
     }
 }
@@ -560,6 +575,7 @@ impl Vm {
             inline_sites: chunk.inline_sites,
             next_instruction: std::ptr::addr_of!(pc),
         };
+        traceback_location.go_live();
         let mut preempt_countdown = VM_PREEMPT_INTERVAL;
         // Several specialized opcodes have a generic method-call fallback.
         // A user-defined method resolves to `Global::Fn`; it must use the

@@ -43,7 +43,7 @@ pub use numeric_limits::{LimitConstant, LimitLiteral, limit_constant};
 pub use patterns::settle_single_name_patterns;
 pub use resolutions::{FloatWidth, IntWidth, PrimitiveTy, Resolution, Resolutions};
 pub use resolver::{project_dep_module_name, resolve_source_file};
-pub use scope::is_prelude_value;
+pub use scope::{is_prelude_type, is_prelude_value};
 pub use stdlib_exports::{
     STDLIB_MACRO_ITEMS, STDLIB_MANIFEST_ITEMS, STDLIB_MODULE_PATHS, STDLIB_MODULES,
     STDLIB_QUALIFIED, canonical_stdlib_path, is_stdlib_item_path, is_stdlib_qualified,

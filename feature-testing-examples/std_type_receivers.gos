@@ -1,0 +1,74 @@
+// Standard types reached through `use`, written as annotations, and given
+// methods by a program's own trait: each names the same type whatever the
+// spelling, and its trait methods dispatch on every tier.
+
+use std::sync
+use std::sync::channel_unbounded
+use std::time
+use std::time::{Duration, Instant}
+use std::encoding::json
+use std::encoding::json::Value
+
+trait Describe {
+    fn describe(&self) -> String
+}
+
+impl Describe for Duration {
+    fn describe(&self) -> String { f"{self.as_millis()} ms" }
+}
+
+impl Describe for time::Instant {
+    fn describe(&self) -> String { "an instant" }
+}
+
+impl Describe for Value {
+    fn describe(&self) -> String { f"json with {json::entries(self.clone()).unwrap_or(#[]).len()} keys" }
+}
+
+fn total(spans: Vec<Duration>) -> i64 {
+    let mut sum = 0
+    for span in spans {
+        sum += span.as_millis()
+    }
+    sum
+}
+
+fn described_width(n: i64) -> i64 {
+    let mut width = 0
+    for i in 0..n {
+        width += Duration::from_millis(i).describe().len()
+    }
+    width
+}
+
+fn started(at: Instant) -> bool { at.elapsed_ms() >= 0 }
+
+fn keys(doc: Value) -> i64 { json::entries(doc).unwrap_or(#[]).len() }
+
+fn fill(m: sync::Map, n: i64) {
+    for i in 0..n {
+        m.insert(f"k{i}", f"{i}")
+    }
+}
+
+fn main() {
+    let d = Duration::from_millis(1500)
+    println(d.describe())
+    println(time::Duration::from_secs(2).describe())
+    println(Instant::now().describe())
+    let doc = json::parse("{\"a\": 1, \"b\": 2}").unwrap()
+    println(doc.describe())
+    println(total(#[Duration::from_millis(5), Duration::from_millis(7)]))
+    println(described_width(200))
+    println(started(Instant::now()))
+    println(keys(doc))
+
+    let m = sync::Map::new()
+    fill(m, 30)
+    println(m.len())
+
+    let tx, rx = channel_unbounded::<i64>()
+    if tx.try_send(4) {
+        println(f"taken {rx.try_recv()}")
+    }
+}

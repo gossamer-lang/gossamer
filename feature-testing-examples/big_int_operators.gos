@@ -1,0 +1,31 @@
+// `math::big::Int` takes the integer operators and comparisons, computed by
+// the `math::big` functions on every tier: no 64-bit overflow anywhere.
+
+use std::math::big
+use std::math::big::Int
+
+fn factorial(n: i64) -> Int {
+    let mut acc = big::int_from_i64(1)
+    for i in 1..=n {
+        acc *= big::int_from_i64(i)
+    }
+    acc
+}
+
+fn main() {
+    let two = big::int_from_i64(2)
+    let mut x = big::int_from_i64(1)
+    for _ in 0..100 {
+        x = x * two
+    }
+    println(big::int_to_str(x))
+    let ten = big::int_from_i64(10)
+    let nine = big::int_from_i64(9)
+    println(f"{ten < nine} {ten > nine} {ten <= ten} {ten == ten} {ten != nine}")
+    println(f"{ten - nine - ten} {-ten} {x / ten} {x % ten}")
+    println(factorial(30))
+    let u = big::uint_from_u64(5)
+    println(big::uint_to_str(u * u + u))
+    println(big::int_to_i64(x))
+    println(big::int_to_i64(ten))
+}

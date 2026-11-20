@@ -251,31 +251,50 @@ pub unsafe extern "C" fn gos_rt_call_main(entry: *const u8, out: *mut u8) {
 // between the panic and its catch.
 use gossamer_coro::GosPanic;
 
-/// User panic hook installed via `runtime::set_panic_hook`: a bare
-/// `fn(String)` code pointer called with the rendered message instead
-/// of the default `error[GX0005]` report. Zero = unset.
+/// User panic hook installed via `runtime::set_panic_hook`: the
+/// environment of an `Fn(String)` called with the rendered message instead
+/// of the default `error[GX0005]` report, holding a share of its own.
+/// Zero = unset.
 static USER_PANIC_HOOK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Registers a non-capturing `fn(String)` as the process panic hook.
-/// Null clears it. The hook replaces the default stderr report for
-/// both main-goroutine and isolated-goroutine panics; fatality and
-/// isolation semantics are unchanged.
+/// Registers an `Fn(String)` environment as the process panic hook. Null
+/// clears it. The hook replaces the default stderr report for both
+/// main-goroutine and isolated-goroutine panics; fatality and isolation
+/// semantics are unchanged. A hook it replaces is released.
+///
+/// # Safety
+///
+/// `env` is null or a live counted closure environment whose first word is
+/// its code, compiled as `extern "C" fn(env, *mut c_char)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_set_panic_hook(f: *const u8) {
-    USER_PANIC_HOOK.store(f as usize, std::sync::atomic::Ordering::Release);
+pub unsafe extern "C" fn gos_rt_set_panic_hook(env: *mut u8) {
+    if !env.is_null() {
+        // SAFETY: `env` is a live counted environment (contract).
+        unsafe { super::rc::gos_rt_rc_retain(env) };
+    }
+    let previous = USER_PANIC_HOOK.swap(env as usize, std::sync::atomic::Ordering::AcqRel);
+    if previous != 0 {
+        // SAFETY: `previous` is the environment a prior call took a share of.
+        unsafe { super::rc::gos_rt_rc_release(previous as *mut u8) };
+    }
 }
 
 /// Invoke the user hook with `text`. Returns false when no hook is set.
 pub(crate) fn call_user_panic_hook(text: &str) -> bool {
-    let f = USER_PANIC_HOOK.load(std::sync::atomic::Ordering::Acquire);
-    if f == 0 {
+    let env = USER_PANIC_HOOK.load(std::sync::atomic::Ordering::Acquire) as *const u8;
+    if env.is_null() {
         return false;
     }
-    let c = std::ffi::CString::new(text).unwrap_or_default();
-    // SAFETY: the pointer was registered by compiled code as a
-    // non-capturing `fn(String)`; the ABI is one c-string argument.
-    let hook: extern "C" fn(*const c_char) = unsafe { std::mem::transmute(f as *const u8) };
-    hook(c.as_ptr());
+    let message = super::alloc_cstring(text.as_bytes());
+    // SAFETY: the environment's first word is its closure's code, compiled as
+    // `extern "C" fn(env, *mut c_char)` for an `Fn(String)`; the share taken
+    // at registration keeps it live, and `message` is a fresh string the
+    // hook borrows.
+    unsafe {
+        let code = env.cast::<*const ()>().read();
+        let hook: unsafe extern "C-unwind" fn(*const u8, *mut c_char) = std::mem::transmute(code);
+        hook(env, message);
+    }
     true
 }
 
@@ -524,6 +543,31 @@ fn fault_trace() -> String {
         return host;
     }
     crate::sigquit::render_native_panic_trace()
+}
+
+/// `runtime::backtrace() -> String`: the calling goroutine's call stack,
+/// outermost frame first, one `at function (file:line:column)` line each, as
+/// a fault report shows it. A release build without `-g` names the
+/// functions its machine stack still holds and no positions.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_runtime_backtrace() -> *mut c_char {
+    super::alloc_cstring(backtrace_text().as_bytes())
+}
+
+/// The text [`gos_rt_runtime_backtrace`] answers, for a host that reads it
+/// as a Rust string.
+#[must_use]
+pub fn backtrace_text() -> String {
+    let trace = fault_trace();
+    let frames = trace
+        .strip_prefix(crate::sigquit::PANIC_TRACE_HEADER)
+        .unwrap_or(&trace);
+    let mut out = String::with_capacity(frames.len());
+    for line in frames.lines() {
+        out.push_str(line.trim_start());
+        out.push('\n');
+    }
+    out
 }
 
 /// [`raise`] reporting `trace` in place of this thread's own call stack.

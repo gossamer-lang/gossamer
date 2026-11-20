@@ -727,6 +727,11 @@ mod unix {
         if addr == 0 {
             return false;
         }
+        // A goroutine runs on a stack of its own, whose floor the recursion
+        // guard records; the OS thread's bounds below do not describe it.
+        if gossamer_coro::in_stack_guard_band(addr, STACK_GUARD_PROXIMITY) {
+            return true;
+        }
         let lo = STACK_LO.with(Cell::get);
         let hi = STACK_HI.with(Cell::get);
         if lo == 0 || hi == 0 || hi <= lo {

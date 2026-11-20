@@ -1646,6 +1646,30 @@ pub fn synthesize_derive_impls_with(
     let mut eq_seeds = explicit_with(&["PartialEq", "Eq"]);
     eq_seeds.extend(user_eq.iter().cloned());
     eq_seeds.extend(outside.comparable.iter().cloned());
+    // The `math::big` integers are numbers: both compare, and `Int` orders.
+    // A bare `Int` / `Uint` names one only where the program declares no
+    // type of that name.
+    let declared: HashSet<String> = flatten_active_items_with_modules(&parsed.items)
+        .into_iter()
+        .filter_map(|(_, item)| match &item.kind {
+            ItemKind::Struct(d) => Some(d.name.name.clone()),
+            ItemKind::Enum(d) => Some(d.name.name.clone()),
+            ItemKind::TypeAlias(d) => Some(d.name.name.clone()),
+            _ => None,
+        })
+        .collect();
+    let big_integers = |names: &[&str]| -> Vec<String> {
+        names
+            .iter()
+            .flat_map(|leaf| {
+                let bare = (!declared.contains(*leaf)).then(|| (*leaf).to_string());
+                [format!("big::{leaf}"), format!("math::big::{leaf}")]
+                    .into_iter()
+                    .chain(bare)
+            })
+            .collect()
+    };
+    eq_seeds.extend(big_integers(&["Int", "Uint"]));
     let every_alias = alias_candidates(&parsed.items);
     let comparable = greatest_field_fixpoint(&field_tys, &type_params, &alias_ids, &imports, &eq_seeds, |ty, set| {
         ty_is_comparable(ty, set, &every_alias, 0)
@@ -1656,6 +1680,7 @@ pub fn synthesize_derive_impls_with(
     let mut cmp_seeds = explicit_with(&["PartialOrd", "Ord"]);
     cmp_seeds.extend(user_cmp.iter().cloned());
     cmp_seeds.extend(outside.orderable.iter().cloned());
+    cmp_seeds.extend(big_integers(&["Int"]));
     let orderable = greatest_field_fixpoint(&field_tys, &type_params, &alias_ids, &imports, &cmp_seeds, |ty, set| {
         ty_is_orderable(ty, set, &every_alias, 0)
     });

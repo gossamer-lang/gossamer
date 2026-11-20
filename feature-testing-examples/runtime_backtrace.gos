@@ -1,0 +1,20 @@
+// `runtime::backtrace()` answers the call stack as text on every tier and
+// names the function that calls it, an optimized build included. Positions
+// and frames the optimizer folded away differ by build, so only the names
+// every build keeps are printed.
+
+use std::runtime
+
+fn inner(n: i64) -> String {
+    if n > 0 { return inner(n - 1) }
+    runtime::backtrace()
+}
+
+fn outer() -> String { inner(2) }
+
+fn main() {
+    let trace = outer()
+    println(trace.contains("at inner"))
+    println(trace.contains("at main"))
+    println(trace.lines().count() >= 2)
+}

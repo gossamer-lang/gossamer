@@ -748,6 +748,7 @@ enum NominalInto {
     From(String),
 }
 
+mod big_integers;
 mod for_loop;
 mod int_conversion;
 mod items;
@@ -1644,6 +1645,10 @@ impl Lowerer<'_> {
                     None => HirExprKind::Placeholder,
                 }
             }
+            AstExprKind::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } if let Some(kind) = self.lower_big_neg(operand, expr.span) => kind,
             AstExprKind::Unary { op, operand } => {
                 let operand = match self.entry_arg_targets.remove(&expr.id) {
                     Some(target) => target,
@@ -1752,6 +1757,9 @@ impl Lowerer<'_> {
         if let Some(shape) = self.simd_shape(lhs.id).or_else(|| self.simd_shape(rhs.id))
             && let Some(kind) = self.lower_simd_binary(op, lhs, rhs, shape, lhs.span)
         {
+            return kind;
+        }
+        if let Some(kind) = self.lower_big_binary(op, lhs, rhs, lhs.span) {
             return kind;
         }
         if let Some(shift) = masked_shift_op(op) {
@@ -2172,6 +2180,16 @@ impl Lowerer<'_> {
             return self.with_window_bindings(stmts, assign, outer.span);
         }
         let lowered_value = self.lower_expr(value);
+        if let Some(function) = self.big_compound_function(op, place)
+            && let Some(kind) = self.big_compound_assign(
+                function,
+                lowered_place.clone(),
+                lowered_value.clone(),
+                outer.span,
+            )
+        {
+            return kind;
+        }
         self.assign_through(op, chosen, lowered_place, lowered_value, outer.span)
     }
 
@@ -2651,6 +2669,19 @@ impl Lowerer<'_> {
         target.push(segments[1].name.as_str());
         if self.module_impl_fns.contains(&target.join("::")) {
             return Some(target.iter().map(|s| Ident::new(*s)).collect());
+        }
+        // A standard type a `use` renames, or names under a prelude type's
+        // name from a module other than the prelude type's own (`use
+        // std::sync::Map` beside the collections `Map`), is spelled by its
+        // module path: every tier's dispatch reads a bare name as the
+        // prelude type or the standard type of that name.
+        if let ["std", module, .., ty, _] = target.as_slice()
+            && (*ty != segments[0].name
+                || (*module != "collections" && gossamer_resolve::is_prelude_type(ty)))
+            && gossamer_resolve::is_stdlib_qualified(&target[1..].join("::"))
+        {
+            let rest = &target[1..];
+            return Some(rest.iter().map(|s| Ident::new(*s)).collect());
         }
         // The import target is spelled relative to the module the `use` was
         // written in, so the impl it names is registered under that module's
@@ -3144,7 +3175,6 @@ impl Lowerer<'_> {
         let span = expr.span;
         let payload_ty = self.ty_of(expr.id);
         let string_ty = self.tcx.string_ty();
-        let never = self.tcx.never();
         let scrutinee = self.lower_expr(receiver);
         let text = match message {
             Some(message) => self.lower_expr(message),
@@ -3157,6 +3187,30 @@ impl Lowerer<'_> {
                 )),
             },
         };
+        self.expect_match(
+            scrutinee,
+            (carrier_ty, payload_ty),
+            is_option,
+            &substs,
+            text,
+            span,
+        )
+    }
+
+    /// The match `x.expect(text)` lowers to over a lowered `scrutinee` of the
+    /// `Option` or `Result` `carrier_ty`: its payload, or a panic naming
+    /// `text` (and a `Result`'s error).
+    pub(super) fn expect_match(
+        &mut self,
+        scrutinee: HirExpr,
+        (carrier_ty, payload_ty): (Ty, Ty),
+        is_option: bool,
+        substs: &gossamer_types::Substs,
+        text: HirExpr,
+        span: Span,
+    ) -> Option<HirExprKind> {
+        let string_ty = self.tcx.string_ty();
+        let never = self.tcx.never();
         let binding = |this: &mut Self, name: &str, ty: Ty| HirPat {
             id: this.fresh(),
             span,

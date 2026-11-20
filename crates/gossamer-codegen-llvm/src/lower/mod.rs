@@ -890,7 +890,7 @@ fn map_prelude_symbol(name: &str) -> &str {
         "math::ceil" => "gos_rt_math_ceil",
         "sync::yield_now" | "runtime::yield_now" => "gos_rt_go_yield",
         "Mutex::new" | "sync::Mutex::new" | "mutex::new" => "gos_rt_mutex_new",
-        "Map::new" | "sync::Map::new" => "gos_rt_sync_map_new",
+        "sync::Map::new" => "gos_rt_sync_map_new",
         "WaitGroup::new" | "sync::WaitGroup::new" | "wg::new" => "gos_rt_wg_new",
         "I64Vec::new" | "heap_i64::new" => "gos_rt_heap_i64_new",
         "U8Vec::new" | "heap_u8::new" => "gos_rt_heap_u8_new",

@@ -288,6 +288,35 @@ pub fn impl_owner_name(tcx: &TyCtxt, ty: Ty) -> Option<String> {
     }
 }
 
+/// The name an `impl` block on a built-in type registers its methods under,
+/// and a call on a receiver of that type looks them up by. One spelling per
+/// type, whatever path the program wrote it with (`time::Duration`, or
+/// `Duration` after a `use`).
+#[must_use]
+pub fn builtin_impl_owner(tcx: &TyCtxt, ty: Ty) -> Option<&'static str> {
+    Some(match tcx.kind(ty)? {
+        TyKind::String => "String",
+        TyKind::Vec(_) => "Vec",
+        TyKind::HashMap { ordered, .. } => {
+            if *ordered {
+                "BTreeMap"
+            } else {
+                "Map"
+            }
+        }
+        TyKind::Bool => "bool",
+        TyKind::Char => "char",
+        TyKind::Int(int) => int.as_str(),
+        TyKind::Float(float) => float.as_str(),
+        TyKind::Duration => "time::Duration",
+        TyKind::Instant => "time::Instant",
+        TyKind::JsonValue => "json::Value",
+        TyKind::DynValue => "DynValue",
+        TyKind::DynError => "errors::Error",
+        _ => return None,
+    })
+}
+
 /// The name an `impl` block for a structural type registers its methods under.
 ///
 /// A tuple has no path to name it by, so it is named by the arity every tier

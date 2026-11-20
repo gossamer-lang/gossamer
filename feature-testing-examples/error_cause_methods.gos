@@ -1,0 +1,42 @@
+// Every `errors::Error` method answers its declared type on every tier, and
+// a cause read out of an error keeps a share of its own.
+
+use std::errors
+
+fn cause_of() -> Option<errors::Error> {
+    let err = errors::wrap(errors::new("original cause"), "outer")
+    err.cause()
+}
+
+fn main() {
+    let base = errors::new("not found").with_field("path", "/etc/x")
+    let err = errors::wrap(base, "loading config")
+    println(err)
+    println(err.message())
+    println(err.cause())
+    println(err.cause().unwrap())
+    println(err.cause().unwrap().message())
+    let chain = err.chain()
+    println(f"{chain.len()} {chain[1]}")
+    println(err.cause().unwrap().fields())
+    println(err.cause().unwrap().field("path"))
+    println(err.cause().unwrap().field("missing"))
+    println(err.is("not found"))
+    println(err.with_field("k", "v").fields())
+    println(errors::new("plain").cause().is_none())
+
+    let kept = cause_of()
+    let mut junk = #[]
+    for i in 0..1000 {
+        junk.push(errors::new(f"junk {i}"))
+    }
+    println(f"{kept} {junk.len()}")
+
+    let mut total = 0
+    for _ in 0..2000 {
+        if let Some(e) = err.cause() {
+            total += e.message().len()
+        }
+    }
+    println(total)
+}

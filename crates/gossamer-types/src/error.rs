@@ -3449,7 +3449,7 @@ fn no_conversion_help(
     if fallible {
         out = out.with_help(format!("write `impl TryFrom<{from}> for {to}`"))
                         .with_note(
-                            "`.try_into()` between two integer types is built in; every other pair needs a `TryFrom` impl"
+                            "`.try_into()` to an integer type from an integer or a float is built in; every other pair needs a `TryFrom` impl"
                                 .to_string(),
                         );
     } else if borrowed_sequence {

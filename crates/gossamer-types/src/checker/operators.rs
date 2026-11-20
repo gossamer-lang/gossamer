@@ -1161,6 +1161,9 @@ impl TypeChecker<'_> {
             _ => self.check_expr_expecting(operand, operand_expected),
         };
         self.suppressed.borrow_read_conflict = previous_suppression;
+        if let Some(ty) = self.check_big_integer_unary(op, operand_ty, span) {
+            return ty;
+        }
         let resolved = self.infer.resolve(self.tcx, operand_ty);
         match op {
             UnaryOp::Not => self.check_not(operand, operand_ty, resolved, span),
@@ -1467,6 +1470,9 @@ impl TypeChecker<'_> {
         }
         let rhs_ty = self.check_pipe_rhs(op, lhs_ty, rhs);
         if let Some(ty) = self.check_simd_binary(op, lhs_ty, rhs_ty, span) {
+            return ty;
+        }
+        if let Some(ty) = self.check_big_integer_binary(op, (lhs, lhs_ty), (rhs, rhs_ty), span) {
             return ty;
         }
         match op {
@@ -2768,6 +2774,21 @@ impl TypeChecker<'_> {
         matches!(self.tcx.kind(vr), Some(TyKind::String))
     }
 
+    /// Checks the compound assignments a place's own type settles: `+=` of
+    /// text onto a `String`, any operator on a big integer, and the wrapping
+    /// forms and shifts on an integer. Whether `op` was one of them.
+    fn check_special_compound(
+        &mut self,
+        op: gossamer_ast::AssignOp,
+        (place, place_ty): (&Expr, Ty),
+        (value, value_ty): (&Expr, Ty),
+    ) -> bool {
+        (matches!(op, gossamer_ast::AssignOp::AddAssign)
+            && self.is_string_append(place_ty, value_ty))
+            || self.check_big_integer_compound(op, (place, place_ty), (value, value_ty))
+            || self.check_integer_compound_assign(op, (place, place_ty), (value, value_ty))
+    }
+
     /// Checks the compound assignments only an integer place answers: the
     /// wrapping forms and the shifts. Whether `op` was one of them.
     fn check_integer_compound_assign(
@@ -2865,12 +2886,7 @@ impl TypeChecker<'_> {
         {
             return self.tcx.unit();
         }
-        if matches!(op, gossamer_ast::AssignOp::AddAssign)
-            && self.is_string_append(place_ty, value_ty)
-        {
-            return self.tcx.unit();
-        }
-        if self.check_integer_compound_assign(op, (place, place_ty), (value, value_ty)) {
+        if self.check_special_compound(op, (place, place_ty), (value, value_ty)) {
             return self.tcx.unit();
         }
         // Compound assignment on a user struct / enum desugars through the

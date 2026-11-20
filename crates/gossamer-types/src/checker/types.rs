@@ -213,6 +213,12 @@ impl TypeChecker<'_> {
         {
             return self_ty;
         }
+        // A standard type a `use` names is the type its full path names, so
+        // `use std::time::Duration` then `d: Duration` is `time::Duration`,
+        // and `use std::sync::Map` then `m: Map` is the concurrent map.
+        if let Some(expanded) = self.imported_std_type_path(node, path) {
+            return self.type_from_ast_path(node, span, &expanded);
+        }
         if path.segments.len() >= 2
             && let Some(projected) = self.resolve_assoc_type_projection(path, span)
         {
@@ -346,6 +352,20 @@ impl TypeChecker<'_> {
         // type, so the qualified one reduces to its last segment before
         // the table below keys on it. A user type reached by a qualified
         // path resolved above, so nothing here can capture one.
+        // A standard handle written under its module (`sync::Map`) is that
+        // handle, ahead of a built-in that shares its last segment.
+        if path.segments.len() > 1 {
+            let written: Vec<&str> = path
+                .segments
+                .iter()
+                .map(|seg| seg.name.name.as_str())
+                .collect();
+            if let Some((offset, name)) = stdlib_handle_by_path(&written)
+                && name.split("::").next() == written.iter().rev().nth(1).copied()
+            {
+                return self.handle_annotation_ty(offset, name, path, span);
+            }
+        }
         let head_name = builtin_type_head(path).unwrap_or(head_name);
         // Fallback for built-in generic enums the resolver doesn't
         // hand out a DefId for (`Result<T, E>`, `Option<T>`). Without
@@ -611,6 +631,15 @@ impl TypeChecker<'_> {
         ) {
             return self.tcx.instant_ty();
         }
+        if let ["std", "math", "big", leaf] | ["math", "big", leaf] | ["big", leaf] =
+            segs.as_slice()
+        {
+            match *leaf {
+                "Int" => return self.tcx.big_int_ty(),
+                "Uint" => return self.tcx.big_uint_ty(),
+                _ => {}
+            }
+        }
         if matches!(segs.as_slice(), ["flag", "Set"] | ["std", "flag", "Set"]) {
             return self.flag_set_ty();
         }
@@ -731,24 +760,67 @@ impl TypeChecker<'_> {
             .map(|seg| seg.name.name.as_str())
             .collect();
         if let Some((offset, name)) = stdlib_handle_by_path(&written) {
-            // The guarded slot carries an integer on every tier, so a
-            // `Shared<T>` naming anything else is refused where it is
-            // written, and the binding it types reports nothing further.
-            if name == "sync::Shared"
-                && let Some(guarded) = self.substs_from_ast(path).types().first().copied()
-            {
-                let guarded = self.infer.resolve(self.tcx, guarded);
-                if self.is_concrete(guarded)
-                    && !matches!(self.tcx.kind_of(guarded), TyKind::Int(_) | TyKind::Error)
-                {
-                    let ty = self.render_public_ty(guarded);
-                    self.emit(TypeError::SharedPayloadUnsupported { ty }, span);
-                    return self.tcx.error_ty();
-                }
-            }
-            return self.stdlib_handle_ty(offset, name);
+            return self.handle_annotation_ty(offset, name, path, span);
         }
         self.fresh()
+    }
+
+    /// The full path of a single-segment type a `use` bound to a standard
+    /// type, with the written segment's generic arguments on its last segment.
+    /// `None` for any other path, including a program's own imported type.
+    fn imported_std_type_path(&self, node: NodeId, path: &TypePath) -> Option<TypePath> {
+        let [segment] = path.segments.as_slice() else {
+            return None;
+        };
+        let Some(Resolution::Import { use_id }) = self.resolutions.get(node) else {
+            return None;
+        };
+        if self.resolutions.import_def(node).is_some() {
+            return None;
+        }
+        let full = self
+            .import_targets
+            .get(&(use_id, segment.name.name.clone()))?;
+        let [head, middle @ .., leaf] = full.as_slice() else {
+            return None;
+        };
+        if head != "std" || middle.is_empty() {
+            return None;
+        }
+        let mut segments: Vec<gossamer_ast::TypePathSegment> = full[..full.len() - 1]
+            .iter()
+            .map(|name| gossamer_ast::TypePathSegment::new(name.clone()))
+            .collect();
+        let mut last = segment.clone();
+        last.name = gossamer_ast::Ident::new(leaf.clone());
+        segments.push(last);
+        Some(TypePath { segments })
+    }
+
+    /// The handle type an annotation names. The guarded slot of a `Shared<T>`
+    /// carries an integer on every tier, so one naming anything else is
+    /// refused where it is written, and the binding it types reports nothing
+    /// further.
+    fn handle_annotation_ty(
+        &mut self,
+        offset: u32,
+        name: &'static str,
+        path: &gossamer_ast::TypePath,
+        span: Span,
+    ) -> Ty {
+        if name == "sync::Shared"
+            && let Some(guarded) = self.substs_from_ast(path).types().first().copied()
+        {
+            let guarded = self.infer.resolve(self.tcx, guarded);
+            if self.is_concrete(guarded)
+                && !matches!(self.tcx.kind_of(guarded), TyKind::Int(_) | TyKind::Error)
+            {
+                let ty = self.render_public_ty(guarded);
+                self.emit(TypeError::SharedPayloadUnsupported { ty }, span);
+                return self.tcx.error_ty();
+            }
+        }
+        self.stdlib_handle_ty(offset, name)
     }
 
     /// `traits` followed by every supertrait reachable from them, in

@@ -12,7 +12,12 @@ const SOURCE_VISIBLE_VIA_REWRITE: &[&str] = &[
     // `__gos_*_read_raw` leaf, which takes the three limits, into entries.
     "archive::tar::read_limited",
     "archive::zip::read_limited",
+    // `INDEX_MAP_WRAPPERS` / `BIT_SET_WRAPPERS` / `DECIMAL_WRAPPERS`: types
+    // written in Gossamer.
+    "collections::BitSet",
+    "collections::IndexMap",
     "exec::spawn_piped",
+    "math::Decimal",
     "os::exec::spawn_piped",
     "path::Path",
     "path::Path::as_str",

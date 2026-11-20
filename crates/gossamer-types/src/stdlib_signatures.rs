@@ -2214,7 +2214,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::math::big",
         name: "int_div",
-        signature: "fn int_div(a: big::Int, b: big::Int) -> big::Int",
+        signature: "fn int_div(a: big::Int, b: big::Int) -> Result<big::Int, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::math::big",
@@ -2269,7 +2269,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::math::big",
         name: "int_rem",
-        signature: "fn int_rem(a: big::Int, b: big::Int) -> big::Int",
+        signature: "fn int_rem(a: big::Int, b: big::Int) -> Result<big::Int, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::math::big",
@@ -2284,7 +2284,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::math::big",
         name: "int_to_i64",
-        signature: "fn int_to_i64(value: big::Int) -> Result<i64, errors::Error>",
+        signature: "fn int_to_i64(value: big::Int) -> Option<i64>",
     },
     StdFunctionSignature {
         module_path: "std::math::big",
@@ -2344,7 +2344,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::math::big",
         name: "uint_to_u64",
-        signature: "fn uint_to_u64(value: big::Uint) -> Result<u64, errors::Error>",
+        signature: "fn uint_to_u64(value: big::Uint) -> Option<u64>",
     },
     StdFunctionSignature {
         module_path: "std::math::bits",
@@ -3355,6 +3355,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         module_path: "std::runtime",
         name: "is_main_thread",
         signature: "fn is_main_thread() -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::runtime",
+        name: "backtrace",
+        signature: "fn backtrace() -> String",
     },
     StdFunctionSignature {
         module_path: "std::runtime",

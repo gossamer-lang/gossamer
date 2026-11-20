@@ -78,6 +78,10 @@ impl FlatEnumLayout {
     }
 }
 
+/// Sentinel offsets of the `math::big` integer types, past the handle band.
+const BIG_INT_DEF_OFFSET: u32 = 65;
+const BIG_UINT_DEF_OFFSET: u32 = 66;
+
 /// Interner that maps [`TyKind`]s to stable [`Ty`] handles.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TyCtxt {
@@ -494,6 +498,39 @@ impl TyCtxt {
         let ty = self.intern(TyKind::DynError);
         self.primitives.dyn_error = Some(ty);
         ty
+    }
+
+    /// `math::big::Int`, an arbitrary-precision signed integer. Every tier
+    /// holds one as its canonical decimal text, so it is a distinct type over
+    /// a `String` representation.
+    pub fn big_int_ty(&mut self) -> Ty {
+        self.big_integer_ty(BIG_INT_DEF_OFFSET, "big::Int")
+    }
+
+    /// `math::big::Uint`, an arbitrary-precision unsigned integer held as its
+    /// canonical decimal text.
+    pub fn big_uint_ty(&mut self) -> Ty {
+        self.big_integer_ty(BIG_UINT_DEF_OFFSET, "big::Uint")
+    }
+
+    fn big_integer_ty(&mut self, offset: u32, name: &'static str) -> Ty {
+        let def = gossamer_resolve::DefId::local(u32::MAX - offset);
+        self.register_def_name(def, name);
+        let repr = self.string_ty();
+        self.intern(TyKind::Nominal { def, repr })
+    }
+
+    /// Whether `ty` is `math::big::Int` (`Some(true)`), `math::big::Uint`
+    /// (`Some(false)`), or neither (`None`).
+    #[must_use]
+    pub fn big_integer_signed(&self, ty: Ty) -> Option<bool> {
+        match self.kind(ty)? {
+            TyKind::Nominal { def, .. } if def.local == u32::MAX - BIG_INT_DEF_OFFSET => Some(true),
+            TyKind::Nominal { def, .. } if def.local == u32::MAX - BIG_UINT_DEF_OFFSET => {
+                Some(false)
+            }
+            _ => None,
+        }
     }
 
     /// Interns the transparent `time::Duration` newtype. Backed by an

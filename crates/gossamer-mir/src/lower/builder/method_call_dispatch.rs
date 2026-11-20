@@ -1091,7 +1091,7 @@ impl<'a> Builder<'a> {
                 })
             }
             "gos_rt_json_get" | "gos_rt_json_at" | "gos_rt_json_parse" => self.tcx.json_value_ty(),
-            "gos_rt_error_cause" => self.option_adt_ty(),
+            "gos_rt_error_cause" => self.option_error_adt_ty(),
             "gos_rt_error_chain" => {
                 let e = self.tcx.dyn_error_ty();
                 self.tcx.intern(gossamer_types::TyKind::Vec(e))
