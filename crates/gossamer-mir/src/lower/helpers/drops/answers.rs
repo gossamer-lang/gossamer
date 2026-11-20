@@ -266,8 +266,8 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
 
     // Candidates: (local, release-intrinsic, optional meta symbol),
     // harvested from release calls sitting in Return blocks.
-    let mut candidates: Vec<(Local, &'static str, Option<String>)> = Vec::new();
-    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut candidates: Vec<ReleaseCandidate> = Vec::new();
+    let mut seen: std::collections::HashSet<(u32, Option<u32>)> = std::collections::HashSet::new();
     for block in &body.blocks {
         if !matches!(block.terminator, Terminator::Return) {
             continue;
@@ -283,6 +283,19 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
             let Some(Operand::Copy(p)) = args.first() else {
                 continue;
             };
+            // A channel end held in a tuple field (the pair `channel()`
+            // answers, before it is destructured) is released with the
+            // field, so the end's last release is not held to the return.
+            if let [crate::ir::Projection::Field(field)] = p.projection.as_slice()
+                && *name == "gos_rt_rc_release"
+                && !lends(p.local)
+                && channel_end_field(tcx, body.locals[p.local.0 as usize].ty, *field)
+            {
+                if seen.insert((p.local.0, Some(*field))) {
+                    candidates.push((p.local, "gos_rt_rc_release", None, Some(*field)));
+                }
+                continue;
+            }
             if !p.projection.is_empty() {
                 continue;
             }
@@ -308,7 +321,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                 "gos_rt_option_slot_release" if !lends(p.local) => "gos_rt_option_slot_release",
                 _ => continue,
             };
-            if !seen.insert(p.local.0) {
+            if !seen.insert((p.local.0, None)) {
                 continue;
             }
             let meta = if release == "gos_rt_aggr_release_children" {
@@ -319,7 +332,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
             } else {
                 None
             };
-            candidates.push((p.local, release, meta));
+            candidates.push((p.local, release, meta, None));
         }
     }
     if candidates.is_empty() {
@@ -350,7 +363,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
         )
     });
     if has_downgrade {
-        candidates.retain(|(_, release, _)| {
+        candidates.retain(|(_, release, _, _)| {
             *release != "gos_rt_rc_release" && *release != "gos_rt_rc_weak_release"
         });
         if candidates.is_empty() {
@@ -601,8 +614,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
     // Per candidate: blocks from whose EXIT a mention is reachable.
     // Fixpoint over the reversed edges.
     let mut inserts_after_stmt: Vec<Vec<PendingRelease>> = vec![Vec::new(); n_blocks];
-    let mut inserts_at_head: Vec<Vec<(Local, &'static str, Option<String>)>> =
-        vec![Vec::new(); n_blocks];
+    let mut inserts_at_head: Vec<Vec<ReleaseCandidate>> = vec![Vec::new(); n_blocks];
     // Blocks whose exit reaches a mention, found by walking predecessors back
     // from the mentioning blocks; a stamp per candidate marks them.
     let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n_blocks];
@@ -616,7 +628,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
     let mut reach_stamp: Vec<u32> = vec![0; n_blocks];
     let mut stamp = 0u32;
     let mut stack: Vec<usize> = Vec::new();
-    for (l, release, meta) in &candidates {
+    for (l, release, meta, field) in &candidates {
         let li = l.0 as usize;
         if li >= n_locals || pinned[li] {
             continue;
@@ -656,10 +668,10 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
             }
             if m.term {
                 for &s in &succs[bi] {
-                    inserts_at_head[s].push((*l, release, meta.clone()));
+                    inserts_at_head[s].push((*l, release, meta.clone(), *field));
                 }
             } else if let Some(si) = m.last_stmt {
-                inserts_after_stmt[bi].push((si, *l, release, meta.clone()));
+                inserts_after_stmt[bi].push((si, *l, release, meta.clone(), *field));
             }
         }
     }
@@ -675,12 +687,20 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
     let release_stmts = |l: Local,
                          release: &'static str,
                          meta: &Option<String>,
+                         field: Option<u32>,
                          span: gossamer_lex::Span,
                          next_unit: &mut usize|
      -> Vec<Statement> {
         let dest = Local(u32::try_from(*next_unit).expect("local overflow"));
         *next_unit += 1;
-        let mut args = vec![Operand::Copy(Place::local(l))];
+        let held = match field {
+            Some(field) => Place {
+                local: l,
+                projection: vec![crate::ir::Projection::Field(field)],
+            },
+            None => Place::local(l),
+        };
+        let mut args = vec![Operand::Copy(held.clone())];
         if let Some(sym) = meta {
             args.push(Operand::Const(ConstValue::Str(sym.clone())));
         }
@@ -719,7 +739,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
         } else {
             v.push(Statement {
                 kind: StatementKind::Assign {
-                    place: Place::local(l),
+                    place: held,
                     rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
                 },
                 span,
@@ -767,8 +787,8 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
         let mut head_emitted = false;
         let emit_head = |new_stmts: &mut Vec<Statement>, next_unit: &mut usize| -> usize {
             let before = *next_unit;
-            for (l, release, meta) in &head {
-                new_stmts.extend(release_stmts(*l, release, meta, span, next_unit));
+            for (l, release, meta, field) in &head {
+                new_stmts.extend(release_stmts(*l, release, meta, *field, span, next_unit));
             }
             *next_unit - before
         };
@@ -778,10 +798,17 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                 head_emitted = true;
             }
             new_stmts.push(stmt);
-            for (asi, l, release, meta) in &after {
+            for (asi, l, release, meta, field) in &after {
                 if *asi == si {
                     let before = next_unit;
-                    new_stmts.extend(release_stmts(*l, release, meta, span, &mut next_unit));
+                    new_stmts.extend(release_stmts(
+                        *l,
+                        release,
+                        meta,
+                        *field,
+                        span,
+                        &mut next_unit,
+                    ));
                     new_unit_locals += next_unit - before;
                 }
             }
@@ -799,6 +826,23 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
             region: false,
         });
     }
+}
+
+/// A release the early-release pass can move: the local (or the tuple field
+/// of it the last element names), the release intrinsic, and its optional
+/// meta symbol.
+type ReleaseCandidate = (Local, &'static str, Option<String>, Option<u32>);
+
+/// Whether field `field` of a value of type `ty` is a channel end: a tuple
+/// whose element there is a `Sender` or a `Receiver`.
+fn channel_end_field(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty, field: u32) -> bool {
+    use gossamer_types::TyKind;
+    let TyKind::Tuple(elems) = tcx.kind_of(ty) else {
+        return false;
+    };
+    elems
+        .get(field as usize)
+        .is_some_and(|elem| matches!(tcx.kind_of(*elem), TyKind::Sender(_) | TyKind::Receiver(_)))
 }
 
 /// The `gos_rt_result_payload_release` kind of an option holder's `Err`

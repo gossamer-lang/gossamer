@@ -266,6 +266,16 @@ impl<'tcx> FnBuilder<'tcx> {
                     // silently dropping the bindings.
                     let init_reg = self.compile_expr(init)?;
                     self.bind_pattern_locals(pattern, init_reg)?;
+                    // The bindings hold the parts of a fresh value; the
+                    // whole one is released once they are bound, as the
+                    // compiled tiers release it, so nothing it holds - a
+                    // channel's `Receiver`, say - outlives its bindings.
+                    if !is_place_expr(init) && !self.reg_is_bound_local(init_reg) {
+                        self.emit(Op::ClearRegs {
+                            start: init_reg,
+                            count: 1,
+                        });
+                    }
                 }
                 Ok(false)
             }

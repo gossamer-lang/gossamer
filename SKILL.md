@@ -375,6 +375,11 @@ fn main() {
 }
 ```
 
+- A send whose channel has no `Receiver` left completes at once and drops
+  its value, so a worker racing others to answer one `recv` finishes when
+  the receiver goes; `try_send` answers whether the value was taken. The
+  last `Sender` going closes the channel, so a `while let Some(v) =
+  rx.recv()` drain ends once every producer is done.
 - In `main`, join what you name: `let task = spawn(..)` never joined is
   GL0065, and `main` goes on (and can exit) before the task's work is
   done. Goroutines `main` leaves running get up to 30 s at exit; ones

@@ -228,21 +228,26 @@ fn a_sender_whose_value_was_taken_keeps_a_race_join_alive() {
 
 /// Goroutines `main` leaves parked on channels nothing can serve any more
 /// are reported and left the moment `main` returns, on every tier, rather
-/// than waited on until the drain's bound. More of them are parked than the
-/// VM's limit on goroutines running at once, which bounds running ones only.
+/// than waited on until the drain's bound. Each goroutine waits to receive
+/// on a channel whose only sender it holds itself. More of them are parked than the VM's
+/// soft limit on worker threads, past which it grows only when a queued
+/// goroutine is all that can move the program.
 #[test]
 fn goroutines_left_blocked_past_main_are_reported_at_once() {
     let name = "left_blocked";
     let source = r#"use std::sync::channel
 
+fn wait_on_itself() {
+    let tx, rx = channel::<i64>()
+    let got = rx.recv()
+    tx.send(0)
+}
+
 fn main() {
     for i in 0..1100 {
-        let tx, rx = channel()
-        spawn(|| tx.send(i))
-        spawn(|| tx.send(i + 1))
-        let first = rx.recv()
+        spawn(|| wait_on_itself())
     }
-    println("done")
+    println("done 1100")
 }
 "#;
     let dir = std::env::temp_dir().join(format!("gos-deadlock-{name}-{}", std::process::id()));
@@ -253,7 +258,7 @@ fn main() {
         assert_eq!(output.status.code(), Some(0), "{tier} stderr:\n{stderr}");
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "done\n",
+            "done 1100\n",
             "{tier} stdout"
         );
         assert!(

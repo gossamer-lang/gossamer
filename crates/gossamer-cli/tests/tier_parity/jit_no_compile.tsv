@@ -98,6 +98,7 @@ feature-testing-examples/chan_send_value_semantics.gos	cross-goroutine
 feature-testing-examples/chan_struct_local_recv.gos	bytecode-only local
 feature-testing-examples/chan_struct_owned_fields.gos	cross-goroutine
 feature-testing-examples/chan_struct_payload.gos	bytecode-only local
+feature-testing-examples/channel_ends_released.gos	cross-goroutine
 feature-testing-examples/channel_fan_in.gos	cross-goroutine
 feature-testing-examples/channel_progress_not_deadlock.gos	cross-goroutine
 feature-testing-examples/channel_semantics_conformance.gos	cross-goroutine

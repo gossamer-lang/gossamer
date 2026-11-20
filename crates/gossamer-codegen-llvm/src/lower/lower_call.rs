@@ -959,11 +959,21 @@ impl<'a> Lowerer<'a> {
                 "  {tmp} = call ptr @gos_rt_chan_new(i32 8, i64 {cap})"
             )
             .unwrap();
-            // The channel is a counted node born with one share, and the
-            // pair holds it twice - once as the sender, once as the receiver
-            // - each end released on its own.
-            declare_rt(&mut self.runtime_refs, "gos_rt_rc_retain");
-            writeln!(self.out, "  call void @gos_rt_rc_retain(ptr {tmp})").unwrap();
+            // The channel is a counted node born with one share. The receiver
+            // is a node of its own holding a second share, so the release of
+            // its last copy is the moment no send can be taken again.
+            declare_rt(&mut self.runtime_refs, "gos_rt_chan_receiver");
+            let rx = self.fresh();
+            writeln!(
+                self.out,
+                "  {rx} = call ptr @gos_rt_chan_receiver(ptr {tmp})"
+            )
+            .unwrap();
+            // The sender end takes over the channel's first share, so the
+            // release of its last copy closes the channel.
+            declare_rt(&mut self.runtime_refs, "gos_rt_chan_sender");
+            let tx = self.fresh();
+            writeln!(self.out, "  {tx} = call ptr @gos_rt_chan_sender(ptr {tmp})").unwrap();
             // Materialise a fresh 16-byte tuple buffer so the
             // `(Sender, Receiver)` projections both observe the
             // same channel handle. The destination MIR local may
@@ -985,14 +995,14 @@ impl<'a> Lowerer<'a> {
                 "  {slot0} = getelementptr i64, ptr {pair_buf}, i64 0"
             )
             .unwrap();
-            writeln!(self.out, "  store ptr {tmp}, ptr {slot0}").unwrap();
+            writeln!(self.out, "  store ptr {tx}, ptr {slot0}").unwrap();
             let slot1 = self.fresh();
             writeln!(
                 self.out,
                 "  {slot1} = getelementptr i64, ptr {pair_buf}, i64 1"
             )
             .unwrap();
-            writeln!(self.out, "  store ptr {tmp}, ptr {slot1}").unwrap();
+            writeln!(self.out, "  store ptr {rx}, ptr {slot1}").unwrap();
             let dest_slot = if destination.projection.is_empty() {
                 local_slot(destination.local)
             } else {
@@ -1012,14 +1022,14 @@ impl<'a> Lowerer<'a> {
                     "  {d0} = getelementptr i64, ptr {dest_slot}, i64 0"
                 )
                 .unwrap();
-                writeln!(self.out, "  store ptr {tmp}, ptr {d0}").unwrap();
+                writeln!(self.out, "  store ptr {tx}, ptr {d0}").unwrap();
                 let d1 = self.fresh();
                 writeln!(
                     self.out,
                     "  {d1} = getelementptr i64, ptr {dest_slot}, i64 1"
                 )
                 .unwrap();
-                writeln!(self.out, "  store ptr {tmp}, ptr {d1}").unwrap();
+                writeln!(self.out, "  store ptr {rx}, ptr {d1}").unwrap();
             } else {
                 // Single-ptr destination (the tuple shape was erased): store
                 // the buffer address so downstream `.0` / `.1` projections

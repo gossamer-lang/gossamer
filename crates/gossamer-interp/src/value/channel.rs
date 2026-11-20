@@ -31,7 +31,60 @@ pub enum SendOutcome {
 /// Gossamer code that wants non-blocking producer growth.
 #[derive(Clone)]
 pub struct Channel {
-    inner: Arc<ChannelInner>,
+    inner: Arc<ChannelEnd>,
+}
+
+/// One half of a channel: every copy of a sender shares one, and every copy
+/// of a `Receiver` `channel()` built shares another, so the receiver's is
+/// dropped with its last copy, the moment no send on the channel can be
+/// taken again.
+struct ChannelEnd {
+    chan: Arc<ChannelInner>,
+    kind: EndKind,
+}
+
+/// Which half of a `channel()` pair an end is, or neither for a channel
+/// reached some other way (a join handle, a timer).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EndKind {
+    Plain,
+    Sender,
+    Receiver,
+}
+
+impl std::ops::Deref for ChannelEnd {
+    type Target = ChannelInner;
+
+    fn deref(&self) -> &ChannelInner {
+        &self.chan
+    }
+}
+
+impl Drop for ChannelEnd {
+    /// The last copy of a `Receiver` going means no send can be taken again;
+    /// the last copy of a `Sender` going means nothing can send again, which
+    /// closes the channel.
+    fn drop(&mut self) {
+        let mut guard = self.chan.state.lock();
+        match self.kind {
+            EndKind::Plain => return,
+            EndKind::Receiver => guard.receivers_gone = true,
+            EndKind::Sender => {
+                if guard.closed {
+                    return;
+                }
+                guard.closed = true;
+            }
+        }
+        guard.wake_senders();
+        Channel::sync_ready_count(&mut guard);
+        let selects = guard.select_waiters.clone();
+        drop(guard);
+        self.chan.cv.notify_all();
+        for waiter in selects {
+            waiter.wake();
+        }
+    }
 }
 
 impl Channel {
@@ -40,7 +93,7 @@ impl Channel {
     /// to the handle its joiner holds.
     #[must_use]
     pub fn identity(&self) -> usize {
-        Arc::as_ptr(&self.inner) as usize
+        Arc::as_ptr(&self.inner.chan) as usize
     }
 }
 
@@ -77,6 +130,9 @@ struct ChannelState {
     /// send has completed, so it is never stuck.
     handed_unobserved: usize,
     select_waiters: Vec<Arc<SelectWaiter>>,
+    /// Set once every `Receiver` of the channel is gone: no send can be taken
+    /// again, so a send completes at once and drops its value.
+    receivers_gone: bool,
     /// Whether this channel currently contributes to the pending-handoff count
     /// maintained through [`crate::vm::goroutine::adjust_pending_handoffs`],
     /// kept in step with [`ChannelState::has_ready_waiter`] so the global count
@@ -119,6 +175,9 @@ impl ChannelState {
         }
         if self.waiting_senders == 0 {
             return false;
+        }
+        if self.receivers_gone {
+            return true;
         }
         match self.capacity {
             // An unbuffered sender's value is queued until a receiver takes
@@ -260,23 +319,50 @@ impl Channel {
 
     fn with_mode(capacity: ChannelCapacity) -> Self {
         let channel = Self {
-            inner: Arc::new(ChannelInner {
-                state: Mutex::new(ChannelState {
-                    buf: VecDeque::new(),
-                    capacity,
-                    closed: false,
-                    next_send_id: 1,
-                    waiting_receivers: 0,
-                    waiting_senders: 0,
-                    handed_unobserved: 0,
-                    select_waiters: Vec::new(),
-                    counted_ready: false,
+            inner: Arc::new(ChannelEnd {
+                kind: EndKind::Plain,
+                chan: Arc::new(ChannelInner {
+                    state: Mutex::new(ChannelState {
+                        buf: VecDeque::new(),
+                        capacity,
+                        closed: false,
+                        next_send_id: 1,
+                        waiting_receivers: 0,
+                        waiting_senders: 0,
+                        handed_unobserved: 0,
+                        select_waiters: Vec::new(),
+                        receivers_gone: false,
+                        counted_ready: false,
+                    }),
+                    cv: parking_lot::Condvar::new(),
                 }),
-                cv: parking_lot::Condvar::new(),
             }),
         };
-        register_live_channel(&channel.inner);
+        register_live_channel(&channel.inner.chan);
         channel
+    }
+
+    /// The `Receiver` half of a new channel's pair: a copy of this channel
+    /// carrying the end whose last release ends every send on it.
+    #[must_use]
+    pub fn receiver(&self) -> Self {
+        self.end(EndKind::Receiver)
+    }
+
+    /// The `Sender` half of a new channel's pair: a copy of this channel
+    /// carrying the end whose last release closes it.
+    #[must_use]
+    pub fn sender(&self) -> Self {
+        self.end(EndKind::Sender)
+    }
+
+    fn end(&self, kind: EndKind) -> Self {
+        Self {
+            inner: Arc::new(ChannelEnd {
+                chan: Arc::clone(&self.inner.chan),
+                kind,
+            }),
+        }
     }
 
     /// Pushes `value` onto the channel and notifies any parked
@@ -292,6 +378,11 @@ impl Channel {
         // expects it delivered. Go panics here and so does this.
         if guard.closed {
             return SendOutcome::Closed;
+        }
+        // No receiver can ever take the value: the send completes and the
+        // value is dropped rather than waiting forever.
+        if guard.receivers_gone {
+            return SendOutcome::Sent;
         }
         match guard.capacity {
             ChannelCapacity::Unbuffered => {
@@ -313,6 +404,7 @@ impl Channel {
                 let mut deadlocked = false;
                 while guard.buf.iter().any(|msg| msg.id == id)
                     && !guard.closed
+                    && !guard.receivers_gone
                     // A cancelled cohort has no reader left to take this
                     // value, so the send stops waiting for a handoff that
                     // is not coming.
@@ -351,6 +443,13 @@ impl Channel {
                     guard.buf.retain(|msg| msg.id != id);
                     return SendOutcome::Closed;
                 }
+                // Every receiver went while this send waited: the value is
+                // withdrawn and dropped.
+                if guard.receivers_gone {
+                    guard.buf.retain(|msg| msg.id != id);
+                    Self::sync_ready_count(&mut guard);
+                    return SendOutcome::Sent;
+                }
             }
             ChannelCapacity::Unbounded => {
                 guard.buf.push_back(ChannelMessage {
@@ -361,26 +460,8 @@ impl Channel {
                 self.notify_channel_changed(&mut guard);
             }
             ChannelCapacity::Bounded(capacity) => {
-                if guard.buf.len() >= capacity {
-                    guard.waiting_senders += 1;
-                    Self::sync_ready_count(&mut guard);
-                    let mut deadlocked = false;
-                    while guard.buf.len() >= capacity {
-                        let Some(_waiting) =
-                            crate::vm::goroutine::ChannelWait::enter("send", || {
-                                guard.has_ready_waiter()
-                            })
-                        else {
-                            deadlocked = true;
-                            break;
-                        };
-                        self.inner.cv.wait(&mut guard);
-                    }
-                    guard.waiting_senders = guard.waiting_senders.saturating_sub(1);
-                    Self::sync_ready_count(&mut guard);
-                    if deadlocked {
-                        return SendOutcome::Deadlocked;
-                    }
+                if let Some(outcome) = self.wait_for_room(&mut guard, capacity) {
+                    return outcome;
                 }
                 guard.buf.push_back(ChannelMessage {
                     id: 0,
@@ -398,6 +479,38 @@ impl Channel {
         SendOutcome::Sent
     }
 
+    /// Waits until a bounded channel has room for one more value. Answers
+    /// the send's outcome when it ends without queuing: nothing left can
+    /// make room, or no receiver is left to take the value, which completes
+    /// the send.
+    fn wait_for_room(
+        &self,
+        guard: &mut parking_lot::MutexGuard<'_, ChannelState>,
+        capacity: usize,
+    ) -> Option<SendOutcome> {
+        if guard.buf.len() < capacity {
+            return None;
+        }
+        guard.waiting_senders += 1;
+        Self::sync_ready_count(guard);
+        let mut deadlocked = false;
+        while guard.buf.len() >= capacity && !guard.receivers_gone {
+            let Some(_waiting) =
+                crate::vm::goroutine::ChannelWait::enter("send", || guard.has_ready_waiter())
+            else {
+                deadlocked = true;
+                break;
+            };
+            self.inner.cv.wait(guard);
+        }
+        guard.waiting_senders = guard.waiting_senders.saturating_sub(1);
+        Self::sync_ready_count(guard);
+        if deadlocked {
+            return Some(SendOutcome::Deadlocked);
+        }
+        guard.receivers_gone.then_some(SendOutcome::Sent)
+    }
+
     /// Non-blocking send. Enqueues `value` and returns `true` when the
     /// operation can complete immediately; returns
     /// `false` without enqueueing when a bounded buffer is at capacity.
@@ -408,6 +521,9 @@ impl Channel {
         let mut guard = self.inner.state.lock();
         if guard.closed {
             return SendOutcome::Closed;
+        }
+        if guard.receivers_gone {
+            return SendOutcome::Deadlocked;
         }
         match guard.capacity {
             ChannelCapacity::Unbuffered => {
@@ -575,7 +691,7 @@ impl Channel {
     /// between the read and the wait.
     #[must_use]
     pub fn waker(&self) -> std::task::Waker {
-        std::task::Waker::from(Arc::new(ChannelWake(Arc::clone(&self.inner))))
+        std::task::Waker::from(Arc::new(ChannelWake(Arc::clone(&self.inner.chan))))
     }
 
     /// Returns `true` when the channel currently has at least one

@@ -2909,6 +2909,8 @@ Channel operations (non-`select`):
 
 - `tx.send(v)` - blocks until a receiver is ready (unbuffered) or
   buffer has capacity.
+- `tx.try_send(v) -> bool` - hands `v` over only if the channel can take it
+  now, and answers whether it did.
 - `rx.recv() -> Option<T>` - blocks until a sender sends a value or
   the channel is closed; returns `None` when the channel is closed and
   drained.
@@ -2917,6 +2919,33 @@ Channel operations (non-`select`):
   Receives drain buffered values then return `None`.
 
 Channels are many-to-many. Close only once.
+
+**A send with no receiver left completes.** Every copy of a channel's
+`Receiver` counts, and the moment the last one is released no send on the
+channel can ever be taken. From then a `send` completes at once and drops
+its value, a sender already waiting is released the same way, and
+`try_send` answers `false`. Without this, a goroutine whose value nobody
+will ever take would wait, and hold that value, for the life of the program:
+
+```gossamer
+for i in 0..rounds {
+    let tx, rx = channel()
+    spawn(|| tx.send(work(i)))
+    spawn(|| tx.send(work(i + 1)))
+    let first = rx.recv()
+}   // `rx` goes here, so the slower worker's send completes
+```
+
+**The last sender going closes the channel.** Every copy of a channel's
+`Sender` counts the same way, and releasing the last one closes the channel
+as `tx.close()` does: a receive drains what was sent and then answers
+`None`, so `while let Some(v) = rx.recv()` ends once every producer is done
+with its sender.
+
+A binding is released when its block ends, or after its last use, on every
+tier; a spawned closure's captures are its own copies, so the spawning
+binding is free after the `spawn`. A channel end kept in a collection or a
+struct stays alive for as long as that value lives.
 
 **Deadlock is reported, not waited on.** When a channel operation would
 block and **no goroutine is left running**, the caller is the whole program:
