@@ -471,6 +471,12 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
         "the VM compiles and matches patterns in `regex_builtins.rs`",
     ),
     (
+        "gos_rt_runtime_backtrace_at",
+        "the VM answers `runtime::backtrace()` from its own call stack through the \
+         `runtime::backtrace` builtin, which names the calling function at the \
+         call's position as this native form does",
+    ),
+    (
         "gos_rt_retain_held",
         "the VM's values are counted by `Arc`, and an `arena` block's values are \
          ordinary VM values that a node holding one keeps alive by its own `Arc`",
