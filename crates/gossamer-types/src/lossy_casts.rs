@@ -344,6 +344,13 @@ fn int_check(values: Range, target: Range) -> Option<CastCheck> {
     (least.is_some() || greatest.is_some()).then_some(CastCheck::Int { least, greatest })
 }
 
+/// The test a float of type `source` passes when it truncates to a value
+/// `target` holds, which `as` and `try_into` share.
+#[must_use]
+pub fn float_to_int_check(source: FloatTy, target: IntTy) -> CastCheck {
+    float_check(source, int_range(target))
+}
+
 /// The test a float of type `source` passes when it truncates to a value in
 /// `target`: above the integer below the least, or at the least where that
 /// integer is no `source` value, and below the integer past the greatest.

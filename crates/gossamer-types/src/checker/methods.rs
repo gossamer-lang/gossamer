@@ -65,7 +65,12 @@ impl TypeChecker<'_> {
                         );
                     }
                 }
-                Some(self.tcx.unit())
+                // `try_send` answers whether the channel took the value.
+                Some(if method == "try_send" {
+                    self.tcx.bool_ty()
+                } else {
+                    self.tcx.unit()
+                })
             }
             _ => None,
         }
@@ -836,12 +841,25 @@ impl TypeChecker<'_> {
         self.check_method_arity(call_id, resolved, method, args, span);
         self.maybe_reject_unknown_adt_method(resolved, method, span);
         if self.reject_unknown_scalar_method(resolved, method, span)
-            || self.reject_unknown_time_method(resolved, method, span)
+            || self.reject_unknown_closed_surface_method(resolved, method, span)
         {
             return self.tcx.error_ty();
         }
         if self.reject_unknown_stdlib_handle_method(resolved, method, span) {
             return self.tcx.error_ty();
+        }
+        // Every value renders with `{}`, and `to_string()` answers that text
+        // unless an `impl` for this receiver declares a method of its own. A
+        // value with no text form has no `to_string()` either; a callable has
+        // no methods at all, which the unresolved-method report says.
+        if method == "to_string" && arg_count == 0 && !self.user_impl_declares(resolved, method) {
+            if let Some((ty, class)) = self.not_displayable_as(resolved, true)
+                && class != crate::error::NotDisplayableClass::Callable
+            {
+                self.emit(TypeError::ValueNotDisplayable { ty, class }, span);
+                return self.tcx.error_ty();
+            }
+            return self.tcx.string_ty();
         }
         let result = self.fresh();
         self.defer_projection(
@@ -1003,7 +1021,7 @@ impl TypeChecker<'_> {
         // The conversions every value answers, and any name a user impl or
         // trait declares for this receiver, keep their own resolution.
         if matches!(method, "clone" | "into" | "try_into" | "to_string")
-            || self.user_method_owners.contains_key(method)
+            || self.user_impl_declares(resolved, method)
         {
             return false;
         }
@@ -1012,12 +1030,11 @@ impl TypeChecker<'_> {
         true
     }
 
-    /// Rejects `x.nowhere()` on a scalar receiver. A scalar declares no
-    /// methods of its own: the surface it answers is the `math` row set,
-    /// the conversions, and a `use` that binds the name as a free value.
-    /// Anything else has no binding on any tier and can only fail at run
-    /// time, so it is named here instead.
-    pub(super) fn reject_unknown_time_method(
+    /// Rejects a method a time value, a channel end, or a join handle does
+    /// not answer. Each surface is closed: a name outside it has no binding on
+    /// any tier, so the VM fails at run time and a native build at link time,
+    /// unless an `impl` for that very receiver declares it.
+    pub(super) fn reject_unknown_closed_surface_method(
         &mut self,
         resolved: Ty,
         method: &str,
@@ -1026,10 +1043,13 @@ impl TypeChecker<'_> {
         let surface = match self.tcx.kind(resolved) {
             Some(TyKind::Duration) => DURATION_METHODS,
             Some(TyKind::Instant) => INSTANT_METHODS,
+            Some(TyKind::Sender(_)) => &["send", "try_send", "close"],
+            Some(TyKind::Receiver(_)) => &["recv", "try_recv", "recv_ctx", "close"],
+            Some(TyKind::JoinHandle(_)) => &["join"],
             _ => return false,
         };
         if surface.contains(&method)
-            || self.user_method_owners.contains_key(method)
+            || self.user_impl_declares(resolved, method)
             || matches!(method, "clone" | "to_string")
         {
             return false;
@@ -1040,6 +1060,11 @@ impl TypeChecker<'_> {
         true
     }
 
+    /// Rejects `x.nowhere()` on a scalar receiver. A scalar declares no
+    /// methods of its own: the surface it answers is the `math` row set,
+    /// the conversions, and a `use` that binds the name as a free value.
+    /// Anything else has no binding on any tier and can only fail at run
+    /// time, so it is named here instead.
     pub(super) fn reject_unknown_scalar_method(
         &mut self,
         resolved: Ty,
@@ -1392,16 +1417,7 @@ impl TypeChecker<'_> {
     /// a type reachable only as a structural spelling - `[T]`, `[T; N]`,
     /// `(A, B)` - has no key here and registers its methods by name alone.
     pub(super) fn builtin_impl_owner(&self, resolved: Ty) -> Option<&'static str> {
-        match self.tcx.kind(resolved)? {
-            TyKind::String => Some("String"),
-            TyKind::Vec(_) => Some("Vec"),
-            TyKind::HashMap { ordered, .. } => Some(if *ordered { "BTreeMap" } else { "Map" }),
-            TyKind::Bool => Some("bool"),
-            TyKind::Char => Some("char"),
-            TyKind::Int(int) => Some(int.as_str()),
-            TyKind::Float(float) => Some(float.as_str()),
-            _ => None,
-        }
+        crate::printer::builtin_impl_owner(self.tcx, resolved)
     }
 
     /// Records the `impl` block `method` reaches on `receiver_ty`, so the
@@ -2648,7 +2664,7 @@ impl TypeChecker<'_> {
             resolved = self.infer.resolve(self.tcx, *inner);
         }
         if let Some(TyKind::Adt { def, .. }) = self.tcx.kind(resolved)
-            && super::handles::is_sync_primitive_def(def.local)
+            && super::handles::is_shared_state_handle_def(def.local)
         {
             return false;
         }
@@ -4198,7 +4214,9 @@ impl TypeChecker<'_> {
             {
                 continue;
             }
-            if matches!(self.tcx.kind(recv), Some(TyKind::Int(_)))
+            // An integer converts to another integer type, and a float to an
+            // integer type, failing where `as` would panic.
+            if matches!(self.tcx.kind(recv), Some(TyKind::Int(_) | TyKind::Float(_)))
                 && matches!(self.tcx.kind(ok), Some(TyKind::Int(_)))
             {
                 let error = self.tcx.dyn_error_ty();

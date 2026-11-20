@@ -1,0 +1,34 @@
+// `math::Decimal` is an exact decimal number, so 0.1 + 0.2 == 0.3; it is
+// written in Gossamer over `math::big::Int` and behaves the same on every
+// tier.
+
+use std::math::Decimal
+
+fn total(prices: Vec<String>) -> Decimal {
+    let mut sum = Decimal::from_i64(0)
+    for p in prices {
+        sum = sum + Decimal::parse(p).unwrap()
+    }
+    sum
+}
+
+fn main() {
+    let a = Decimal::parse("0.1").unwrap()
+    let b = Decimal::parse("0.2").unwrap()
+    println(if a + b == Decimal::parse("0.3").unwrap() { "equal" } else { "different" })
+    println(a + b)
+    println(total(#["19.99", "0.01", "5.005"]))
+    println(Decimal::parse("1.50").unwrap())
+    println(Decimal::parse("-0.005").unwrap() * Decimal::parse("200").unwrap())
+    println(Decimal::from_i64(1) / Decimal::from_i64(3))
+    println(Decimal::from_i64(2) / Decimal::from_i64(3))
+    println(Decimal::parse("2.5").unwrap().round(0))
+    println(Decimal::parse("3.5").unwrap().round(0))
+    println(-Decimal::parse("12.34").unwrap())
+    println(Decimal::parse("10").unwrap() > Decimal::parse("9.99").unwrap())
+    let mut xs = #[Decimal::parse("1.1").unwrap(), Decimal::parse("-2").unwrap(), Decimal::parse("0.05").unwrap()]
+    xs.sort()
+    println(xs)
+    println(Decimal::parse("1e3"))
+    println(Decimal::parse("0.25").unwrap().to_f64())
+}

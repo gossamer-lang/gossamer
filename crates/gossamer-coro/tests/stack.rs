@@ -176,3 +176,26 @@ fn a_suspended_goroutine_dropped_unfinished_releases_cleanly() {
     drop(g);
     body_stack_address();
 }
+
+#[test]
+fn the_guard_band_lies_below_the_budget_of_a_goroutines_stack() {
+    let seen = Arc::new(AtomicU64::new(0));
+    let probe = Arc::clone(&seen);
+    let mut g = Goroutine::new(Box::new(move || {
+        let (floor, origin) = gossamer_coro::goroutine_stack_bounds().expect("armed guard");
+        let in_band = |addr: usize| gossamer_coro::in_stack_guard_band(addr, 4096);
+        let mut bits = 0;
+        if in_band(floor - 1) {
+            bits |= 1;
+        }
+        if in_band(floor - gossamer_coro::STACK_GUARD_MARGIN - 4096) {
+            bits |= 2;
+        }
+        if !in_band(floor) && !in_band(origin - 64) {
+            bits |= 4;
+        }
+        probe.store(bits, Ordering::SeqCst);
+    }));
+    drive_to_done(&mut g);
+    assert_eq!(seen.load(Ordering::SeqCst), 7);
+}

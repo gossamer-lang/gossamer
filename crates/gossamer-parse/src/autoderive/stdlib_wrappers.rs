@@ -171,6 +171,74 @@ fn synthesize_stdlib_wrappers(source: &str, parsed: Option<&SourceFile>) -> Stri
     stdlib_wrappers
 }
 
+/// The standard module each name the wrapper sources call through stands for.
+const WRAPPER_MODULES: &[(&str, &str)] = &[
+    ("big", "std::math::big"),
+    ("errors", "std::errors"),
+    ("fd", "std::os::fd"),
+    ("ffi", "std::ffi"),
+    ("fs", "std::fs"),
+    ("http", "std::http"),
+    ("json", "std::encoding::json"),
+    ("path", "std::path"),
+    ("process", "std::process"),
+    ("runtime", "std::runtime"),
+    ("signal", "std::os::signal"),
+    ("strings", "std::strings"),
+    ("sync", "std::sync"),
+    ("term", "std::term"),
+    ("time", "std::time"),
+];
+
+/// The standard modules the injected `generated` source calls through that
+/// the program has not bound itself, as `std::` paths. A program reaches a
+/// wrapper by an item import alone (`use std::path::Path`), which leaves the
+/// module the wrapper's body names out of scope. A name the program binds to
+/// anything else, an import or an item of its own, is left to it.
+fn wrapper_module_paths(generated: &str, parsed: &SourceFile) -> Vec<&'static str> {
+    WRAPPER_MODULES
+        .iter()
+        .filter(|(binding, _)| {
+            mentions_path(generated, &format!("{binding}::")) && !program_binds(parsed, binding)
+        })
+        .map(|(_, module)| *module)
+        .collect()
+}
+
+/// Whether a `use` or a top-level item of `parsed` binds `name`.
+fn program_binds(parsed: &SourceFile, name: &str) -> bool {
+    use gossamer_ast::{ItemKind, UseTarget};
+
+    let imported = parsed.uses.iter().any(|decl| {
+        if let Some(entries) = &decl.list {
+            return entries.iter().any(|entry| {
+                entry.alias.as_ref().map_or(entry.name.name.as_str(), |alias| alias.name.as_str())
+                    == name
+            });
+        }
+        let last = match &decl.target {
+            UseTarget::Module(path) => path.segments.last().map(|s| s.name.as_str()),
+            UseTarget::Project { .. } => None,
+        };
+        decl.alias.as_ref().map(|alias| alias.name.as_str()).or(last) == Some(name)
+    });
+    imported
+        || parsed.items.iter().any(|item| {
+            let declared = match &item.kind {
+                ItemKind::Fn(decl) => &decl.name,
+                ItemKind::Struct(decl) => &decl.name,
+                ItemKind::Enum(decl) => &decl.name,
+                ItemKind::Trait(decl) => &decl.name,
+                ItemKind::TypeAlias(decl) => &decl.name,
+                ItemKind::Const(decl) => &decl.name,
+                ItemKind::Static(decl) => &decl.name,
+                ItemKind::Mod(decl) => &decl.name,
+                ItemKind::Impl(_) | ItemKind::AttrItem(_) => return false,
+            };
+            declared.name == name
+        })
+}
+
 /// The wrapper sets for the host-facing modules `source` reaches: file
 /// metadata and directory walks, processes and commands, foreign memory,
 /// descriptors and the terminal, signals, and paths.
@@ -232,7 +300,282 @@ fn system_wrappers(
     if (source.contains("path::Path") && from_std("path")) || item_imported(PATH_WRAPPERS) {
         out.push_str(PATH_WRAPPERS);
     }
+    if (mentions_path(source, "collections::IndexMap") && from_std("collections"))
+        || item_imported(INDEX_MAP_WRAPPERS)
+    {
+        out.push_str(INDEX_MAP_WRAPPERS);
+    }
+    if (mentions_path(source, "collections::BitSet") && from_std("collections"))
+        || item_imported(BIT_SET_WRAPPERS)
+    {
+        out.push_str(BIT_SET_WRAPPERS);
+    }
+    if (mentions_path(source, "math::Decimal") && from_std("math"))
+        || item_imported(DECIMAL_WRAPPERS)
+    {
+        out.push_str(DECIMAL_WRAPPERS);
+    }
 }
+
+/// `math::Decimal`: an exact decimal number, `mantissa / 10^scale`, written
+/// in ordinary Gossamer over `math::big::Int` so it behaves the same on every
+/// tier. The value is kept canonical (no trailing zero digits after the
+/// point, zero at scale 0), so equal numbers are equal structurally. `/`
+/// keeps 28 digits after the point, rounding half to even; `div_scaled` and
+/// `round` take the digits to keep.
+const DECIMAL_WRAPPERS: &str = r#"
+struct __gos_math_Decimal {
+    mantissa: big::Int
+    scale: i64
+}
+
+fn __gos_math_decimal_ten_pow(n: i64) -> big::Int { big::int_pow(big::int_from_i64(10), n) }
+
+fn __gos_math_decimal_canonical(mantissa: big::Int, scale: i64) -> __gos_math_Decimal {
+    let zero = big::int_from_i64(0)
+    if mantissa == zero { return __gos_math_Decimal { mantissa: zero, scale: 0 } }
+    let ten = big::int_from_i64(10)
+    let mut m = mantissa
+    let mut s = scale
+    while s > 0 && m % ten == zero {
+        m = m / ten
+        s -= 1
+    }
+    __gos_math_Decimal { mantissa: m, scale: s }
+}
+
+fn __gos_math_decimal_aligned(a: __gos_math_Decimal, b: __gos_math_Decimal) -> (big::Int, big::Int, i64) {
+    if a.scale >= b.scale {
+        (a.mantissa, b.mantissa * __gos_math_decimal_ten_pow(a.scale - b.scale), a.scale)
+    } else {
+        (a.mantissa * __gos_math_decimal_ten_pow(b.scale - a.scale), b.mantissa, b.scale)
+    }
+}
+
+impl __gos_math_Decimal {
+    fn parse(text: String) -> Result<__gos_math_Decimal, errors::Error> {
+        let trimmed = text.trim()
+        let mut digits = ""
+        let mut scale = 0
+        let mut seen_point = false
+        let mut seen_digit = false
+        let mut first = true
+        for c in trimmed {
+            if first && (c == '-' || c == '+') {
+                if c == '-' { digits += "-" }
+            } else if c == '.' && !seen_point {
+                seen_point = true
+            } else if c >= '0' && c <= '9' {
+                digits += c.to_string()
+                seen_digit = true
+                if seen_point { scale += 1 }
+            } else {
+                return Err(errors::new(f"invalid decimal: {text}"))
+            }
+            first = false
+        }
+        if !seen_digit { return Err(errors::new(f"invalid decimal: {text}")) }
+        let mantissa = big::int_from_str(digits)?
+        Ok(__gos_math_decimal_canonical(mantissa, scale))
+    }
+
+    fn from_i64(value: i64) -> __gos_math_Decimal {
+        __gos_math_Decimal { mantissa: big::int_from_i64(value), scale: 0 }
+    }
+
+    fn div_scaled(self, other: __gos_math_Decimal, scale: i64) -> __gos_math_Decimal {
+        let shift = scale + other.scale - self.scale
+        let mut n = self.mantissa
+        let mut d = other.mantissa
+        if shift >= 0 { n = n * __gos_math_decimal_ten_pow(shift) } else { d = d * __gos_math_decimal_ten_pow(-shift) }
+        let q = n / d
+        let r = n % d
+        let zero = big::int_from_i64(0)
+        let one = big::int_from_i64(1)
+        let twice = big::int_abs(r + r)
+        let whole = big::int_abs(d)
+        let negative = (n < zero) != (d < zero)
+        let mut rounded = q
+        if twice > whole || (twice == whole && q % big::int_from_i64(2) != zero) {
+            rounded = if negative { q - one } else { q + one }
+        }
+        __gos_math_decimal_canonical(rounded, scale)
+    }
+
+    fn round(self, scale: i64) -> __gos_math_Decimal {
+        if self.scale <= scale { return self }
+        self.div_scaled(__gos_math_Decimal::from_i64(1), scale)
+    }
+
+    fn abs(self) -> __gos_math_Decimal { __gos_math_Decimal { mantissa: big::int_abs(self.mantissa), scale: self.scale } }
+
+    fn is_zero(self) -> bool { self.mantissa == big::int_from_i64(0) }
+
+    fn to_f64(self) -> f64 { self.to_string().to_f64().unwrap_or(0.0) }
+}
+
+impl Add for __gos_math_Decimal {
+    fn add(self, o: __gos_math_Decimal) -> __gos_math_Decimal {
+        let a, b, s = __gos_math_decimal_aligned(self, o)
+        __gos_math_decimal_canonical(a + b, s)
+    }
+}
+
+impl Sub for __gos_math_Decimal {
+    fn sub(self, o: __gos_math_Decimal) -> __gos_math_Decimal {
+        let a, b, s = __gos_math_decimal_aligned(self, o)
+        __gos_math_decimal_canonical(a - b, s)
+    }
+}
+
+impl Mul for __gos_math_Decimal {
+    fn mul(self, o: __gos_math_Decimal) -> __gos_math_Decimal { __gos_math_decimal_canonical(self.mantissa * o.mantissa, self.scale + o.scale) }
+}
+
+impl Div for __gos_math_Decimal {
+    fn div(self, o: __gos_math_Decimal) -> __gos_math_Decimal { self.div_scaled(o, 28) }
+}
+
+impl Neg for __gos_math_Decimal {
+    fn neg(self) -> __gos_math_Decimal { __gos_math_Decimal { mantissa: -self.mantissa, scale: self.scale } }
+}
+
+impl Ord for __gos_math_Decimal {
+    fn cmp(&self, other: __gos_math_Decimal) -> i64 {
+        let a, b, _ = __gos_math_decimal_aligned(*self, other)
+        big::int_cmp(a, b)
+    }
+}
+
+impl Display for __gos_math_Decimal {
+    fn fmt(&self) -> String {
+        let digits = big::int_to_str(big::int_abs(self.mantissa))
+        let negative = self.mantissa < big::int_from_i64(0)
+        let sign = if negative { "-" } else { "" }
+        if self.scale == 0 { return f"{sign}{digits}" }
+        let mut padded = digits
+        while padded.len() <= self.scale { padded = "0" + padded }
+        let point = padded.len() - self.scale
+        f"{sign}{padded.substring(0, point)}.{padded.substring(point, padded.len())}"
+    }
+}
+"#;
+
+/// `collections::IndexMap`: a map that iterates in insertion order, written in
+/// ordinary Gossamer so it behaves the same on every tier. Each key's slot in
+/// `order` and `values` is kept in `slots`; replacing a value keeps its slot,
+/// and removing a key shifts the later ones down.
+const INDEX_MAP_WRAPPERS: &str = r"
+struct __gos_collections_IndexMap<K, V> {
+    order: Vec<K>
+    values: Vec<V>
+    slots: Map<K, i64>
+}
+impl<K, V> __gos_collections_IndexMap<K, V> {
+    fn new() -> __gos_collections_IndexMap<K, V> {
+        __gos_collections_IndexMap { order: #[], values: #[], slots: Map::new() }
+    }
+    fn insert(&mut self, key: K, value: V) -> Option<V> {
+        match self.slots.get(key) {
+            Some(slot) => {
+                let previous = self.values[slot]
+                self.values[slot] = value
+                Some(previous)
+            }
+            None => {
+                self.slots.insert(key, self.order.len())
+                self.order.push(key)
+                self.values.push(value)
+                None
+            }
+        }
+    }
+    fn get(&self, key: K) -> Option<V> {
+        match self.slots.get(key) {
+            Some(slot) => Some(self.values[slot]),
+            None => None,
+        }
+    }
+    fn contains_key(&self, key: K) -> bool { self.slots.contains_key(key) }
+    fn len(&self) -> i64 { self.order.len() }
+    fn is_empty(&self) -> bool { self.order.is_empty() }
+    fn remove(&mut self, key: K) -> Option<V> {
+        let Some(slot) = self.slots.get(key) else { return None }
+        self.slots.remove(key)
+        let _ = self.order.remove(slot)
+        let value = self.values.remove(slot).unwrap()
+        for i in slot..self.order.len() {
+            self.slots.insert(self.order[i], i)
+        }
+        Some(value)
+    }
+    fn keys(&self) -> Vec<K> { self.order.clone() }
+    fn values(&self) -> Vec<V> { self.values.clone() }
+    fn entries(&self) -> Vec<(K, V)> {
+        let mut out = #[]
+        for i in 0..self.order.len() {
+            out.push((self.order[i], self.values[i]))
+        }
+        out
+    }
+}
+";
+
+/// `collections::BitSet`: a set of non-negative integers kept one bit each in
+/// 64-bit words, written in ordinary Gossamer so it behaves the same on every
+/// tier.
+const BIT_SET_WRAPPERS: &str = r#"
+struct __gos_collections_BitSet { words: Vec<u64> }
+impl __gos_collections_BitSet {
+    fn new() -> __gos_collections_BitSet { __gos_collections_BitSet { words: #[] } }
+    fn insert(&mut self, bit: i64) -> bool {
+        if bit < 0 { panic(f"BitSet::insert: bit {bit} is negative") }
+        let word = bit / 64
+        while self.words.len() <= word {
+            self.words.push(0)
+        }
+        let mask = 1u64 << (bit % 64)
+        let fresh = self.words[word] & mask == 0
+        self.words[word] = self.words[word] | mask
+        fresh
+    }
+    fn contains(&self, bit: i64) -> bool {
+        if bit < 0 { return false }
+        let word = bit / 64
+        word < self.words.len() && self.words[word] & (1u64 << (bit % 64)) != 0
+    }
+    fn remove(&mut self, bit: i64) -> bool {
+        if !self.contains(bit) { return false }
+        let word = bit / 64
+        self.words[word] = self.words[word] & !(1u64 << (bit % 64))
+        true
+    }
+    fn len(&self) -> i64 {
+        let mut count = 0
+        for word in self.words {
+            let mut rest = word
+            while rest != 0 {
+                rest = rest & (rest - 1)
+                count += 1
+            }
+        }
+        count
+    }
+    fn is_empty(&self) -> bool { self.len() == 0 }
+    fn clear(&mut self) { self.words = #[] }
+    fn to_vec(&self) -> Vec<i64> {
+        let mut out = #[]
+        for w in 0..self.words.len() {
+            let word = self.words[w]
+            if word == 0 { continue }
+            for b in 0..64 {
+                if word & (1u64 << b) != 0 { out.push(w * 64 + b) }
+            }
+        }
+        out
+    }
+}
+"#;
 
 /// Real-struct + wrapper source for `std::encoding::pem`. The
 /// wrappers fold the leaf intrinsics' tuple/byte returns into real

@@ -536,6 +536,14 @@ fn builtin_runtime_cycle_collection_supported(_args: &[Value]) -> RuntimeResult<
 
 /// `runtime::is_main_thread()`. A VM goroutine runs on a thread of its own,
 /// so only `main` and what it calls answer true.
+/// `runtime::backtrace()`: the call stack the runtime renders for this
+/// thread, which is the active VM's (and the JIT frames under it) while one
+/// runs.
+pub(crate) fn builtin_runtime_backtrace(_args: &[Value]) -> RuntimeResult<Value> {
+    let out = gossamer_runtime::c_abi::backtrace_text();
+    Ok(Value::String(out.into()))
+}
+
 fn builtin_runtime_is_main_thread(_args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Bool(gossamer_runtime::sched_global::on_main_thread()))
 }

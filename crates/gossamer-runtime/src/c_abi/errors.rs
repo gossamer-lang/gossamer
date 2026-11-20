@@ -106,7 +106,7 @@ fn error_fields(err: &GosError) -> &[(String, String)] {
 /// # Safety
 ///
 /// `err` is null or a live `errors::Error` cell.
-unsafe fn retain_error(err: *mut GosError) {
+pub(crate) unsafe fn retain_error(err: *mut GosError) {
     if !err.is_null() {
         // SAFETY: a non-null error is a live error cell.
         unsafe { crate::c_abi::rc::gos_rt_rc_retain(err.cast()) };

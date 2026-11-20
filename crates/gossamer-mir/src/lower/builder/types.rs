@@ -1078,6 +1078,15 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// `Option<errors::Error>`, what `Error::cause` answers.
+    pub(crate) fn option_error_adt_ty(&mut self) -> Ty {
+        let error = self.tcx.dyn_error_ty();
+        self.tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(u32::MAX - 1),
+            substs: gossamer_types::Substs::from_types([error]),
+        })
+    }
+
     pub(crate) fn option_string_adt_ty(&mut self) -> Ty {
         let s = self.tcx.string_ty();
         let substs = gossamer_types::Substs::from_types([s]);

@@ -304,6 +304,14 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
             `rem_euclid`, a `for` over a range from zero, an `enumerate` index)\n\
             is not reported."
         }
+        "split_shared_update" => {
+            "A `sync::Shared` written with a value read from it under a separate\n\
+            lock: `counter.set(counter.get() + 1)`. The `get` takes the lock and\n\
+            releases it, and the `set` takes it again, so a write another\n\
+            goroutine makes between the two is overwritten and lost.\n\
+            `counter.update(|n| n + 1)` holds the lock across the read and the\n\
+            write and stores what the callback answers."
+        }
         "unjoined_task" => {
             "A task's handle bound by `let task = spawn(..)` and never used.\n\
             Nothing joins the task, so the program goes on without waiting for\n\

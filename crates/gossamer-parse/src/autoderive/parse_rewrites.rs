@@ -187,6 +187,28 @@ pub fn parse_with_autoderive(source: &str, file: FileId) -> (SourceFile, Vec<Par
     parse_with_autoderive_from(source, file, None)
 }
 
+/// Imports for the generated section the standard modules its injected
+/// bodies call through and the program left unbound. A `use` has to precede
+/// every item in written source, so the imports join the tree rather than the
+/// text; each is spanned at the start of the generated section.
+fn import_wrapper_modules(source: &str, sf: &mut SourceFile) {
+    let marker = GENERATED_SECTION_MARKER;
+    let Some(at) = source.rfind(marker) else {
+        return;
+    };
+    let generated = &source[at + marker.len()..];
+    let modules = wrapper_module_paths(generated, sf);
+    let offset = u32::try_from(at).unwrap_or(u32::MAX);
+    let span = gossamer_lex::Span::new(sf.file, offset, offset);
+    for module in modules {
+        let id = gossamer_ast::NodeId::from_raw(sf.next_node_id);
+        sf.next_node_id = sf.next_node_id.saturating_add(1);
+        let path = gossamer_ast::ModulePath::from_names(module.split("::"));
+        sf.uses
+            .push(gossamer_ast::UseDecl::simple(id, span, gossamer_ast::UseTarget::Module(path)));
+    }
+}
+
 /// [`parse_with_autoderive`] over `source`, the text
 /// [`augment_source_with_program`] answered with `program`: the program's
 /// own text is taken from that tree and only what autoderive appended is
@@ -204,6 +226,7 @@ pub fn parse_with_autoderive_from(
         }
         _ => crate::parse_source_file(source, file),
     };
+    import_wrapper_modules(source, &mut sf);
     // A field default is a function of its own, and a type body is the
     // `impl` blocks it stands for; every pass below reads those.
     crate::synthesize_field_default_fns(&mut sf);
@@ -611,6 +634,9 @@ const MANGLED_STDLIB_NAMES: &[(&str, &str, &str)] = &[
     ("exec", "Child", "__gos_process_Child"),
     ("exec", "spawn_piped", "__gos_process_spawn_piped"),
     ("path", "Path", "__gos_path_Path"),
+    ("collections", "IndexMap", "__gos_collections_IndexMap"),
+    ("collections", "BitSet", "__gos_collections_BitSet"),
+    ("math", "Decimal", "__gos_math_Decimal"),
     ("http", "Http2Config", "__gos_http_Http2Config"),
     ("Http2Config", "default", "__gos_http_Http2Config_default"),
     ("time", "Location", "__gos_time_Location"),

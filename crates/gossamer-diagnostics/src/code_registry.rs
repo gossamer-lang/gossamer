@@ -371,6 +371,13 @@ pub const REGISTRY: &[(&str, &str)] = &[
             binding.",
     ),
     (
+        "GL0066",
+        "A `sync::Shared` written with a value read from it under a separate\n\
+            lock: `counter.set(counter.get() + 1)`. The read and the write each\n\
+            take the lock, so a write another goroutine makes between them is\n\
+            lost. `counter.update(|n| n + 1)` holds the lock across both.",
+    ),
+    (
         "GM0001",
         "Generic monomorphization received a type substitution that the\n\
                      compiler does not yet support - typically a generic parameter\n\

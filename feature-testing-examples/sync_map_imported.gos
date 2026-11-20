@@ -1,0 +1,50 @@
+// `std::sync::Map` and other standard handles reached through `use`: the
+// imported name is the handle, never a prelude type sharing its bare name.
+
+use std::sync::{Map, Mutex, RwLock, WaitGroup}
+use std::sync::Map as Registry
+use std::sync::WaitGroup as Group
+use std::time::Duration
+
+fn fill(m: Map, worker: i64) {
+    for i in 0..25 {
+        m.insert(f"w{worker}-{i}", f"{worker * 100 + i}")
+    }
+}
+
+fn main() {
+    let m = Map::new()
+    let done = cohort {
+        for w in 0..4 {
+            spawn(|| fill(m, w))
+        }
+    }
+    println(done.is_ok())
+    println(m.len())
+    println(m.get("w2-7"))
+    println(m.contains_key("w3-24"))
+    m.remove("w0-0")
+    let mut keys = m.keys()
+    keys.sort()
+    println(f"{keys.len()} {keys[0]}")
+
+    let lock = Mutex::new()
+    lock.lock()
+    lock.unlock()
+    let rw = RwLock::new(7)
+    println(rw.read())
+    let wg = WaitGroup::new()
+    wg.add(1)
+    wg.done()
+    wg.wait()
+    println(Duration::from_millis(1500).as_millis())
+    let names = Registry::new()
+    names.insert("one", "1")
+    let group = Group::new()
+    group.add(1)
+    group.done()
+    group.wait()
+    println(names.get("one"))
+    let plain = { "k": 1 }
+    println(plain)
+}

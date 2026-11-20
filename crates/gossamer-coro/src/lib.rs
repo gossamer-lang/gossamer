@@ -286,6 +286,23 @@ pub fn goroutine_stack_bounds() -> Option<(usize, usize)> {
     Some((origin.saturating_sub(budget), origin))
 }
 
+/// Whether `addr` lies in the band an armed guard reserves below its budget:
+/// the [`STACK_GUARD_MARGIN`] above the stack's floor and the guard page under
+/// it, with `slack` bytes of further reach for a frame that skips past the
+/// page. Code that never consults the budget - compiled recursion - runs into
+/// this band, so a fault there is the stack running out. Async-signal-safe:
+/// two thread-local reads of constant-initialized cells.
+#[must_use]
+pub fn in_stack_guard_band(addr: usize, slack: usize) -> bool {
+    let origin = STACK_ORIGIN.with(Cell::get);
+    if origin == 0 || addr == 0 {
+        return false;
+    }
+    let budget_floor = origin.saturating_sub(STACK_BUDGET.with(Cell::get));
+    let band_bottom = budget_floor.saturating_sub(STACK_GUARD_MARGIN + slack);
+    addr >= band_bottom && addr < budget_floor
+}
+
 /// Unarms the guard on this thread, so a caller that has just tripped
 /// it can run its reporting and unwind path with the guard's own margin
 /// to work in rather than tripping again on every frame.

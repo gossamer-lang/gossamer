@@ -15,6 +15,7 @@
 
 mod admissible;
 mod arena_escape;
+pub mod big_integers;
 pub mod builtin_traits;
 mod capture_writes;
 mod checker;
@@ -34,6 +35,7 @@ mod normalize;
 pub mod printer;
 pub mod purity;
 mod signed_remainders;
+mod split_shared_updates;
 pub mod std_fn_eta;
 pub mod std_fn_values;
 pub mod stdlib_signatures;
@@ -96,10 +98,15 @@ pub use frontend_checks::{
     CheckPhase, PhaseObserver, UnitChecks, check_resolved_unit, top_level_names, typed_lints,
 };
 pub use infer::{InferCtxt, UnifyError};
-pub use lossy_casts::{CastCheck, LOSSY_CAST_LINT, LossyCast, cast_check, find_lossy_casts};
+pub use lossy_casts::{
+    CastCheck, LOSSY_CAST_LINT, LossyCast, cast_check, find_lossy_casts, float_to_int_check,
+};
 pub use normalize::normalize_caller_side_spellings;
 pub use printer::{public_type_name, render_public_ty, render_ty, stable_type_name};
 pub use signed_remainders::{SIGNED_REMAINDER_LINT, SignedRemainder, find_signed_remainders};
+pub use split_shared_updates::{
+    SPLIT_SHARED_UPDATE_LINT, SplitSharedUpdate, find_split_shared_updates,
+};
 pub use stdlib_signatures::{
     STD_FUNCTION_SIGNATURES, StdFunctionSignature, function_shape as stdlib_function_shape,
     function_signature as stdlib_function_signature,

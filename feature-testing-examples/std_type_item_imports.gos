@@ -1,0 +1,14 @@
+// A standard type imported on its own (`use std::path::Path`) works without
+// importing its module: the module its injected source calls through is
+// imported for that source.
+
+use std::path::Path
+use std::time::Time
+
+fn base(p: Path) -> String { p.file_name().unwrap_or("") }
+
+fn main() {
+    println(base(Path::new("/a/b.txt")))
+    println(Path::new("x/./y/..").normalize().as_str())
+    println(Time::from_unix(0).format_rfc3339())
+}

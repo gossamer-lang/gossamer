@@ -1,0 +1,19 @@
+// `runtime::backtrace()` answers the call stack as text on every tier and
+// names the function that calls it, at the call's position, an optimized
+// build on every platform included. The frames above it are the ones the
+// build kept, so only the caller's line is printed.
+
+use std::runtime
+
+fn inner(n: i64) -> String {
+    if n > 0 { return inner(n - 1) }
+    runtime::backtrace()
+}
+
+fn outer() -> String { inner(2) }
+
+fn main() {
+    let trace = outer()
+    println(trace.contains("at inner (runtime_backtrace.gos:10:5)"))
+    println(trace.lines().count() >= 1)
+}

@@ -100,7 +100,7 @@ about values.
   writes reach them, whatever the type (`xs.for_each(|x| count += x)`). No
   `move`. A spawned closure is the exception: it takes a snapshot of each
   capture at the spawn, and writing one inside it is GT0114 - answer the
-  value through `join()`, a channel, or a `sync::Shared`. A closure stored
+  value through `join()`, a channel, or a `sync::Shared` (one integer). A closure stored
   in the value it captures (`o.callback = Some(|| o.x)`) is a cycle never
   freed (GL0063): capture it weakly, `[weak o] || ..`, where `o` in the body
   is an `Option` (`None` once the value is gone).
@@ -229,7 +229,8 @@ extend(&mut items)     // items is now #[1, 2, 1]
   `300 as u8` and `1e20 as i64` panic (`cast overflow`). Say what a value
   that may not fit becomes: `v as% u8` keeps the low bits (and saturates a
   float), `v.clamp(0, 255) as u8` saturates, `v.try_into()` answers a
-  `Result` between integer types. GL0062 marks each `as` that can panic.
+  `Result` to an integer type from an integer or a float (`Err` where `as`
+  would panic). GL0062 marks each `as` that can panic.
 - `%` keeps the sign of the value it divides, as in Rust: `-3 % 2 == -1`.
   Test oddness with `n % 2 != 0`; `n.rem_euclid(k)` answers `0..k` for
   every sign. GL0064 marks `n % 2 == 1` on a value that may be negative.
@@ -245,7 +246,12 @@ extend(&mut items)     // items is now #[1, 2, 1]
 - Integers answer `checked_add`, `saturating_sub`, `overflowing_mul`, `pow`,
   `rem_euclid`, `signum`, `abs_diff`, `isqrt`, `count_ones`; a `char`
   answers `is_alphabetic`, `is_ascii_digit`, `to_digit(radix)`,
-  `char::from_u32`; floats answer `mul_add` (one rounding). Limits: `i64::MAX`, `u8::MIN`, `f64::EPSILON`, `f64::NAN`.
+  `char::from_u32`; floats answer `mul_add` (one rounding) and `total_cmp`
+  (a sign, for `sort_by`, NaN included). Limits: `i64::MAX`, `u8::MIN`,
+  `f64::EPSILON`, `f64::NAN`.
+- Past 64 bits, `math::big::Int` (`big::int_from_i64(n)`, then `+ - * / %`
+  and comparisons); exact decimals, `math::Decimal`
+  (`Decimal::parse("0.1")?`; `0.1 + 0.2 == 0.3`).
 
 **Types**
 - `bool char i8..i64 u8..u64 isize usize f32 f64 String [T] [T; N] (A, B)
@@ -282,7 +288,9 @@ extend(&mut items)     // items is now #[1, 2, 1]
   `MinHeap`, `MaxHeap`, `BTreeMap`, `BTreeSet` build with `T::new()` /
   `T::from([..])`. Prefer the dedicated type for intent (`Stack` for LIFO,
   `MinHeap` instead of negated keys). One name each: `HashMap`, `VecDeque`,
-  `BinaryHeap` are rejected.
+  `BinaryHeap` are rejected. `collections::IndexMap` keeps insertion order
+  (`keys` / `entries` in it) and `collections::BitSet` holds integers one bit
+  each; both need a `use`.
 - A parameter `[T]` takes an array, a `Vec`, or a view; `&mut [T]` writes
   through. `&mut xs[lo..hi]` is a window of `xs` (`fill(&mut px[2..6], 0)`),
   and `xs[1..4].sort()` sorts that part in place, as `xs[1..4][0] = 9`
@@ -317,7 +325,8 @@ extend(&mut items)     // items is now #[1, 2, 1]
   and so does a printer (`xs.for_each(println)`); anything else is a
   closure (`people.map(|p| p.name)`).
 - `DynValue` holds data whose shape arrives at run time (`kind()`,
-  `at(i)`, `as_i64()`...). `Weak<T>` via `x.downgrade()` / `w.upgrade()`.
+  `at(i)`, `as_i64()`...). `Weak<T>` via `x.downgrade()` / `w.upgrade()`;
+  the referent stays alive until the function that took the weak returns.
 
 ## 7. The `|>` forward-pipe
 
@@ -347,7 +356,8 @@ fn load(path: String) -> Result<String, errors::Error> {
 ```
 
 `errors::new(msg)` / `wrap(cause, msg)` / `is(err, needle)`; `{}` on an
-error prints its whole chain, `.message()` the top. A panic ends its
+error prints its whole chain, `.message()` the top; `runtime::backtrace()`
+answers the call stack as text. A panic ends its
 goroutine; in `main` it exits 101. Recursion is bounded by memory, not a
 frame count, and runaway recursion is `GX0008` on every tier.
 
@@ -398,9 +408,11 @@ fn main() {
 - `select { Some(v) = rx.recv() => .., None = rx.recv() => .., default => .. }`
   multiplexes (a receive answers `Option<T>`; a bare name binds it whole);
   `time::after(Duration::from_millis(n))` is a timeout arm.
-- `std::sync` has `Mutex`, `RwLock`, atomics, `WaitGroup`, `Once`;
-  `sync::with_timeout(f, ms)`, `sync::shield(f)`. There is no OS-thread
-  spawn API.
+- `std::sync` has `Mutex`, `RwLock`, atomics, `WaitGroup`, `Once`, and
+  `Shared<i64>`, one integer under a lock: read-modify-write it with
+  `x.update(|n| n + 1)`, never `x.set(x.get() + 1)`, which loses concurrent
+  writes (GL0066); `sync::with_timeout(f, ms)`, `sync::shield(f)`. There is
+  no OS-thread spawn API.
 - Worker threads start as goroutines call for them, up to one per core
   (`runtime::set_max_procs(n)` sets the cap, as Go's `GOMAXPROCS`), and an
   idle program's threads sleep, so a daemon costs no CPU between events.

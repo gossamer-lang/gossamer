@@ -331,6 +331,23 @@ pub(crate) fn cmd_doc_std(query: &str) -> Result<()> {
         return Ok(());
     }
 
+    // A path that only groups modules (`std::crypto`, `std::encoding`) lists
+    // the modules under it.
+    let prefix = format!("{query}::");
+    let nested: Vec<_> = registry::modules()
+        .iter()
+        .filter(|module| module.path.starts_with(&prefix))
+        .collect();
+    if !nested.is_empty() {
+        outln!("# {query} ({} modules)", nested.len());
+        for module in nested {
+            outln!("- {} - {}", module.path, module.summary);
+        }
+        outln!();
+        outln!("`gos doc {query}::<module>` lists a module's exports.");
+        return Ok(());
+    }
+
     Err(anyhow!(
         "no stdlib module or item named `{query}`; `gos doc std` lists the modules"
     ))

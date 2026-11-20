@@ -471,7 +471,17 @@ impl Lowerer<'_> {
         // carries the same qualified identity the declaration registered -
         // otherwise two modules' `impl Point` would emit one symbol each
         // under the same name.
+        // Read before lowering normalizes it: a `newtype` over a built-in is a
+        // type of its own, not its representation.
+        let builtin_owner = self
+            .table
+            .get(decl.self_ty.id)
+            .and_then(|written| gossamer_types::printer::builtin_impl_owner(self.tcx, written))
+            .map(Ident::new);
         let self_name = match &decl.self_ty.kind {
+            // A built-in type registers under its one spelling, whatever path
+            // the header wrote it with, so every call on it finds the block.
+            gossamer_ast::TypeKind::Path(_) if builtin_owner.is_some() => builtin_owner,
             gossamer_ast::TypeKind::Path(path) => self
                 .resolutions
                 .get(decl.self_ty.id)

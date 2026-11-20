@@ -571,6 +571,22 @@ const METHODS: &[Method] = &[
         &[],
         "fn powi(&self, exp: i64) -> T { self.pow(exp as T) }",
     ),
+    // IEEE 754 total order as a sign, for `sort_by`: -NaN < -inf < ... <
+    // -0.0 < 0.0 < ... < inf < NaN. The bit pattern of a negative value has
+    // every bit but the sign flipped, so the patterns compare as integers.
+    // `f32` widens to `f64` exactly, NaN sign included.
+    method(
+        "total_cmp",
+        Receivers::Floats,
+        &[],
+        r"fn total_cmp(&self, other: T) -> i64 {
+            let mut a = (self as f64).to_bits() as% i64
+            let mut b = (other as f64).to_bits() as% i64
+            a = a ^ (((a >> 63) as% u64 >> 1) as% i64)
+            b = b ^ (((b >> 63) as% u64 >> 1) as% i64)
+            if a < b { -1 } else if a > b { 1 } else { 0 }
+        }",
+    ),
     // `Vec<T>`: in-place filtering.
     method(
         "retain",

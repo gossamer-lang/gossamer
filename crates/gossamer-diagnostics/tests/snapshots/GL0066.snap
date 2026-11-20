@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GL0066]: A `sync::Shared` written with a value read from it under a separate - here
+--- framed ---
+error[GL0066]: A `sync::Shared` written with a value read from it under a separate
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

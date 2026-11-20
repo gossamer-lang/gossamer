@@ -94,6 +94,11 @@ pub const RUNTIME: StdModule = StdModule {
             doc: "Reports whether this execution tier reclaims unreachable reference cycles.",
         },
         StdItem {
+            name: "backtrace",
+            kind: StdItemKind::Function,
+            doc: "The calling goroutine's call stack as text, outermost frame first, one `at function (file:line:column)` line each, with the file's name. The function that calls it is always named, at the call's position; an optimized build names the frames above it that it kept, without positions.",
+        },
+        StdItem {
             name: "is_main_thread",
             kind: StdItemKind::Function,
             doc: "Whether the caller runs on the process main thread, the one `main` starts on. Libraries whose platform APIs belong to that thread, such as windowing on macOS, check it before calling them.",

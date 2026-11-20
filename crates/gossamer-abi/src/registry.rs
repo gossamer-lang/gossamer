@@ -1776,6 +1776,8 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_router_put", (Ptr, Ptr, Ptr, I64) -> Ptr, Cranelift, "Register a PUT route on a Router; returns the router pointer for pipe-chaining."),
     rt!("gos_rt_router_put_fn", (Ptr, Ptr, I64) -> Ptr, Cranelift, "Register a bare-fn PUT route on a Router (no env); returns the router pointer for pipe-chaining."),
     rt_unwind!("gos_rt_router_serve", (Ptr, Ptr) -> I128, Cranelift, "Dispatch a request through a Router's route table."),
+    rt_str!("gos_rt_runtime_backtrace", () -> Ptr, Both, "runtime::backtrace(): the calling goroutine's call stack, outermost first, one `at function (file:line:column)` line each."),
+    rt_str!("gos_rt_runtime_backtrace_at", (Ptr, Ptr, I32, I32) -> Ptr, Llvm, "runtime::backtrace() from native code: the call stack, with the calling function (and the call's position) added where the machine stack did not name it."),
     rt!("gos_rt_runtime_cycle_collection_supported", () -> I8, Cranelift, "Report whether this tier collects unreachable reference cycles."),
     rt!("gos_rt_runtime_is_main_thread", () -> I64, Both, "Whether the caller runs on the thread the program's `main` runs on, the process main thread."),
     rt!("gos_rt_runtime_max_procs", () -> I64, Both, "runtime::max_procs(): the most workers that run goroutines at once."),

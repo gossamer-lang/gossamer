@@ -1,0 +1,20 @@
+// Recursion that outgrows a goroutine's stack ends the program with
+// `GX0008` and status 101 on every tier, as it does on the main goroutine:
+// the goroutine's `join()` never answers, and nothing after it runs.
+//
+// Two mutually recursive functions keep the optimiser from folding the
+// recursion into a loop. Stdout holds only the line printed before the
+// spawn; the report reaches stderr.
+
+fn ping(n: i64) -> i64 { pong(n + 1) * 3 + 1 }
+
+fn pong(n: i64) -> i64 { ping(n + 1) * 5 + 2 }
+
+fn main() {
+    println("start")
+    let worker = spawn(|| ping(0))
+    if worker.join().is_err() {
+        println("join answered")
+    }
+    println("unreachable")
+}

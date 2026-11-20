@@ -560,10 +560,9 @@ impl<'a> Builder<'a> {
                     ("errors::Error", "message") => {
                         Some(("gos_rt_error_message", self.tcx.string_ty()))
                     }
-                    ("errors::Error", "cause") => Some((
-                        "gos_rt_error_cause",
-                        self.tcx.int_ty(gossamer_types::IntTy::I64),
-                    )),
+                    ("errors::Error", "cause") => {
+                        Some(("gos_rt_error_cause", self.option_error_adt_ty()))
+                    }
                     _ => None,
                 };
                 if let Some((rt_name, ret_ty)) = helper {
@@ -859,10 +858,9 @@ impl<'a> Builder<'a> {
                 ("errors::Error", "message") => {
                     Some(("gos_rt_error_message", self.tcx.string_ty()))
                 }
-                ("errors::Error", "cause") => Some((
-                    "gos_rt_error_cause",
-                    self.tcx.int_ty(gossamer_types::IntTy::I64),
-                )),
+                ("errors::Error", "cause") => {
+                    Some(("gos_rt_error_cause", self.option_error_adt_ty()))
+                }
                 _ => None,
             };
             if let Some((rt_name, ret_ty)) = helper {

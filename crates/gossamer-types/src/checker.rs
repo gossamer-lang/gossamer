@@ -5357,6 +5357,7 @@ fn render_ast_type(ty: &gossamer_ast::Type) -> String {
 }
 
 // The checker's methods, by responsibility.
+mod big_integers;
 mod calls;
 mod deferred;
 mod foreign;

@@ -195,13 +195,20 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// `runtime::at_exit(hook)`: hands the runtime the hook as an `Fn()`
-    /// environment, which it keeps a share of until the program ends.
-    fn lower_at_exit(&mut self, hook: &HirExpr, span: Span) -> Option<Local> {
+    /// `runtime::at_exit(hook)` and `runtime::set_panic_hook(hook)`: hands
+    /// the runtime the hook as a callable environment taking `inputs`, which
+    /// it keeps a share of while it may call it.
+    fn lower_runtime_hook(
+        &mut self,
+        runtime_fn: &str,
+        hook: &HirExpr,
+        inputs: Vec<Ty>,
+        span: Span,
+    ) -> Option<Local> {
         let raw = self.lower_expr(hook)?;
         let unit = self.tcx.unit();
         let sig = gossamer_types::FnSig {
-            inputs: Vec::new(),
+            inputs,
             output: unit,
         };
         let fn_ty = self.tcx.intern(TyKind::FnTrait(sig));
@@ -209,7 +216,7 @@ impl<'a> Builder<'a> {
         let dest = self.fresh(unit);
         let next = self.new_block(span);
         self.terminate(Terminator::Call {
-            callee: Operand::Const(ConstValue::Str("gos_rt_at_exit".to_string())),
+            callee: Operand::Const(ConstValue::Str(runtime_fn.to_string())),
             args: vec![Operand::Copy(Place::local(env))],
             destination: Place::local(dest),
             target: Some(next),
@@ -314,7 +321,18 @@ impl<'a> Builder<'a> {
                 "runtime::at_exit" | "std::runtime::at_exit"
             ) && let [hook] = args
             {
-                return self.lower_at_exit(hook, span);
+                return self.lower_runtime_hook("gos_rt_at_exit", hook, Vec::new(), span);
+            }
+            // `runtime::set_panic_hook(f)` keeps the closure for every later
+            // panic, so it crosses as the `Fn(String)` environment the
+            // runtime calls with the rendered message.
+            if matches!(
+                joined.as_str(),
+                "runtime::set_panic_hook" | "std::runtime::set_panic_hook"
+            ) && let [hook] = args
+            {
+                let string = self.tcx.string_ty();
+                return self.lower_runtime_hook("gos_rt_set_panic_hook", hook, vec![string], span);
             }
             if joined == "http::serve" && args.len() == 2 {
                 if let Some(local) = self.lower_http_serve(&args[0], &args[1], ty, span) {

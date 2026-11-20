@@ -100,7 +100,19 @@ impl Lowerer<'_> {
     /// The test a value of `source_ty` read from the cast's source binding
     /// passes when `check` holds, or `None` when it tests nothing.
     fn cast_fits(&mut self, check: CastCheck, source_ty: Ty, span: Span) -> Option<HirExpr> {
-        let read = |this: &mut Self| this.conv_path(CAST_SOURCE, source_ty, span);
+        self.fits_test(check, CAST_SOURCE, source_ty, span)
+    }
+
+    /// The test a value of `source_ty` read from the binding `source` passes
+    /// when `check` holds, or `None` when it tests nothing.
+    fn fits_test(
+        &mut self,
+        check: CastCheck,
+        source: &'static str,
+        source_ty: Ty,
+        span: Span,
+    ) -> Option<HirExpr> {
+        let read = |this: &mut Self| this.conv_path(source, source_ty, span);
         let mut tests = Vec::new();
         match check {
             CastCheck::Int { least, greatest } => {
@@ -294,15 +306,29 @@ impl Lowerer<'_> {
         };
         let source_value = self.lower_expr(receiver);
         let source_ty = source_value.ty;
-        let Some(TyKind::Int(source)) = self.tcx.kind(source_ty).cloned() else {
-            return None;
-        };
         let span = call.span;
         let read = |this: &mut Self| this.conv_path(SOURCE, source_ty, span);
+        let mut tests = Vec::new();
+        let source = match self.tcx.kind(source_ty).cloned() {
+            Some(TyKind::Int(source)) => source,
+            // A float converts where `as` would not panic: a finite value
+            // whose truncation the target holds.
+            Some(TyKind::Float(float)) => {
+                let check = gossamer_types::float_to_int_check(float, target);
+                tests.extend(self.fits_test(check, SOURCE, source_ty, span));
+                return Some(self.try_into_answer(
+                    (source_value, source_ty),
+                    (result_ty, ok_ty, err_ty),
+                    target,
+                    tests,
+                    span,
+                ));
+            }
+            _ => return None,
+        };
 
         let (source_signed, source_least, source_greatest) = int_bounds(source);
         let (target_signed, target_least, target_greatest) = int_bounds(target);
-        let mut tests = Vec::new();
         if source_signed {
             if !target_signed || target_least < source_least {
                 let bound = self.conv_int_literal(target_signed, target_least, source_ty, span);
@@ -316,6 +342,26 @@ impl Lowerer<'_> {
             tests.push(self.conv_compare(HirBinaryOp::Le, lhs, bound, span));
         }
 
+        Some(self.try_into_answer(
+            (source_value, source_ty),
+            (result_ty, ok_ty, err_ty),
+            target,
+            tests,
+            span,
+        ))
+    }
+
+    /// `Ok(source as T)` when every one of `tests` holds, and otherwise an
+    /// error naming `target`, over the source bound once.
+    fn try_into_answer(
+        &mut self,
+        (source_value, source_ty): (HirExpr, Ty),
+        (result_ty, ok_ty, err_ty): (Ty, Ty, Ty),
+        target: IntTy,
+        tests: Vec<HirExpr>,
+        span: Span,
+    ) -> HirExprKind {
+        let read = |this: &mut Self| this.conv_path(SOURCE, source_ty, span);
         let cast = HirExpr {
             id: self.fresh(),
             span,
@@ -353,14 +399,14 @@ impl Lowerer<'_> {
             ok
         };
         let bind = self.conv_let(SOURCE, source_value, span);
-        Some(HirExprKind::Block(HirBlock {
+        HirExprKind::Block(HirBlock {
             id: self.fresh(),
             span,
             stmts: vec![bind],
             tail: Some(Box::new(answer)),
             ty: result_ty,
             is_comptime: false,
-        }))
+        })
     }
 
     pub(super) fn conv_path(&mut self, name: &str, ty: Ty, span: Span) -> HirExpr {
@@ -375,7 +421,7 @@ impl Lowerer<'_> {
         }
     }
 
-    fn conv_path_of(&mut self, segments: &[&str], span: Span) -> HirExpr {
+    pub(super) fn conv_path_of(&mut self, segments: &[&str], span: Span) -> HirExpr {
         HirExpr {
             id: self.fresh(),
             span,

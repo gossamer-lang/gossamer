@@ -215,5 +215,15 @@ pub const COLLECTIONS: StdModule = StdModule {
             kind: StdItemKind::Type,
             doc: "Ordered unique-value set backed by BTreeSet.",
         },
+        StdItem {
+            name: "IndexMap",
+            kind: StdItemKind::Type,
+            doc: "Key-value map that keeps insertion order: `new`, `insert` (answers the replaced value), `get`, `contains_key`, `remove`, `len`, `is_empty`, and `keys` / `values` / `entries` in the order keys were first inserted.",
+        },
+        StdItem {
+            name: "BitSet",
+            kind: StdItemKind::Type,
+            doc: "Set of non-negative integers stored one bit each: `new`, `insert` / `remove` (answer whether the set changed), `contains`, `len`, `is_empty`, `clear`, and `to_vec` in ascending order.",
+        },
     ],
 };

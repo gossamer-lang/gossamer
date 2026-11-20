@@ -1,3 +1,14 @@
+/// Whether `body` calls `runtime::backtrace()`, whose answer names the body
+/// it is called from: that body stays a call of its own, so the frame exists.
+fn reads_own_backtrace(body: &Body) -> bool {
+    body.blocks.iter().any(|block| {
+        matches!(&block.terminator, Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            ..
+        } if name == "gos_rt_runtime_backtrace")
+    })
+}
+
 /// Detects trivial wrapper functions (a two-block body whose entry block
 /// immediately calls another function with all params forwarded in order)
 /// and rewrites every call site to invoke the inner function directly,
@@ -37,7 +48,7 @@ pub fn inline_trivial_wrappers(bodies: &mut [Body]) {
 ///   params `Local(1)..=Local(arity)` forwarded in source order.
 /// - bb1: no statements, `Return` terminator.
 fn detect_wrapper_callee(body: &Body) -> Option<Operand> {
-    if body.blocks.len() != 2 {
+    if body.blocks.len() != 2 || reads_own_backtrace(body) {
         return None;
     }
     let bb0 = &body.blocks[0];
@@ -539,7 +550,7 @@ pub fn inline_general(bodies: &mut [Body], tcx: &TyCtxt) {
             matches!(&blk.terminator, Terminator::Call { callee, .. }
                 if callee_body_name(callee, &def_to_name).as_deref() == Some(b.name.as_str()))
         });
-        if self_recursive {
+        if self_recursive || reads_own_backtrace(b) {
             continue;
         }
         if let Some(gc) = try_build_general(b) {

@@ -145,9 +145,9 @@ pub extern "C" fn gos_rt_concat_finish() -> *mut c_char {
 }
 
 /// Returns the cause of `err` wrapped in an `Option<errors::Error>`
-/// `GosResult` handle (`disc=0/Some` for non-null, `disc=1/None`
-/// for null). Lets the match on `error.cause()` see a real
-/// discriminant and terminate the cause-chain walk.
+/// `GosResult` handle (`disc=0/Some` holding a share of its own for
+/// non-null, `disc=1/None` for null). Lets the match on `error.cause()`
+/// see a real discriminant and terminate the cause-chain walk.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_error_cause(err: *const GosError) -> i128 {
     ffi_entry!({
@@ -157,11 +157,13 @@ pub unsafe extern "C" fn gos_rt_error_cause(err: *const GosError) -> i128 {
             // SAFETY: `err` is non-null on this branch and live for the call (C-ABI contract).
             unsafe { (*err).cause.as_ptr() }
         };
-        // The `Some` arm borrows the cause the error holds a share of, so a
-        // binding that keeps it takes a share of its own.
+        // The `Some` arm carries a share of its own, released with the
+        // `Option`, so the cause outlives the error it was read from.
         let (disc, payload) = if cause.is_null() {
             (1, 0)
         } else {
+            // SAFETY: `cause` is non-null here and a live error `err` holds a share of.
+            unsafe { crate::c_abi::errors::retain_error(cause) };
             (0, cause as i64)
         };
         crate::c_abi::result::pack_result(disc, payload)

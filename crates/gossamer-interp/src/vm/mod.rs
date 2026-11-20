@@ -128,6 +128,37 @@ pub(crate) struct VmCallStackFrame {
     /// Set while a landing pad runs: the position is where the fault was
     /// raised and stays so until the frame is gone.
     pub(crate) frozen: bool,
+    /// While the frame's dispatch loop runs: its program counter and its
+    /// chunk's position table, so a snapshot taken mid-run reads where the
+    /// frame is now. The loop's guard sets it and clears it before either
+    /// pointee goes away.
+    pub(crate) live: Option<LiveFramePosition>,
+}
+
+/// Where a running bytecode frame's position is read from.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LiveFramePosition {
+    /// The dispatch loop's program counter; the opcode running is the one
+    /// before it.
+    pub(crate) next_instruction: *const crate::bytecode::InstrIdx,
+    /// The chunk's instruction positions, ordered by instruction.
+    pub(crate) locations: *const [crate::bytecode::InstructionLocation],
+}
+
+impl LiveFramePosition {
+    /// The position entry of the opcode the frame is running.
+    ///
+    /// # Safety
+    ///
+    /// Both pointers are live: the frame's dispatch loop has not returned.
+    pub(crate) unsafe fn current(self) -> Option<crate::bytecode::InstructionLocation> {
+        // SAFETY: the caller guarantees the dispatch loop, which owns `pc` and
+        // borrows the chunk holding the table, is still running.
+        let (next, locations) = unsafe { (*self.next_instruction, &*self.locations) };
+        let instruction = next.checked_sub(1)?;
+        let after = locations.partition_point(|entry| entry.instruction <= instruction);
+        after.checked_sub(1).map(|idx| locations[idx])
+    }
 }
 
 impl VmCallStackFrame {
@@ -138,6 +169,7 @@ impl VmCallStackFrame {
             inline_sites: &[],
             inline_site: None,
             frozen: false,
+            live: None,
         }
     }
 }

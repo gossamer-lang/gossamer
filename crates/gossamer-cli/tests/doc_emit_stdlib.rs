@@ -236,6 +236,18 @@ fn doc_std_module_lists_its_exports() {
 }
 
 #[test]
+fn doc_std_group_lists_the_modules_under_it() {
+    let out = Command::new(gos_bin())
+        .args(["doc", "std::crypto"])
+        .output()
+        .expect("spawn gos doc std::crypto");
+    assert!(out.status.success(), "gos doc std::crypto failed");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("- std::crypto::subtle - "), "{text}");
+    assert!(text.contains("- std::crypto::sha256 - "), "{text}");
+}
+
+#[test]
 fn doc_std_item_prints_its_documentation() {
     let out = Command::new(gos_bin())
         .args(["doc", "std::strings::trim"])

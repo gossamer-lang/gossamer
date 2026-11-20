@@ -873,6 +873,11 @@ impl TypeChecker<'_> {
         {
             candidates.push(identity);
         }
+        // A built-in type registers under its one spelling, however the
+        // header wrote it.
+        if let Some(builtin) = crate::printer::builtin_impl_owner(self.tcx, settled) {
+            return Some(vec![builtin.to_string()]);
+        }
         // A path written with its module (`impl lib::Point`) already
         // spells the identity; a bare one names a type the enclosing
         // module declares, or an imported one that keeps its own name.

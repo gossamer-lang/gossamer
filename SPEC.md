@@ -464,8 +464,9 @@ with `cast overflow` on every tier and in every profile. A conversion meant
 to lose information says how. `v as% u8` keeps the low bits, as `+%` wraps,
 and on a float saturates; `v.clamp(0, 255) as u8` saturates an integer;
 `x.round().clamp(0.0, 255.0) as u8` rounds and saturates a float; and
-`v.try_into()` between two integer types answers `Ok(v as T)` or an
-`errors::Error` when `v` does not fit, for a caller that handles the miss.
+`v.try_into()` to an integer type, from an integer or a float, answers
+`Ok(v as T)` or an `errors::Error` exactly where `as` would panic, for a
+caller that handles the miss.
 The test is compiled only where the operand's form leaves it undecided: a
 widening cast, a literal in range, a mask (`v & 0xFF`), a remainder or shift
 that bounds it, and a `clamp` with literal bounds need none. Each cast that
@@ -828,8 +829,8 @@ goroutine, so it takes a snapshot of each binding it captures where the
 `spawn` is written, and a later write on either side does not reach the
 other. A write inside a spawned closure to a binding it captured would
 change only the goroutine's snapshot, so it is rejected with `GT0114`:
-answer the value through `join()`, send it on a channel, or share it through
-a `sync::Shared`. A synchronisation handle (a `Mutex`, a channel end, a
+answer the value through `join()`, send it on a channel, or share an integer
+through a `sync::Shared`. A synchronisation handle (a `Mutex`, a channel end, a
 `sync::Shared`, an atomic) names the same object in every snapshot, so
 calling one is not a write to the snapshot.
 
@@ -1423,9 +1424,11 @@ into the `Vec` of its element the same way. Every other pair requires an
 
 The target of `.into()` - and of the fallible `.try_into()`, which reaches
 an `impl TryFrom` and answers `Result<B, E>` - comes from the use site,
-never from the receiver. Between two integer types `.try_into()` is built
-in: it answers `Ok(v as T)` when `v` fits `T` and an `errors::Error` naming
-`T` when it does not (`let b: Result<u8, errors::Error> = v.try_into()`).
+never from the receiver. To an integer type from an integer or a float,
+`.try_into()` is built in: it answers `Ok(v as T)` when `v` fits `T` (a
+float truncated toward zero) and an `errors::Error` naming `T` when it does
+not, NaN and the infinities included
+(`let b: Result<u8, errors::Error> = v.try_into()`).
 Any other pair with no `impl TryFrom` behind it is GT0066. An annotated binding, a typed parameter, and a
 return position each fix it; a call none of them reach has no target at
 all, which is GT0066 as well.
@@ -2691,8 +2694,10 @@ Memory is reclaimed deterministically, without a tracing collector:
   the interpreter tier's shared-ownership model.
 - **Weak references.** A weak reference does not contribute to the
   strong count; upgrading after the payload is destroyed yields
-  `None` (Swift-ARC model). `x.downgrade()` pins its referent for the
-  scope that took the weak, and storing an aggregate stores a copy, so no
+  `None` (Swift-ARC model). `x.downgrade()` pins its referent until the
+  function that took the weak returns (an inner block's end or a later
+  assignment to `x` does not release it), and storing an aggregate stores a
+  copy, so no
   weak reference observes a member of a reference cycle: `upgrade()`
   answers the same on every tier, whenever and whether cycles are
   collected.
@@ -3023,8 +3028,8 @@ not stop the remaining defers; the goroutine ends with the first panic, whose
 report names the later one in a `note:` line, and `join()` delivers that
 text. On the main goroutine the defers run before the report and the exit
 with status 101, and the panic hook (`runtime::set_panic_hook`) runs after
-them. A stack overflow (`GX0008`) and `process::exit` end the program without
-unwinding, so they run no defers. Cohort accounting does not ride on `defer`:
+them. A stack overflow (`GX0008`) in any goroutine and `process::exit` end the
+program without unwinding, so they run no defers. Cohort accounting does not ride on `defer`:
 the spawn wrapper's unwind backstop retires every cohort the goroutine still
 had open, so a panicking child is still counted, still reported, and never
 leaves its cohort undrained.
@@ -3508,6 +3513,13 @@ transformation when the chain doesn't return from the enclosing fn.
 - `WaitGroup`: `WaitGroup::new()`, `add(n)`, `done()`, `wait()`,
   `wait_ctx(ctx) -> bool`.
 - `Barrier`: `Barrier::new(n)`, `wait()`.
+- `Shared<T>`, guarding one integer (`T` an integer type; any other type is
+  `GT0077`): `Shared::new(v)`, `get()`, `set(v)`, `with(f)`, which calls `f`
+  with the value under the lock and answers what `f` answers, and
+  `update(f)`, which stores what `f` answers and holds the lock across the
+  read and the write; a panic in `f` stores nothing and releases the lock.
+  `x.set(x.get() + 1)` takes the lock twice, so a write another goroutine
+  makes in between is lost (`GL0066`).
 - `AtomicI64`, `AtomicI32`, `AtomicU64`, and `AtomicBool`, each holding a
   value of its own type: `new(v)`, `load()`, `store(v)`,
   `compare_exchange(current, new) -> bool`, and on the integer atomics

@@ -1,0 +1,13 @@
+// `runtime::set_panic_hook` takes a closure, captures included, and runs it
+// for a goroutine's panic and for `main`'s, on every tier. The program then
+// ends with status 101.
+
+use std::runtime
+
+fn main() {
+    let tag = "seen"
+    runtime::set_panic_hook(|msg| println(f"hook {tag}: {msg}"))
+    let worker = spawn(|| { panic("in goroutine") })
+    println(worker.join().is_err())
+    panic("in main")
+}

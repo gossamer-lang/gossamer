@@ -128,7 +128,7 @@ pub const SYNC: StdModule = StdModule {
         StdItem {
             name: "Shared",
             kind: StdItemKind::Type,
-            doc: "A value several goroutines reach, every read and write taken under one lock. Build with `Shared::new(value)`; read with `get` or `with`, write with `set`, and read-modify-write with `update`, which holds the lock across the callback.",
+            doc: "An integer several goroutines reach, every read and write taken under one lock; it guards one integer word, and any other type is `GT0077`. Build with `Shared::new(n)`; read with `get` or `with`, write with `set`, and read-modify-write with `update`, which holds the lock across the callback. `x.set(x.get() + 1)` takes the lock twice and loses a write made in between (`GL0066`).",
         },
         StdItem {
             name: "Once",

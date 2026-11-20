@@ -2562,8 +2562,28 @@ impl TypeChecker<'_> {
         match self.tcx.kind(resolved) {
             Some(TyKind::JsonValue) => self.json_value_method_ret(method, arg_count),
             Some(TyKind::DynValue) => self.dyn_value_method_ret(method, arg_count),
+            Some(TyKind::DynError) => self.error_method_ret(method, arg_count),
             _ => None,
         }
+    }
+
+    /// Return type of a method on an `errors::Error`, as every tier answers it.
+    fn error_method_ret(&mut self, method: &str, arg_count: usize) -> Option<Ty> {
+        let string = self.tcx.string_ty();
+        let error = self.tcx.dyn_error_ty();
+        Some(match (method, arg_count) {
+            ("message", 0) => string,
+            ("cause", 0) => self.option_adt_ty(error),
+            ("chain", 0) => self.tcx.intern(TyKind::Vec(error)),
+            ("fields", 0) => {
+                let pair = self.tcx.intern(TyKind::Tuple(vec![string, string]));
+                self.tcx.intern(TyKind::Vec(pair))
+            }
+            ("field", 1) => self.option_adt_ty(string),
+            ("is", 1) => self.tcx.bool_ty(),
+            ("with_field", 2) => error,
+            _ => return None,
+        })
     }
 
     /// Types a method call on a `json::Value` or `DynValue` receiver from its
@@ -2596,12 +2616,13 @@ impl TypeChecker<'_> {
         let owner = match self.tcx.kind(resolved) {
             Some(TyKind::JsonValue) => "json::Value",
             Some(TyKind::DynValue) => "DynValue",
+            Some(TyKind::DynError) => "errors::Error",
             _ => return false,
         };
-        // The conversions every value answers, and any name a user impl or
-        // trait declares, keep their own resolution.
+        // The conversions every value answers, and any name an impl for this
+        // receiver declares, keep their own resolution.
         if matches!(method, "clone" | "into" | "try_into" | "to_string")
-            || self.user_method_owners.contains_key(method)
+            || self.user_impl_declares(resolved, method)
         {
             return false;
         }
@@ -3243,6 +3264,8 @@ impl TypeChecker<'_> {
             "json::Value" => return Some(self.tcx.json_value_ty()),
             "time::Instant" => return Some(self.tcx.instant_ty()),
             "time::Duration" => return Some(self.tcx.duration_ty()),
+            "big::Int" | "math::big::Int" => return Some(self.tcx.big_int_ty()),
+            "big::Uint" | "math::big::Uint" => return Some(self.tcx.big_uint_ty()),
             "io::Reader" | "io::Writer" => return Some(self.io_stream_ty()),
             "errors::Error" | "io::Error" => return Some(self.tcx.dyn_error_ty()),
             _ if src.ends_with("::Error") || src.ends_with("ParseError") => {

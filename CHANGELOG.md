@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.83.0 - Decimal, IndexMap and BitSet, big integer operators, backtraces
+
+- `math::Decimal`, an exact decimal number (`0.1 + 0.2 == 0.3`): `Decimal::parse`, `Decimal::from_i64`, `+ - * /`, unary `-`, comparison and ordering, `round` and `div_scaled` rounding half to even, `abs`, `is_zero`, `to_f64`; `/` keeps 28 digits after the point.
+- `collections::IndexMap`, a map that iterates in insertion order, and `collections::BitSet`, a set of non-negative integers stored one bit each.
+- `math::big::Int` takes `+ - * / %`, unary `-`, compound assignment, and every comparison, and `math::big::Uint` takes `+ * == !=`; dividing by zero panics as integer division does.
+- `f64::total_cmp` and `f32::total_cmp` order by IEEE 754 total order and answer a sign, so `sort_by(|a, b| a.total_cmp(b))` sorts floats, NaN included.
+- A float's `try_into()` to an integer type answers `Err` exactly where `as` would panic, and `Ok` of the truncated value otherwise.
+- `runtime::backtrace()` answers the calling goroutine's call stack as text, one `at function (file:line:column)` line per frame; the calling function is always named at the call's position, an optimized build on every platform included.
+- New lint `split_shared_update` (`GL0066`): `x.set(x.get() + 1)` on a `sync::Shared` takes the lock once to read and again to write, so a write another goroutine makes in between is lost; the help points at `x.update(|n| n + 1)`, which holds the lock across both. It reports in `gos check`, `gos lint`, the language server, and MCP.
+- `gos doc std::sync` and SPEC say that `sync::Shared` holds one integer, and SPEC's `std::sync` section documents `Shared`, which it left out.
+- `gos doc std::crypto`, `gos doc std::encoding`, and any other path that groups standard modules list the modules under it, where they reported no such module.
+- `use std::sync::Map` names the concurrent map wherever the program writes `Map`, in calls and in parameter, field, and return types, where native code faulted on `Map::new()` and an annotation meant the collections `Map`; `insert` and `remove` on a `sync::Map` no longer need a `mut` binding.
+- A standard type imported by name or under another name works on every tier: `use std::time::Duration` then `d: Duration` is a `Duration` (likewise `Instant` and `json::Value`), where the parameter accepted any argument, and `use std::sync::Mutex as Lock` calls the lock, where it failed at run or link time.
+- A standard type imported on its own (`use std::path::Path`, `use std::time::Time`) works without importing its module, where its own code failed to resolve.
+- A program's trait implemented for `Duration`, `Instant`, or `json::Value` dispatches on every tier, however the `impl` header spells the type.
+- Native code prints an error's cause as the cause, where it printed a number, and the cause stays valid after the error it came from is released. Every `errors::Error` method is checked against its declared type.
+- `math::big` functions answer typed values, so `x * two` on two `big::Int`s no longer overflows at 64 bits natively or fails on the VM; `int_to_i64` and `uint_to_u64` answer an `Option`, and `int_div` and `int_rem` a `Result`, as every tier did. A struct with a `big::Int` field compares with `==` on the VM.
+- A method outside a receiver's surface is `GT0002` on `Duration`, `Instant`, `errors::Error`, `json::Value`, `DynValue`, channel ends, and join handles, where `d.checked_sub(e)` ran integer arithmetic on nanoseconds and `rx.len()` or `rx.recv_timeout(..)` gave wrong answers or failed at run or link time.
+- `tx.try_send(v)` is typed `bool`, as the runtime answers it, so `if tx.try_send(v)` checks.
+- `to_string()` is typed `String` on every value that renders, and is `GT0062` on a runtime handle with no text form, where it passed untyped and stopped native compilation.
+- `runtime::set_panic_hook` takes any closure, captures included, where a native build faulted calling it.
+- Recursion that outgrows a spawned goroutine's stack reports `GX0008` and ends the program with status 101 on every tier, as it does in `main`, where compiled code crashed and the VM handed the error to `join()`.
+
 ## 0.82.3 - Remainder and task lints, goroutines left blocked at exit
 
 - New lint `signed_remainder` (`GL0064`): `x % k == r` with a positive `r` while `x` is signed and may be negative, which is false for every negative `x` because `%` keeps the sign of the value it divides. The help gives `x % 2 != 0` for oddness and `x.rem_euclid(k) == r`. It reports in `gos check`, `gos lint`, the language server, and MCP.
