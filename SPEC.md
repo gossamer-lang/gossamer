@@ -829,8 +829,8 @@ goroutine, so it takes a snapshot of each binding it captures where the
 `spawn` is written, and a later write on either side does not reach the
 other. A write inside a spawned closure to a binding it captured would
 change only the goroutine's snapshot, so it is rejected with `GT0114`:
-answer the value through `join()`, send it on a channel, or share it through
-a `sync::Shared`. A synchronisation handle (a `Mutex`, a channel end, a
+answer the value through `join()`, send it on a channel, or share an integer
+through a `sync::Shared`. A synchronisation handle (a `Mutex`, a channel end, a
 `sync::Shared`, an atomic) names the same object in every snapshot, so
 calling one is not a write to the snapshot.
 
@@ -3513,6 +3513,13 @@ transformation when the chain doesn't return from the enclosing fn.
 - `WaitGroup`: `WaitGroup::new()`, `add(n)`, `done()`, `wait()`,
   `wait_ctx(ctx) -> bool`.
 - `Barrier`: `Barrier::new(n)`, `wait()`.
+- `Shared<T>`, guarding one integer (`T` an integer type; any other type is
+  `GT0077`): `Shared::new(v)`, `get()`, `set(v)`, `with(f)`, which calls `f`
+  with the value under the lock and answers what `f` answers, and
+  `update(f)`, which stores what `f` answers and holds the lock across the
+  read and the write; a panic in `f` stores nothing and releases the lock.
+  `x.set(x.get() + 1)` takes the lock twice, so a write another goroutine
+  makes in between is lost (`GL0066`).
 - `AtomicI64`, `AtomicI32`, `AtomicU64`, and `AtomicBool`, each holding a
   value of its own type: `new(v)`, `load()`, `store(v)`,
   `compare_exchange(current, new) -> bool`, and on the integer atomics

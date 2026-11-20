@@ -188,12 +188,18 @@ pub const DAY_ONE_LINTS: &[&str] = &[
     "lossy_cast",
     "closure_self_cycle",
     "signed_remainder",
+    "split_shared_update",
 ];
 
 /// Lints whose findings need the checked program's types. The syntax-only
 /// pass [`run`] reports none of them; a caller holding the types computes
 /// the findings and hands them to [`leveled`].
-pub const TYPED_LINTS: &[&str] = &["lossy_cast", "closure_self_cycle", "signed_remainder"];
+pub const TYPED_LINTS: &[&str] = &[
+    "lossy_cast",
+    "closure_self_cycle",
+    "signed_remainder",
+    "split_shared_update",
+];
 
 /// Runs every enabled lint over `source_file` (parsed from `src`) and
 /// returns their diagnostics in deterministic order (lint code asc,
@@ -417,6 +423,7 @@ pub fn lint_code(id: &str) -> Code {
         "closure_self_cycle" => Code("GL0063"),
         "signed_remainder" => Code("GL0064"),
         "unjoined_task" => Code("GL0065"),
+        "split_shared_update" => Code("GL0066"),
         "non_camel_case_types" => Code("GL0057"),
         "non_snake_case" => Code("GL0058"),
         "non_upper_case_globals" => Code("GL0059"),

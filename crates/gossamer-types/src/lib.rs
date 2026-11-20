@@ -35,6 +35,7 @@ mod normalize;
 pub mod printer;
 pub mod purity;
 mod signed_remainders;
+mod split_shared_updates;
 pub mod std_fn_eta;
 pub mod std_fn_values;
 pub mod stdlib_signatures;
@@ -103,6 +104,9 @@ pub use lossy_casts::{
 pub use normalize::normalize_caller_side_spellings;
 pub use printer::{public_type_name, render_public_ty, render_ty, stable_type_name};
 pub use signed_remainders::{SIGNED_REMAINDER_LINT, SignedRemainder, find_signed_remainders};
+pub use split_shared_updates::{
+    SPLIT_SHARED_UPDATE_LINT, SplitSharedUpdate, find_split_shared_updates,
+};
 pub use stdlib_signatures::{
     STD_FUNCTION_SIGNATURES, StdFunctionSignature, function_shape as stdlib_function_shape,
     function_signature as stdlib_function_signature,

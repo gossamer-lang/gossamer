@@ -1,0 +1,13 @@
+// ERROR: GL0066
+
+use std::sync::Shared
+
+fn bump(counter: Shared<i64>) {
+    counter.set(counter.get() + 1)
+}
+
+fn main() {
+    let counter = Shared::new(0)
+    bump(counter)
+    println(counter.get())
+}

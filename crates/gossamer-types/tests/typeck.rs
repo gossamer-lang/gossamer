@@ -5810,3 +5810,53 @@ fn an_imported_standard_type_annotates_as_its_full_path() {
         checked.diagnostics
     );
 }
+
+#[test]
+fn split_shared_update_reports_a_set_fed_by_a_read_of_its_own_handle() {
+    let source = r"use std::sync::Shared
+
+struct Stats { hits: Shared<i64> }
+
+fn bump(counter: Shared<i64>, other: Shared<i64>, stats: Stats) {
+    for _ in 0..100_000 { counter.set(counter.get() + 1) }
+    counter.set(counter.with(|n| n * 2))
+    stats.hits.set(stats.hits.get() + 1)
+    counter.update(|n| n + 1)
+    counter.set(other.get() + 1)
+    let seen = counter.get()
+    counter.set(seen + 1)
+    stats.hits.update(|n| n + 1)
+}
+
+fn main() {
+    let counter = Shared::new(0)
+    let other = Shared::new(0)
+    bump(counter, other, Stats { hits: Shared::new(0) })
+    println(counter.get())
+}
+";
+    let mut map = SourceMap::new();
+    let file = map.add_file("test.gos", source.to_string());
+    let (mut sf, parse_diags) = parse_source_file(source, file);
+    assert!(parse_diags.is_empty(), "parse errors: {parse_diags:?}");
+    let (mut resolutions, _) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
+    let mut tcx = TyCtxt::new();
+    let (table, _) = typecheck_source_file(&sf, &resolutions, &mut tcx);
+    let found: Vec<(usize, String, String)> =
+        gossamer_types::find_split_shared_updates(&sf, &resolutions, &table, &tcx)
+            .into_iter()
+            .map(|found| {
+                let line = source[..found.span.start as usize].lines().count();
+                (line, found.handle, found.read)
+            })
+            .collect();
+    assert_eq!(
+        found,
+        vec![
+            (6, "counter".to_string(), "get".to_string()),
+            (7, "counter".to_string(), "with".to_string()),
+            (8, "stats.hits".to_string(), "get".to_string()),
+        ]
+    );
+}

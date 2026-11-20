@@ -94,7 +94,7 @@ about values.
   writes reach them, whatever the type (`xs.for_each(|x| count += x)`). No
   `move`. A spawned closure is the exception: it takes a snapshot of each
   capture at the spawn, and writing one inside it is GT0114 - answer the
-  value through `join()`, a channel, or a `sync::Shared`. A closure stored
+  value through `join()`, a channel, or a `sync::Shared` (one integer). A closure stored
   in the value it captures (`o.callback = Some(|| o.x)`) is a cycle never
   freed (GL0063): capture it weakly, `[weak o] || ..`, where `o` in the body
   is an `Option` (`None` once the value is gone).
@@ -402,9 +402,11 @@ fn main() {
 - `select { Some(v) = rx.recv() => .., None = rx.recv() => .., default => .. }`
   multiplexes (a receive answers `Option<T>`; a bare name binds it whole);
   `time::after(Duration::from_millis(n))` is a timeout arm.
-- `std::sync` has `Mutex`, `RwLock`, atomics, `WaitGroup`, `Once`;
-  `sync::with_timeout(f, ms)`, `sync::shield(f)`. There is no OS-thread
-  spawn API.
+- `std::sync` has `Mutex`, `RwLock`, atomics, `WaitGroup`, `Once`, and
+  `Shared<i64>`, one integer under a lock: read-modify-write it with
+  `x.update(|n| n + 1)`, never `x.set(x.get() + 1)`, which loses concurrent
+  writes (GL0066); `sync::with_timeout(f, ms)`, `sync::shield(f)`. There is
+  no OS-thread spawn API.
 - Worker threads start as goroutines call for them, up to one per core
   (`runtime::set_max_procs(n)` sets the cap, as Go's `GOMAXPROCS`), and an
   idle program's threads sleep, so a daemon costs no CPU between events.

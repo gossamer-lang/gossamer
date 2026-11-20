@@ -191,6 +191,27 @@ pub fn typed_lints(
         &registry,
         remainders,
     ));
+    let split_updates = crate::find_split_shared_updates(sf, resolutions, table, tcx)
+        .into_iter()
+        .map(|found| {
+            let (handle, read) = (found.handle, found.read);
+            (
+                found.span,
+                format!(
+                    "`{handle}.set(..)` stores a value `{handle}.{read}(..)` read under a separate lock: a write another goroutine makes between the two is lost"
+                ),
+                Some(format!(
+                    "read and write under one lock: `{handle}.update(|value| ..)` stores what the callback answers"
+                )),
+            )
+        })
+        .collect();
+    out.extend(gossamer_lint::leveled(
+        crate::SPLIT_SHARED_UPDATE_LINT,
+        sf,
+        &registry,
+        split_updates,
+    ));
     // Code the toolchain appended, and a dependency's own code, are not the
     // program's to change.
     let dependencies = dependency_spans(&sf.items);

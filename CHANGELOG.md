@@ -8,6 +8,8 @@
 - `f64::total_cmp` and `f32::total_cmp` order by IEEE 754 total order and answer a sign, so `sort_by(|a, b| a.total_cmp(b))` sorts floats, NaN included.
 - A float's `try_into()` to an integer type answers `Err` exactly where `as` would panic, and `Ok` of the truncated value otherwise.
 - `runtime::backtrace()` answers the calling goroutine's call stack as text, one `at function (file:line:column)` line per frame; an optimized build keeps the calling function's frame, so it is always named.
+- New lint `split_shared_update` (`GL0066`): `x.set(x.get() + 1)` on a `sync::Shared` takes the lock once to read and again to write, so a write another goroutine makes in between is lost; the help points at `x.update(|n| n + 1)`, which holds the lock across both. It reports in `gos check`, `gos lint`, the language server, and MCP.
+- `gos doc std::sync` and SPEC say that `sync::Shared` holds one integer, and SPEC's `std::sync` section documents `Shared`, which it left out.
 - `gos doc std::crypto`, `gos doc std::encoding`, and any other path that groups standard modules list the modules under it, where they reported no such module.
 - `use std::sync::Map` names the concurrent map wherever the program writes `Map`, in calls and in parameter, field, and return types, where native code faulted on `Map::new()` and an annotation meant the collections `Map`; `insert` and `remove` on a `sync::Map` no longer need a `mut` binding.
 - A standard type imported by name or under another name works on every tier: `use std::time::Duration` then `d: Duration` is a `Duration` (likewise `Instant` and `json::Value`), where the parameter accepted any argument, and `use std::sync::Mutex as Lock` calls the lock, where it failed at run or link time.
