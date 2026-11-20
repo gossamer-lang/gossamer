@@ -5600,6 +5600,8 @@ fn main() {
     for i in (1..10).rev() { println(i % 3 == 1) }
     let c = 4
     println(c % 2 == 1)
+    let a = (n % 1000).abs()
+    println(a % 10 == 1 && n.abs() % 2 == 1 && n.rem_euclid(7) % 3 == 1)
 }
 ";
     let mut map = SourceMap::new();

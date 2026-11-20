@@ -300,8 +300,9 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
             and the comparison is false for every negative odd `n`. Test\n\
             oddness with `n % 2 != 0`, or compare the remainder in `0..k` with\n\
             `n.rem_euclid(k) == r`, the same for every sign. A value shown to be\n\
-            at least zero (an unsigned type, a mask, a literal `clamp`, a `for`\n\
-            over a range from zero, an `enumerate` index) is not reported."
+            at least zero (an unsigned type, a mask, a literal `clamp`, `abs`,\n\
+            `rem_euclid`, a `for` over a range from zero, an `enumerate` index)\n\
+            is not reported."
         }
         "unjoined_task" => {
             "A task's handle bound by `let task = spawn(..)` and never used.\n\

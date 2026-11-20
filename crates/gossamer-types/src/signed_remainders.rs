@@ -6,9 +6,9 @@
 //! remainder there is `-1`. A comparison of `x % k` with a positive literal
 //! is reported when `x` is a signed integer nothing shows to be at least
 //! zero. A dividend is shown non-negative by its own form (a literal, a
-//! mask, a literal `clamp`), or by a binding that counts up from zero: a
-//! `for` over a range that starts at zero or above, the index `enumerate`
-//! answers, or a `let` of such a value.
+//! mask, a literal `clamp`, an integer's `abs` or `rem_euclid`), or by a
+//! binding that counts up from zero: a `for` over a range that starts at
+//! zero or above, the index `enumerate` answers, or a `let` of such a value.
 
 #![forbid(unsafe_code)]
 
@@ -74,6 +74,14 @@ impl Finder<'_> {
         if let ExprKind::Path(_) = &expr.kind
             && let Some(Resolution::Local(binding)) = self.resolutions.get(expr.id)
             && self.non_negative.contains(&binding)
+        {
+            return true;
+        }
+        // An integer's `abs` and `rem_euclid` answer zero or more: `abs` of
+        // the one value with no positive counterpart panics instead.
+        if let ExprKind::MethodCall { receiver, name, .. } = &expr.kind
+            && matches!(name.name.as_str(), "abs" | "rem_euclid")
+            && int_value_range(receiver, self.table, self.tcx).is_some()
         {
             return true;
         }
