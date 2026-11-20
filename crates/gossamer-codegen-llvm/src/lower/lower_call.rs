@@ -194,6 +194,41 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
+    /// `runtime::backtrace()`: the trace, with this body's name and the
+    /// call's position, so the caller is named whatever the platform's
+    /// symbols resolve.
+    fn lower_backtrace_call(
+        &mut self,
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+    ) -> Result<(), BuildError> {
+        let offset = self
+            .current_block
+            .and_then(|id| {
+                self.body
+                    .blocks
+                    .iter()
+                    .find(|block| block.id.as_u32() == id)
+            })
+            .and_then(|block| block.terminator_span)
+            .map_or(self.body.span.start, |span| span.start);
+        let (file, line, column) =
+            crate::emit::source_position(offset).unwrap_or((String::new(), 0, 0));
+        let display = super::setup::frame_name(&self.body.name, self.tcx).to_string();
+        let (name_global, _) = self.strings.borrow_mut().intern(&display);
+        let (file_global, _) = self.strings.borrow_mut().intern(&file);
+        declare_rt(&mut self.runtime_refs, "gos_rt_runtime_backtrace_at");
+        let tmp = self.fresh();
+        writeln!(
+            self.out,
+            "  {tmp} = call ptr @gos_rt_runtime_backtrace_at(ptr {name_global}, ptr {file_global}, i32 {line}, i32 {column})"
+        )
+        .unwrap();
+        self.store_value_to_place(destination, "ptr", &tmp);
+        emit_terminator_branch(&mut self.out, target);
+        Ok(())
+    }
+
     /// Lowers a single operand to a `ptr` SSA holding the
     /// argument's stringification. Strings pass through; numeric
     /// types route through their `gos_rt_*_to_str` helper.
@@ -326,6 +361,9 @@ impl<'a> Lowerer<'a> {
                 .into_boxed_str(),
             )));
         };
+        if name == "gos_rt_runtime_backtrace" && args.is_empty() {
+            return self.lower_backtrace_call(destination, target);
+        }
         // A callee resolved to a program function is that function, whatever
         // its name spells: a user module may declare `math::sqrt`, and no
         // standard-library lowering keyed on the name may capture the call.

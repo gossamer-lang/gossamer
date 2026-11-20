@@ -547,11 +547,52 @@ fn fault_trace() -> String {
 
 /// `runtime::backtrace() -> String`: the calling goroutine's call stack,
 /// outermost frame first, one `at function (file:line:column)` line each, as
-/// a fault report shows it. A release build without `-g` names the
-/// functions its machine stack still holds and no positions.
+/// a fault report shows it, with each file's name.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_runtime_backtrace() -> *mut c_char {
     super::alloc_cstring(backtrace_text().as_bytes())
+}
+
+/// `runtime::backtrace()` called from compiled code, which names the calling
+/// function and the call's position: the machine stack of an optimized build
+/// names its functions only where the platform's symbols resolve them, so
+/// the caller is added when the walk did not name it.
+///
+/// # Safety
+///
+/// `function` and `file` are program-image string constants.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_runtime_backtrace_at(
+    function: *const c_char,
+    file: *const c_char,
+    line: i32,
+    column: i32,
+) -> *mut c_char {
+    // SAFETY: both are program-image string constants, as for
+    // `gos_rt_stack_push`.
+    let (function, file) = unsafe {
+        (
+            crate::sigquit::ImageStr::new(function).as_str(),
+            crate::sigquit::ImageStr::new(file).as_str(),
+        )
+    };
+    let caller = format!("at {function}");
+    let placed = if file.is_empty() || line <= 0 {
+        caller.clone()
+    } else {
+        format!("{caller} ({file}:{line}:{column})")
+    };
+    let mut lines: Vec<String> = backtrace_text().lines().map(str::to_string).collect();
+    // The innermost line is the caller when the walk named it; one the walk
+    // named without a position takes the call's.
+    match lines.last_mut() {
+        Some(last) if last.starts_with(&format!("{caller} (")) => {}
+        Some(last) if *last == caller => last.clone_from(&placed),
+        _ => lines.push(placed),
+    }
+    let mut text = lines.join("\n");
+    text.push('\n');
+    super::alloc_cstring(text.as_bytes())
 }
 
 /// The text [`gos_rt_runtime_backtrace`] answers, for a host that reads it
@@ -564,10 +605,24 @@ pub fn backtrace_text() -> String {
         .unwrap_or(&trace);
     let mut out = String::with_capacity(frames.len());
     for line in frames.lines() {
-        out.push_str(line.trim_start());
+        out.push_str(&frame_with_file_name(line.trim_start()));
         out.push('\n');
     }
     out
+}
+
+/// `line` with its position's file reduced to the file's name, which every
+/// tier knows the same way: a native build records only the name, where the
+/// VM holds the path the program was run with.
+fn frame_with_file_name(line: &str) -> String {
+    let Some(open) = line.rfind(" (") else {
+        return line.to_string();
+    };
+    let position = &line[open + 2..];
+    let Some(name_start) = position.rfind(['/', '\\']) else {
+        return line.to_string();
+    };
+    format!("{} ({}", &line[..open], &position[name_start + 1..])
 }
 
 /// [`raise`] reporting `trace` in place of this thread's own call stack.

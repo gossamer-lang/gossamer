@@ -115,7 +115,7 @@ impl<'a> Lowerer<'a> {
                 gossamer_mir::Terminator::Call {
                     callee: gossamer_mir::Operand::Const(gossamer_mir::ConstValue::Str(name)),
                     ..
-                } if name == "gos_rt_runtime_backtrace"
+                } if name == "gos_rt_runtime_backtrace" || name == "gos_rt_runtime_backtrace_at"
             )
         })
     }
@@ -923,7 +923,7 @@ fn param_only_read(body: &gossamer_mir::Body, param: Local) -> bool {
 /// The name a panic report gives the body `name`: a specialisation reports
 /// the generic it was made from, as the VM does, and the report reads the
 /// same in every program.
-fn frame_name<'a>(name: &'a str, tcx: &'a gossamer_types::TyCtxt) -> &'a str {
+pub(super) fn frame_name<'a>(name: &'a str, tcx: &'a gossamer_types::TyCtxt) -> &'a str {
     let template = name
         .strip_prefix("fn#")
         .and_then(|rest| rest.split_once("__mono__"))

@@ -96,7 +96,7 @@ pub const RUNTIME: StdModule = StdModule {
         StdItem {
             name: "backtrace",
             kind: StdItemKind::Function,
-            doc: "The calling goroutine's call stack as text, outermost frame first, one `at function (file:line:column)` line each, as a panic report shows it. A release build without `-g` names the functions still on the machine stack, without positions.",
+            doc: "The calling goroutine's call stack as text, outermost frame first, one `at function (file:line:column)` line each, with the file's name. The function that calls it is always named, at the call's position; an optimized build names the frames above it that it kept, without positions.",
         },
         StdItem {
             name: "is_main_thread",
