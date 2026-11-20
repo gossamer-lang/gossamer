@@ -395,9 +395,11 @@ statement whose value is discarded, and the implicit `main` returns
 as a 64-bit signed value, on every tier. A value of a narrower type
 never holds a value outside its declared range: an operation whose
 64-bit result could leave that range answers at the declared width. An
-explicit `as` cast truncates to the target width and then extends by
-the target's signedness (`300 as u8 == 44`, `200 as i8 == -56`).
-Consequences of the model:
+explicit `as` cast checks that the value fits its target and panics with
+`cast overflow` when it does not (`300 as u8` panics, `200 as u8 == 200`);
+`as%` truncates to the target width and then extends by the target's
+signedness instead (`300 as% u8 == 44`, `200 as% i8 == -56`). Consequences
+of the model:
 
 - `+`, `-`, and `*` raise the overflow panic when the result leaves the
   declared type width, on every tier and in every build profile: `gos`,
@@ -413,9 +415,10 @@ Consequences of the model:
   `0 -% x` is the value that wraps, `-(x as i64)` the signed negation.
 - `u64`/`usize` values use the same 64-bit payload as signed integers,
   but arithmetic, comparison, shifts, division/remainder, and display are
-  type-aware on every tier. Casts reinterpret or truncate to the target
-  width (`(0 - 1) as u64` prints `18446744073709551615`); an explicit
-  cast back to a signed type reinterprets the same bits.
+  type-aware on every tier. `as%` reinterprets or truncates to the target
+  width (`(0 - 1) as% u64` prints `18446744073709551615`), and `as%` back to
+  a signed type reinterprets the same bits; a plain `as` between them
+  panics for a value the target cannot hold.
 - A shift amount is a count of any integer type, and the result has the
   shifted operand's type. An amount outside `0..BITS` of that type panics
   with `attempt to shift left with overflow` (or `right`), as an
@@ -425,9 +428,11 @@ Consequences of the model:
   with `<<%=` and `>>%=` their compound forms. `>>` and `>>%` are the
   arithmetic (sign-propagating) shift on a signed type and the logical
   shift on an unsigned one.
-- Float → int casts truncate toward zero and saturate at the target
-  type's range (`300.7 as u8 == 255`, `-5.0 as u8 == 0`,
-  `1e20 as i64 == i64::MAX`, NaN → 0).
+- Float → int casts truncate toward zero and panic with `cast overflow`
+  when the value is NaN or its truncation is past the target type's range
+  (`255.9 as u8 == 255`, `-0.5 as u8 == 0`, `300.7 as u8` and
+  `1e20 as i64` panic). `as%` saturates instead (`300.7 as% u8 == 255`,
+  `-5.0 as% u8 == 0`, `1e20 as% i64 == i64::MAX`, NaN → 0).
 
 The VM, the Cranelift JIT, and both LLVM profiles enforce the same behavior.
 
@@ -445,6 +450,20 @@ fn djb2(text: String) -> u32 {
     hash
 }
 ```
+
+**Checked and wrapping casts.** A plain `as` never changes a value
+silently, as a plain `+` never wraps: a value its target cannot hold panics
+with `cast overflow` on every tier and in every profile. A conversion meant
+to lose information says how. `v as% u8` keeps the low bits, as `+%` wraps,
+and on a float saturates; `v.clamp(0, 255) as u8` saturates an integer;
+`x.round().clamp(0.0, 255.0) as u8` rounds and saturates a float; and
+`v.try_into()` between two integer types answers `Ok(v as T)` or an
+`errors::Error` when `v` does not fit, for a caller that handles the miss.
+The test is compiled only where the operand's form leaves it undecided: a
+widening cast, a literal in range, a mask (`v & 0xFF`), a remainder or shift
+that bounds it, and a `clamp` with literal bounds need none. Each cast that
+keeps its test is reported by the `lossy_cast` lint (GL0062), whose help
+names these spellings.
 
 Wrapping arithmetic has this one spelling. `x.wrapping_add(y)` and
 `x.wrapping_mul(y)` are not integer methods: a call reports GT0087 with the
@@ -488,11 +507,14 @@ type are a mismatch (GT0001): `#[1, 2.5]`, `if c { 1 } else { 2.5 }`, and
 **The `as` whitelist.** `as` is whitelist-checked (`GT0005`). The
 permitted shapes are: numeric ↔ numeric (any integer or float type on
 either side, `f32` sources included; float → int truncates toward zero
-and saturates as above), `bool` → integer, `char` → integer, integer →
-`char`, and same-type no-ops. An integer → `char` cast reads the value's low
-byte as a Latin-1 character, the way `s.byte_at(i) as char` renders a byte;
-`char::from_u32(n)` converts a Unicode code point, answering `None` for a
-value that is not one. Every other `as` shape is a compile-time error.
+and is checked as above), `bool` → integer, `char` → integer, integer →
+`char`, and same-type no-ops, each spelled `as` or `as%`. An integer →
+`char` cast reads a value in `0..=255` as a Latin-1 character, the way
+`s.byte_at(i) as char` renders a byte, and panics for any other value, whose
+low byte `as%` keeps; a `char` → integer cast panics for a character past
+the target's range. `char::from_u32(n)` converts a Unicode code point,
+answering `None` for a value that is not one. Every other `as` shape is a
+compile-time error.
 
 ### 3.2 Strings
 
@@ -755,6 +777,27 @@ the enclosing binding, which the code around the closure then reads. A
 closure that outlives the function that made it keeps its captures alive,
 and each evaluation of a closure expression names the bindings live at that
 point, so a closure made in a loop body names that iteration's bindings.
+
+Because a closure keeps what it captures alive, a closure stored in the value
+it captures (`o.callback = Some(|| o.payload.len())`,
+`handlers.push(|| handlers.len())`) forms a reference cycle that is never
+freed: the `closure_self_cycle` lint (GL0063) reports the store. A capture
+list makes the capture weak instead:
+
+```
+o.callback = Some([weak o] || match o {
+    Some(o) => o.payload.len(),
+    None => 0,
+})
+```
+
+`[weak a, weak b] |params| body` captures a weak reference to each listed
+binding, which must hold a struct, a payload-bearing enum, or another
+reference-counted value (GT0028 otherwise). Inside the body each name is the
+`Option` its reference upgrades to on that call: `Some` while the value
+lives and `None` once it is gone. It is the same capture as a weak reference
+taken by hand with `o.downgrade()` before the closure and `upgrade()`d inside
+it.
 
 A spawned closure (`spawn(|| ..)`) is the one exception. It runs on another
 goroutine, so it takes a snapshot of each binding it captures where the
@@ -1356,7 +1399,10 @@ into the `Vec` of its element the same way. Every other pair requires an
 
 The target of `.into()` - and of the fallible `.try_into()`, which reaches
 an `impl TryFrom` and answers `Result<B, E>` - comes from the use site,
-never from the receiver. An annotated binding, a typed parameter, and a
+never from the receiver. Between two integer types `.try_into()` is built
+in: it answers `Ok(v as T)` when `v` fits `T` and an `errors::Error` naming
+`T` when it does not (`let b: Result<u8, errors::Error> = v.try_into()`).
+Any other pair with no `impl TryFrom` behind it is GT0066. An annotated binding, a typed parameter, and a
 return position each fix it; a call none of them reach has no target at
 all, which is GT0066 as well.
 
@@ -1484,6 +1530,14 @@ bind correct values on the bytecode VM, the Cranelift JIT, and the LLVM
 AOT tiers.
 
 Shadowing is permitted.
+
+A `let` may leave out its value (`let mut x: i64`), and an assignment after
+it supplies one. Every read of such a binding must follow an assignment on
+every path that reaches it - each branch of an `if` or `match`, past a loop
+that may not run - or the program is rejected with `GT0129`. A path that
+cannot continue (`return`, `break`, `continue`, a `panic`) needs none. A
+closure or a `defer` reads its bindings where it is written, so they must be
+assigned there.
 
 A comma-separated list on the left of `=` is a destructuring target: each
 element is written from the matching element of the right-hand side, which
@@ -1631,6 +1685,12 @@ while the whole chain holds.
 implementing `Iterator<Item = T>` (see §10.4 on stdlib traits) can be
 ranged over. The built-in ranges `a..b` and `a..=b` implement
 `Iterator`.
+
+A `for` over a collection walks the value it held when the loop began, as a
+`let` copy of it would. A body that pushes onto, removes from, or writes
+elements of the collection it walks changes the collection after the loop,
+not which elements the loop visits: `for x in xs { if x == 2 { xs.remove(..) } }`
+over `#[1, 2, 2, 3]` visits all four elements and leaves `#[1, 3]`.
 
 A `Result` or an `Option` is not a sequence, and a `for` over one is
 rejected (`GT0067`). Each holds at most one value and carries no element
@@ -2047,7 +2107,7 @@ From highest to lowest:
 | 1 | `::` path | left |
 | 2 | `.` method/field, `[]`, `()`, `?`, postfix | left |
 | 3 | unary `-`, `!`, `&`, `&mut`, `*` (deref) | right |
-| 4 | `as` cast | left |
+| 4 | `as` / `as%` cast | left |
 | 5 | `*`, `/`, `%`, `*%` | left |
 | 6 | `+`, `-`, `+%`, `-%` | left |
 | 7 | `<<`, `>>`, `<<%`, `>>%` | left |
@@ -2593,7 +2653,14 @@ Memory is reclaimed deterministically, without a tracing collector:
   deletion). Values shared across goroutines are excluded from this pass and
   their cycles must be broken with `Weak<T>`. The bytecode VM currently treats
   `runtime::collect_cycles()` as a no-op. This entire collection surface is
-  Experimental; no background collector runs.
+  Experimental; no background collector runs. A closure's captures are not
+  traced by it either, so a closure stored in a value it captures is never
+  freed on any tier: capture that value weakly (`[weak o] || ..`, §3.5).
+- **Out of memory.** A buffer larger than the machine can back - physical
+  memory plus swap on Linux, the commit limit on Windows - panics with
+  `out of memory: cannot allocate N bytes` where it is asked for
+  (`#[x; n]`, `Vec::with_capacity(n)`, `strings::repeat`, a growing `push`),
+  on every tier, rather than being mapped lazily and killed once filled.
 - **Value aggregates.** Structs, tuples, and arrays are
   heap-allocated at construction and freed by the compile-time drop
   pass at scope exit. An aggregate that escapes the drop pass's
@@ -4137,6 +4204,7 @@ Expr         = LiteralExpr | PathExpr | CallExpr | MethodCall | FieldAccess
              | TupleExpr | StructExpr | ArrayExpr | RangeExpr | UnsafeExpr
              | TryExpr | RefExpr | SelectExpr | MacroCall | PipeExpr
 
+CastExpr     = Expr ( "as" | "as" "%" ) Type
 PipeExpr     = Expr "|>" PipeRhs
 PipeRhs      = PathExpr                                  // x |> f
              | PathExpr "(" [ ArgList ] ")"              // x |> |v| f(a, b, v)

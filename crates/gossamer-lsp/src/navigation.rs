@@ -407,7 +407,7 @@ impl Walker<'_> {
                 self.visit_expr(rhs);
             }
             ExprKind::Unary { operand, .. } => self.visit_expr(operand),
-            ExprKind::Cast { value, ty } => {
+            ExprKind::Cast { value, ty, .. } => {
                 self.visit_expr(value);
                 self.visit_type(ty);
             }

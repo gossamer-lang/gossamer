@@ -352,6 +352,17 @@ pub(crate) fn panic_text(text: &str) {
     raise("GX0005", "panic: ", text.to_string());
 }
 
+/// Raises the panic for a buffer of `bytes` the system cannot back, the
+/// one every tier reports for it.
+#[cold]
+pub(crate) fn out_of_memory(bytes: usize) -> ! {
+    raise(
+        "GX0005",
+        "panic: ",
+        crate::memory_limit::out_of_memory_message(bytes as u128),
+    );
+}
+
 /// [`gos_rt_panic_oob`] for a caller inside the runtime. See [`panic_text`].
 pub(crate) fn panic_oob_text(what: &str, idx: i64, len: i64) -> ! {
     raise(

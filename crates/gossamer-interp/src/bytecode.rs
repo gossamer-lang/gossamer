@@ -1707,6 +1707,10 @@ pub(crate) struct CacheSlot {
     /// Stable identity for the receiver / callee the slot last
     /// resolved against. `0` means empty / non-cacheable.
     pub type_token: u64,
+    /// The receiver type whose identity `type_token` is, held so the tag
+    /// stays allocated while the slot names it: a token is the tag's
+    /// address, and a freed tag's address can be handed to another type.
+    pub _type_tag: Option<crate::value::TypeTag>,
     /// Exact named-callee spelling for [`Op::Call`]. Method-call slots leave
     /// this empty and key solely on the receiver type token. Keeping this
     /// value in the per-`Vm` cache makes dynamically-created callable names
@@ -2095,10 +2099,13 @@ pub(crate) struct ArithCacheSlot {
 /// offset directly; on miss, it refills the slot.
 #[derive(Debug, Default)]
 pub(crate) struct FieldCacheSlot {
-    /// Stable interned-name pointer of the receiver struct
-    /// (`intern_type_name(name).as_ptr() as u64`). `0` means
-    /// empty / non-cacheable receiver.
+    /// Identity of the receiver struct's type tag (its address, see
+    /// [`crate::value::TypeTag::id`]). `0` means empty / non-cacheable
+    /// receiver.
     pub(crate) type_token: std::cell::Cell<u64>,
+    /// The struct type whose identity `type_token` is, held for the reason
+    /// [`CacheSlot::_type_tag`] is.
+    pub(crate) type_tag: std::cell::RefCell<Option<crate::value::TypeTag>>,
     /// Offset of the named field within the struct's fields
     /// vector, valid only when `type_token != 0`.
     pub(crate) offset: std::cell::Cell<u16>,

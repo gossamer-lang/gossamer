@@ -5,15 +5,15 @@ use std::hash::crc32
 
 struct Packet { tag: u8, word: u16, id: u32 }
 
-fn make_id(seed: i64) -> u32 { (seed * 2654435761) as u32 }
+fn make_id(seed: i64) -> u32 { (seed * 2654435761) as% u32 }
 
 fn big_byte() -> u8 { 200 }
 
 fn main() {
     let neg: i64 = -1
-    let cast32 = neg as u32
-    let cast16 = neg as u16
-    let cast8 = neg as u8
+    let cast32 = neg as% u32
+    let cast16 = neg as% u16
+    let cast8 = neg as% u8
     println("cast {} {} {} | {} {} {}", cast32, cast16, cast8, cast32 >> 31, cast16 >> 15, cast8 >> 7)
     println("cmp {} {} {}", cast32 > 1, cast16 > 1, cast8 > 1)
 

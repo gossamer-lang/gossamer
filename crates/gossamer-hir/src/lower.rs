@@ -749,6 +749,7 @@ enum NominalInto {
 }
 
 mod for_loop;
+mod int_conversion;
 mod items;
 mod literals;
 pub use literals::is_map_literal_block;
@@ -1428,6 +1429,12 @@ impl Lowerer<'_> {
                 if let Some(desugared) = self.desugar_or_insert_value(expr) {
                     return desugared.kind;
                 }
+                if name.name == "try_into"
+                    && args.is_empty()
+                    && let Some(kind) = self.lower_int_try_into(receiver, expr)
+                {
+                    return kind;
+                }
                 if name.name == "expect"
                     && args.len() == 1
                     && let Some(kind) = self.desugar_expect(receiver, Some(&args[0]), expr)
@@ -1640,10 +1647,9 @@ impl Lowerer<'_> {
             }
             AstExprKind::Binary { op, lhs, rhs } => self.lower_binary(*op, lhs, rhs),
             AstExprKind::Assign { op, place, value } => self.lower_assign(*op, place, value, expr),
-            AstExprKind::Cast { value, ty: ast_ty } => HirExprKind::Cast {
-                value: Box::new(self.lower_expr(value)),
-                ty: self.ty_of(ast_ty.id),
-            },
+            AstExprKind::Cast {
+                value, ty: ast_ty, ..
+            } => self.lower_cast(expr, value, ast_ty.id),
             AstExprKind::If {
                 condition,
                 then_branch,

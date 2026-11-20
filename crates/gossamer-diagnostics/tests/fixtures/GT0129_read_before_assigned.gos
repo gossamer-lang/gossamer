@@ -1,0 +1,10 @@
+// ERROR: GT0129
+
+fn main() {
+    let n = 3
+    let mut x: i64
+    if n > 5 {
+        x = 10
+    }
+    println(f"{x}")
+}

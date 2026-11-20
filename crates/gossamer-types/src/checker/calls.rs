@@ -674,6 +674,16 @@ impl TypeChecker<'_> {
         {
             return Some(ret);
         }
+        // `Box::new(x)`, `Arc::new(x)`, and `Rc::new(x)` answer `x` itself:
+        // every value is already heap-shared and counted, so each tier
+        // lowers the wrapper to its argument, and its type is the argument's.
+        if matches!(module, ["Box" | "Arc" | "Rc"])
+            && last == "new"
+            && let [inner] = arg_tys
+            && !matches!(self.tcx.kind(resolved), Some(TyKind::FnDef { .. }))
+        {
+            return Some(*inner);
+        }
         if !matches!(self.tcx.kind(resolved), Some(TyKind::FnDef { .. }))
             && let Some(ret) =
                 self.check_qualified_bytes_handle_call(module, last, args, arg_tys, callee.span)

@@ -122,6 +122,7 @@ impl TypeChecker<'_> {
         self.check_deferred_type_mismatches();
         self.check_deferred_conversion_targets();
         self.check_deferred_into_conversions();
+        self.check_deferred_try_into_conversions();
         self.check_deferred_try_conversions();
         self.check_deferred_literal_type_mismatches();
         self.check_deferred_scalar_method_rejections();
@@ -954,6 +955,9 @@ struct TypeChecker<'a> {
     /// conversion exists can only be decided once unification has pinned
     /// it.
     deferred_into_conversions: Vec<(Ty, Ty, Span)>,
+    /// `.try_into()` call sites, recorded as (receiver, result, span) and
+    /// audited the way `.into()` is once the target is known.
+    deferred_try_into_conversions: Vec<(Ty, Ty, Span)>,
     /// `(operand error, enclosing error, span)` for each `?` on a `Result`,
     /// audited once unification has settled both types.
     deferred_try_conversions: Vec<(Ty, Ty, Span)>,
@@ -1403,6 +1407,7 @@ impl<'a> TypeChecker<'a> {
             catalog_params_as_params: false,
             deferred_type_mismatches: Vec::new(),
             deferred_into_conversions: Vec::new(),
+            deferred_try_into_conversions: Vec::new(),
             deferred_try_conversions: Vec::new(),
             deferred_literal_type_mismatches: Vec::new(),
             deferred_scalar_method_rejections: Vec::new(),

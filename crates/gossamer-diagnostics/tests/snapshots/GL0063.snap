@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GL0063]: A closure stored in a value it captures: `o.callback = Some(|| o.x)`, - here
+--- framed ---
+error[GL0063]: A closure stored in a value it captures: `o.callback = Some(|| o.x)`,
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

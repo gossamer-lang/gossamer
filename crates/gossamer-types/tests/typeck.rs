@@ -4442,6 +4442,7 @@ fn a_fixed_array_converts_into_a_vec_but_a_reference_to_one_does_not() {
                 from,
                 to,
                 borrowed_sequence: true,
+                fallible: false,
             } if from == "&[i64; 3]" && to == "Vec<i64>"
         )),
         "a reference to the array should be pointed at `to_vec()`: {d:?}"
@@ -5434,4 +5435,144 @@ fn a_closure_argument_of_another_modules_assoc_fn_takes_its_parameter_types() {
         "`theme.px(8)` is {:?}",
         checked.tcx.kind(ty)
     );
+}
+
+#[test]
+fn box_arc_and_rc_new_answer_their_argument_type() {
+    // Each tier lowers the wrapper call to its argument, so the checker
+    // types it as the argument: a mismatch is reported, and a field read
+    // through the result is typed.
+    let mismatch = diagnostics_for(
+        "fn main() {\n    let x: i64 = Box::new(\"s\")\n    let y: String = Rc::new(3)\n    let _ = x\n    let _ = y\n}\n",
+    );
+    let mismatches = mismatch
+        .iter()
+        .filter(|d| matches!(&d.error, TypeError::TypeMismatch { .. }))
+        .count();
+    assert_eq!(mismatches, 2, "expected two mismatches, got {mismatch:?}");
+    let clean = diagnostics_for(
+        "struct P {\n    x: i64\n}\nfn main() {\n    let p = Arc::new(P { x: 1 })\n    let f = || p.x + 1\n    let _ = f()\n}\n",
+    );
+    assert!(clean.is_empty(), "expected no diagnostics, got {clean:?}");
+}
+
+#[test]
+fn integer_try_into_is_built_in_and_answers_errors_error() {
+    let clean = diagnostics_for(
+        "use std::errors\nfn f(v: i64) -> Result<u8, errors::Error> {\n    v.try_into()\n}\nfn main() {\n    let _ = f(3)\n}\n",
+    );
+    assert!(clean.is_empty(), "expected no diagnostics, got {clean:?}");
+    let wrong_error = diagnostics_for(
+        "fn main() {\n    let v = 3\n    let a: Result<u8, String> = v.try_into()\n    let _ = a\n}\n",
+    );
+    assert!(
+        wrong_error
+            .iter()
+            .any(|d| matches!(&d.error, TypeError::TypeMismatch { .. })),
+        "the built-in conversion's error is errors::Error: {wrong_error:?}"
+    );
+}
+
+#[test]
+fn try_into_without_a_try_from_impl_is_reported() {
+    let d = diagnostics_for(
+        "use std::errors\nstruct X {\n    v: i64\n}\nfn main() {\n    let v = 3\n    let b: Result<X, errors::Error> = v.try_into()\n    let _ = b\n}\n",
+    );
+    assert!(
+        d.iter().any(|diag| matches!(
+            &diag.error,
+            TypeError::NoConversion { fallible: true, to, .. } if to == "X"
+        )),
+        "expected a missing TryFrom report: {d:?}"
+    );
+}
+
+/// The source lines of every `as` the lossy-cast lint reports in `source`.
+fn lossy_cast_lines(source: &str) -> Vec<usize> {
+    let mut map = SourceMap::new();
+    let file = map.add_file("test.gos", source.to_string());
+    let (mut sf, parse_diags) = parse_source_file(source, file);
+    assert!(parse_diags.is_empty(), "parse errors: {parse_diags:?}");
+    let (mut resolutions, _) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
+    let mut tcx = TyCtxt::new();
+    let (table, _) = typecheck_source_file(&sf, &resolutions, &mut tcx);
+    gossamer_types::find_lossy_casts(&sf, &table, &tcx)
+        .iter()
+        .map(|cast| source[..cast.span.start as usize].lines().count())
+        .collect()
+}
+
+#[test]
+fn lossy_cast_reports_only_casts_that_can_change_the_value() {
+    let source = "fn main() {
+    let v: i64 = 300
+    let small: u8 = 7
+    let f = 1e20
+    let c = 'x'
+    let n: u32 = 66
+    let _ = v as u8
+    let _ = v as u64
+    let _ = f as i64
+    let _ = c as u8
+    let _ = n as char
+    let _ = 300 as u8
+    let _ = -1 as u8
+    let _ = f.trunc() as i64
+    let _ = small as i64
+    let _ = 200 as u8
+    let _ = (v & 0xFF) as u8
+    let _ = v.clamp(0, 255) as u8
+    let _ = (v % 100) as i8
+    let _ = f.round().clamp(0.0, 255.0) as u8
+    let _ = 2.0 as i64
+    let _ = c as u32
+    let _ = small as char
+    let _ = true as i64
+    let _ = (n >> 24) as u8
+}
+";
+    assert_eq!(lossy_cast_lines(source), (7..=14).collect::<Vec<_>>());
+}
+
+#[test]
+fn closure_self_cycle_reports_only_a_closure_stored_in_what_it_captures() {
+    let source = r"struct Obj {
+    payload: [u8; 4]
+    k: i64
+    items: Vec<i64>
+    callback: Option<Fn() -> i64>
+}
+
+fn main() {
+    let mut o = Obj { payload: [0u8; 4], k: 1, items: #[1, 2], callback: None }
+    o.callback = Some(|| o.payload.len())
+    let f = || o.k
+    o.callback = Some(f)
+    let mut handlers: Vec<Fn() -> i64> = #[]
+    handlers.push(|| handlers.len())
+    o.k = o.items.map(|x| x + o.k).sum()
+    o.k = (|| o.k + 1)()
+    o.callback = Some([weak o] || match o {
+        Some(o) => o.k,
+        None => 0,
+    })
+    let other = Obj { payload: [0u8; 4], k: 2, items: #[], callback: None }
+    o.callback = Some(|| other.k)
+    println(o.k)
+}
+";
+    let mut map = SourceMap::new();
+    let file = map.add_file("test.gos", source.to_string());
+    let (mut sf, parse_diags) = parse_source_file(source, file);
+    assert!(parse_diags.is_empty(), "parse errors: {parse_diags:?}");
+    let (mut resolutions, _) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
+    let mut tcx = TyCtxt::new();
+    let (table, _) = typecheck_source_file(&sf, &resolutions, &mut tcx);
+    let lines: Vec<usize> = gossamer_types::find_closure_self_cycles(&sf, &resolutions, &table)
+        .iter()
+        .map(|cycle| source[..cycle.span.start as usize].lines().count())
+        .collect();
+    assert_eq!(lines, vec![10, 12, 14]);
 }

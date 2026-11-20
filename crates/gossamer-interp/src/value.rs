@@ -111,10 +111,38 @@ pub fn vec_with_capacity<T>(capacity: i64) -> RuntimeResult<Vec<T>> {
     else {
         return Err(RuntimeError::Panic("capacity overflow".to_string()));
     };
+    reserved(capacity, bytes)
+}
+
+/// Empty `Vec` with room for `capacity` elements taking `bytes`, or the
+/// out-of-memory panic every tier raises when the system cannot back them.
+fn reserved<T>(capacity: usize, bytes: usize) -> RuntimeResult<Vec<T>> {
+    let out_of_memory = || {
+        RuntimeError::Panic(gossamer_runtime::memory_limit::out_of_memory_message(
+            bytes as u128,
+        ))
+    };
+    if gossamer_runtime::memory_limit::exceeds_commit_limit(bytes as u128) {
+        return Err(out_of_memory());
+    }
     let mut storage = Vec::new();
     storage
         .try_reserve_exact(capacity)
-        .map_err(|_| RuntimeError::Panic(format!("memory allocation of {bytes} bytes failed")))?;
+        .map_err(|_| out_of_memory())?;
+    Ok(storage)
+}
+
+/// `count` elements, each made by `fill`, the storage `#[value; count]`
+/// builds, with the same out-of-memory panic as [`vec_with_capacity`].
+pub fn filled_vec<T>(count: usize, mut fill: impl FnMut() -> T) -> RuntimeResult<Vec<T>> {
+    let Some(bytes) = count
+        .checked_mul(std::mem::size_of::<T>())
+        .filter(|bytes| isize::try_from(*bytes).is_ok())
+    else {
+        return Err(RuntimeError::Panic("capacity overflow".to_string()));
+    };
+    let mut storage = reserved(count, bytes)?;
+    storage.extend(std::iter::repeat_with(&mut fill).take(count));
     Ok(storage)
 }
 
@@ -131,7 +159,7 @@ pub fn copy_with_capacity<T: Clone>(items: &Vec<T>) -> Vec<T> {
 #[derive(Debug)]
 pub struct PackedBytes {
     ptr: NonNull<u8>,
-    len: u32,
+    len: usize,
 }
 
 unsafe impl Send for PackedBytes {}
@@ -140,7 +168,7 @@ unsafe impl Sync for PackedBytes {}
 impl From<Vec<u8>> for PackedBytes {
     fn from(values: Vec<u8>) -> Self {
         let boxed = values.into_boxed_slice();
-        let len = u32::try_from(boxed.len()).expect("packed byte array exceeds u32 length");
+        let len = boxed.len();
         let ptr = if boxed.is_empty() {
             NonNull::dangling()
         } else {
@@ -161,19 +189,19 @@ impl Deref for PackedBytes {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len as usize) }
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 }
 
 impl DerefMut for PackedBytes {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len as usize) }
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
 }
 
 impl Drop for PackedBytes {
     fn drop(&mut self) {
-        let raw = std::ptr::slice_from_raw_parts_mut(self.ptr.as_ptr(), self.len as usize);
+        let raw = std::ptr::slice_from_raw_parts_mut(self.ptr.as_ptr(), self.len);
         drop(unsafe { Box::from_raw(raw) });
     }
 }

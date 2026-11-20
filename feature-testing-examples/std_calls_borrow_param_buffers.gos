@@ -9,7 +9,7 @@ fn word_at(buf: Vec<u8>, p: i64) -> i64 {
 }
 
 fn wide_at(buf: Vec<u8>, p: i64) -> i64 {
-    binary::get_u64_be_at(buf, p).unwrap_or(0u64) as i64
+    binary::get_u64_be_at(buf, p).unwrap_or(0u64) as% i64
 }
 
 fn window_crc(buf: Vec<u8>, p: i64) -> i64 {

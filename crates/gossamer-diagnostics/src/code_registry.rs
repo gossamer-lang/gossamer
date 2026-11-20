@@ -328,6 +328,28 @@ pub const REGISTRY: &[(&str, &str)] = &[
             derive.",
     ),
     (
+        "GL0062",
+        "An `as` conversion that can change the value: a narrowing integer\n\
+            cast (`v as u8` with `v: i64`), a signed and unsigned swap, a float\n\
+            to an integer, or between `char` and a type too narrow for it. `as`\n\
+            keeps an integer's low bits and saturates a float, silently. Say\n\
+            which you mean: `v.try_into()` answers `Err` when the value does not\n\
+            fit, `(v & 0xFF) as u8` keeps the low bits, `v.clamp(0, 255) as u8`\n\
+            saturates, and `x.round().clamp(0.0, 255.0) as u8` rounds and\n\
+            saturates a float. A cast the compiler can see fits (a literal in\n\
+            range, a widening cast, a mask, a clamp to the target's range) is\n\
+            not reported.",
+    ),
+    (
+        "GL0063",
+        "A closure stored in a value it captures: `o.callback = Some(|| o.x)`,\n\
+            or `handlers.push(|| handlers.len())`. The value holds the closure\n\
+            and the closure holds the value, so neither is ever released, and\n\
+            the runtime does not collect the cycle. Capture a weak reference\n\
+            instead: in `[weak o] || ..` the name `o` is, inside the body, an\n\
+            `Option` that is `None` once the value is gone.",
+    ),
+    (
         "GM0001",
         "Generic monomorphization received a type substitution that the\n\
                      compiler does not yet support - typically a generic parameter\n\
@@ -1937,6 +1959,18 @@ pub const REGISTRY: &[(&str, &str)] = &[
             each type argument has to be known. Name it with `id::<i64>`, give\n\
             the binding a function type (`let f: fn(i64) -> i64 = id`), or use\n\
             the value where its type is fixed.",
+    ),
+    (
+        "GT0129",
+        "A binding declared without a value (`let mut x: i64`) is read on a\n\
+            path that has not assigned it. The value a `let` leaves out is\n\
+            supplied by an assignment after it, so every path that reaches a\n\
+            read has to assign the binding first: `if n > 5 { x = 10 }`\n\
+            followed by a read of `x` reaches the read with no value when `n\n\
+            <= 5`. Give the binding a value where it is declared, assign it in\n\
+            every branch (an `else` included), or move the read inside the\n\
+            branch that assigns it. A closure or a `defer` reads its bindings\n\
+            where it is written, so they have to be assigned before it.",
     ),
     (
         "GX0001",

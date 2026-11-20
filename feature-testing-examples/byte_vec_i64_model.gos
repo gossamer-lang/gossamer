@@ -34,9 +34,9 @@ fn main() -> Result<(), errors::Error> {
 
     // Narrow casts are the single masking point.
     let x = 300
-    println("300 as u8 = {}", x as u8)
+    println("300 as u8 = {}", x as% u8)
     let y = 200
-    println("200 as i8 = {}", y as i8)
+    println("200 as i8 = {}", y as% i8)
     let z: u8 = 200
     println("u8 200+200 = {}", z + z)
 

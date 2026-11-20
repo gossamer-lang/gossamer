@@ -33,7 +33,7 @@ fn nested() -> ((i8, u8), (i32, u32)) {
 }
 
 fn render(round: i64) -> String {
-    let wide = (round as u8, (round * 1000) as i16, round as u32)
+    let wide = (round as% u8, (round * 1000) as% i16, round as u32)
     format("{:?} {:?} {:?} {}", pair(), rows(), wide, 7 as u8)
 }
 

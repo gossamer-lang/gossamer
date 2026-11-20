@@ -94,7 +94,10 @@ about values.
   writes reach them, whatever the type (`xs.for_each(|x| count += x)`). No
   `move`. A spawned closure is the exception: it takes a snapshot of each
   capture at the spawn, and writing one inside it is GT0114 - answer the
-  value through `join()`, a channel, or a `sync::Shared`.
+  value through `join()`, a channel, or a `sync::Shared`. A closure stored
+  in the value it captures (`o.callback = Some(|| o.x)`) is a cycle never
+  freed (GL0063): capture it weakly, `[weak o] || ..`, where `o` in the body
+  is an `Option` (`None` once the value is gone).
 
 ```gossamer
 fn tally(mut xs: Vec<i64>) -> i64 { xs.push(1); xs.len() }
@@ -116,6 +119,7 @@ extend(&mut items)     // items is now #[1, 2, 1]
 | `impl Display` to print | `{}` renders every type; `impl Display` only overrides |
 | `let (a, b) = pair` | `let a, b = pair` |
 | `x.wrapping_add(y)` | `x +% y` |
+| `x as u8` to truncate | `x as% u8` (`as` panics when it does not fit) |
 | `Rc<RefCell<_>>`, `move`, lifetimes | none: capture is automatic, RC is the memory model |
 
 ## 5. Writing it
@@ -146,6 +150,8 @@ extend(&mut items)     // items is now #[1, 2, 1]
 **Bindings and control flow**
 - `let` by default, `let mut` near its one update site; `x += 1`, never
   `x = x + 1`. `if`, `match`, and `loop { break v }` are expressions.
+  `let mut x: T` with no value must be assigned on every path before a
+  read (GT0129).
 - Destructure with plain lists: `let a, b = pair`, `let tx, rx = channel()`,
   `a, b = b, a` swaps. Parentheses only group nested patterns:
   `for (k, v) in m`, `let a, (b, c) = 1, (2, 3)`.
@@ -209,8 +215,12 @@ extend(&mut items)     // items is now #[1, 2, 1]
 **Numbers**
 - Bare literals (`0`, `1.5`); suffix only without context. An integer
   literal never takes a float type: `#[1, 2.5]` is GT0001, so write `1.0`. `arr[i]` takes an
-  `i64` - no `as usize`. Casts are checked: numeric to numeric, `bool`/`char`
-  to int; narrowing masks (`300 as u8 == 44`), float to int saturates.
+  `i64` - no `as usize`. `as` casts numeric to numeric and `bool`/`char`
+  to int, and panics when the value does not fit, as `+` does on overflow:
+  `300 as u8` and `1e20 as i64` panic (`cast overflow`). Say what a value
+  that may not fit becomes: `v as% u8` keeps the low bits (and saturates a
+  float), `v.clamp(0, 255) as u8` saturates, `v.try_into()` answers a
+  `Result` between integer types. GL0062 marks each `as` that can panic.
 - `+ - *` panic on overflow on every tier and profile; `+%` `-%` `*%` (and
   `+%=`...) wrap at the declared width, and are the only way to wrap. Divide
   by zero panics, and so does a shift amount outside `0..BITS`; `<<%` /
@@ -266,7 +276,8 @@ extend(&mut items)     // items is now #[1, 2, 1]
   and `xs[1..4].sort()` sorts that part in place; a bare `xs[lo..hi]` is a
   copy. Only `Vec` resizes; `insert` / `remove` answer a `Result`.
 - `for x in xs` over any collection - no `.iter()`, no `*x`. A `Result` or
-  `Option` is not iterable: take the value first.
+  `Option` is not iterable: take the value first. The loop walks `xs` as it
+  was when the loop began; changing `xs` in the body changes it afterwards.
 - Eager and lazy: `xs.map(f)` / `filter` on a sequence answers a `Vec`;
   `xs.iter()` answers a lazy `Iterator`, and ranges are iterators already:
   `(1..5).map(|i| i * i).sum()`. Adapters (`map filter take skip step_by

@@ -406,6 +406,7 @@ pub mod file_read;
 pub mod fs_mode;
 pub mod http_status;
 pub mod listen;
+pub mod memory_limit;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod netpoll;
 pub mod path_grammar;

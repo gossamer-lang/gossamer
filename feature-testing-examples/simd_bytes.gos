@@ -101,8 +101,8 @@ fn base64_decode(text: String) -> Option<Vec<u8>> {
         while g + 4 <= take {
             let word = (v[g] as u64) << 18 | (v[g + 1] as u64) << 12 | (v[g + 2] as u64) << 6 | (v[g + 3] as u64)
             out.push((word >> 16) as u8)
-            out.push((word >> 8) as u8)
-            out.push(word as u8)
+            out.push((word >> 8) as% u8)
+            out.push(word as% u8)
             g += 4
         }
         if g < take {
@@ -114,7 +114,7 @@ fn base64_decode(text: String) -> Option<Vec<u8>> {
             }
             out.push((word >> 16) as u8)
             if k == 3 {
-                out.push((word >> 8) as u8)
+                out.push((word >> 8) as% u8)
             }
         }
         i += 16

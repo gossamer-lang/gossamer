@@ -75,9 +75,13 @@ impl Printer {
                 self.write(" ");
                 self.print_expr_prec(value, PREC_ASSIGN);
             }
-            ExprKind::Cast { value, ty } => {
+            ExprKind::Cast {
+                value,
+                ty,
+                wrapping,
+            } => {
                 self.print_expr_prec(value, PREC_CAST);
-                self.write(" as ");
+                self.write(if *wrapping { " as% " } else { " as " });
                 self.print_type(ty);
             }
             ExprKind::Try(inner) => {

@@ -1,0 +1,12 @@
+// ERROR: GL0063
+
+struct Obj {
+    payload: [u8; 4]
+    callback: Option<Fn() -> i64>
+}
+
+fn main() {
+    let mut o = Obj { payload: [0u8; 4], callback: None }
+    o.callback = Some(|| o.payload.len())
+    println(o.payload.len())
+}

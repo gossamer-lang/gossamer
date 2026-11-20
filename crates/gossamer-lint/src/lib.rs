@@ -182,7 +182,15 @@ pub const DAY_ONE_LINTS: &[&str] = &[
     "non_camel_case_types",
     "non_snake_case",
     "non_upper_case_globals",
+    // Type-aware: reported from the checked program through [`leveled`].
+    "lossy_cast",
+    "closure_self_cycle",
 ];
+
+/// Lints whose findings need the checked program's types. The syntax-only
+/// pass [`run`] reports none of them; a caller holding the types computes
+/// the findings and hands them to [`leveled`].
+pub const TYPED_LINTS: &[&str] = &["lossy_cast", "closure_self_cycle"];
 
 /// Runs every enabled lint over `source_file` (parsed from `src`) and
 /// returns their diagnostics in deterministic order (lint code asc,
@@ -197,29 +205,8 @@ pub fn run(source_file: &SourceFile, src: &str, registry: &Registry) -> Vec<Diag
         if level.severity().is_none() && !scopes.iter().any(|s| s.levels.contains_key(id)) {
             continue;
         }
-        let mut findings = lints::run_lint(id, source_file, src);
-        // A let-chain clones its written `else` onto every clause's failure
-        // edge, so one spelled construct can surface once per clone.
-        findings.sort_by(|a, b| (a.0.start, a.0.end, &a.1).cmp(&(b.0.start, b.0.end, &b.1)));
-        findings.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
-        for (span, title, help) in findings {
-            let Some(severity) = scoped_level(&scopes, id, span).unwrap_or(level).severity() else {
-                continue;
-            };
-            let location = Location::new(span.file, span);
-            let code = lint_code(id);
-            let mut diag = match severity {
-                Severity::Error => Diagnostic::error(code, title.clone()),
-                Severity::Warning => Diagnostic::warning(code, title.clone()),
-                Severity::Note | Severity::Help => Diagnostic::note(code, title.clone()),
-            };
-            diag = diag.with_primary(location, title);
-            if let Some(help) = help {
-                diag = diag.with_help(help);
-            }
-            diag = diag.with_note(format!("lint: {id}"));
-            out.push(diag);
-        }
+        let findings = lints::run_lint(id, source_file, src);
+        out.extend(render_findings(id, level, &scopes, findings));
     }
     out.sort_by(|a, b| {
         let a_span = a.labels.first().map_or(0, |l| l.location.span.start);
@@ -229,6 +216,52 @@ pub fn run(source_file: &SourceFile, src: &str, registry: &Registry) -> Vec<Diag
             .cmp(b.code.as_str())
             .then(a_span.cmp(&b_span))
     });
+    out
+}
+
+/// Renders the findings a type-aware pass made for the lint `id` over
+/// `source_file`, at the level `registry` and the file's `#[lint(..)]`
+/// attributes give each one. A finding the levels allow is dropped.
+#[must_use]
+pub fn leveled(
+    id: &'static str,
+    source_file: &SourceFile,
+    registry: &Registry,
+    findings: Vec<(Span, String, Option<String>)>,
+) -> Vec<Diagnostic> {
+    let scopes = collect_lint_scopes(source_file);
+    render_findings(id, registry.level(id), &scopes, findings)
+}
+
+fn render_findings(
+    id: &'static str,
+    level: Level,
+    scopes: &[LintScope],
+    mut findings: Vec<(Span, String, Option<String>)>,
+) -> Vec<Diagnostic> {
+    // A let-chain clones its written `else` onto every clause's failure
+    // edge, so one spelled construct can surface once per clone.
+    findings.sort_by(|a, b| (a.0.start, a.0.end, &a.1).cmp(&(b.0.start, b.0.end, &b.1)));
+    findings.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+    let mut out = Vec::new();
+    for (span, title, help) in findings {
+        let Some(severity) = scoped_level(scopes, id, span).unwrap_or(level).severity() else {
+            continue;
+        };
+        let location = Location::new(span.file, span);
+        let code = lint_code(id);
+        let mut diag = match severity {
+            Severity::Error => Diagnostic::error(code, title.clone()),
+            Severity::Warning => Diagnostic::warning(code, title.clone()),
+            Severity::Note | Severity::Help => Diagnostic::note(code, title.clone()),
+        };
+        diag = diag.with_primary(location, title);
+        if let Some(help) = help {
+            diag = diag.with_help(help);
+        }
+        diag = diag.with_note(format!("lint: {id}"));
+        out.push(diag);
+    }
     out
 }
 
@@ -377,6 +410,8 @@ pub fn lint_code(id: &str) -> Code {
         "no_effect_statement" => Code("GL0056"),
         "restated_field_default" => Code("GL0060"),
         "redundant_default_derive" => Code("GL0061"),
+        "lossy_cast" => Code("GL0062"),
+        "closure_self_cycle" => Code("GL0063"),
         "non_camel_case_types" => Code("GL0057"),
         "non_snake_case" => Code("GL0058"),
         "non_upper_case_globals" => Code("GL0059"),

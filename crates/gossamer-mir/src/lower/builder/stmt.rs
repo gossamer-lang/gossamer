@@ -603,6 +603,15 @@ impl<'a> Builder<'a> {
     }
 
     pub(crate) fn lower_stmt(&mut self, stmt: &HirStmt) {
+        // A statement whose value is built without passing through
+        // `lower_expr` still names its own position, so a call it ends a
+        // block with reports the statement's line rather than the scope's.
+        let outer = std::mem::replace(&mut self.expr_span, stmt.span);
+        self.lower_stmt_kind(stmt);
+        self.expr_span = outer;
+    }
+
+    fn lower_stmt_kind(&mut self, stmt: &HirStmt) {
         match &stmt.kind {
             HirStmtKind::Let { pattern, ty, init } => {
                 let local = self.push_local(*ty, param_name(pattern), param_mutable(pattern));

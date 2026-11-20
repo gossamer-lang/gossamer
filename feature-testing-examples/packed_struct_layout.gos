@@ -78,7 +78,7 @@ fn bump(v: &mut Mixed) {
 }
 
 fn reframe(f: &mut Framed) {
-    f.pixel.g = f.depth as u8
+    f.pixel.g = f.depth as% u8
     f.depth = 65_535
     f.tag = f.tag +% 1
 }

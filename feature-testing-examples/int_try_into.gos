@@ -1,0 +1,31 @@
+// `v.try_into()` between two integer types answers `Ok(v as T)` when `v`
+// fits `T` and an `errors::Error` naming `T` when it does not, on every
+// tier, at both ends of each range.
+
+use std::errors
+
+fn narrow(v: i64) -> String {
+    let r: Result<u8, errors::Error> = v.try_into()
+    match r {
+        Ok(b) => f"ok {b}"
+        Err(e) => f"err {e}"
+    }
+}
+
+fn to_i8(v: i64) -> Result<i8, errors::Error> {
+    v.try_into()
+}
+
+fn main() {
+    for v in #[0, 255, 256, -1, 7] {
+        println(narrow(v))
+    }
+    println(f"{to_i8(-128)} {to_i8(-129)} {to_i8(127)} {to_i8(128)}")
+    let big: u64 = 18_446_744_073_709_551_615
+    let as_i64: Result<i64, errors::Error> = big.try_into()
+    let small: u8 = 200
+    let widened: Result<i64, errors::Error> = small.try_into()
+    let neg: i32 = -5
+    let unsigned: Result<u64, errors::Error> = neg.try_into()
+    println(f"{as_i64.is_err()} {widened} {unsigned.is_err()}")
+}

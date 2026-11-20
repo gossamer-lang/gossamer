@@ -17,7 +17,7 @@ fn main() {
     let neg = -1
     println("{}", min / neg == i64::MIN)
     // A float too large for the target saturates at its limit.
-    println("{}", 1e20 as i64 == i64::MAX)
+    println("{}", 1e20 as% i64 == i64::MAX)
     let byte: u8 = u8::MAX
     println("{} {}", byte, byte as i64 + 1)
     let wide: u64 = u64::MAX

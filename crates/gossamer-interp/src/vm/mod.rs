@@ -1622,6 +1622,17 @@ pub(crate) fn type_token(v: &Value) -> u64 {
     }
 }
 
+/// The type tag a receiver's [`type_token`] is the address of, for a cache
+/// slot to hold while it compares against that token.
+pub(crate) fn type_tag_of(v: &Value) -> Option<crate::value::TypeTag> {
+    match v {
+        Value::Struct(inner) => Some(inner.name.clone()),
+        Value::Variant(inner) => Some(inner.name.clone()),
+        Value::MutCell(cell) => type_tag_of(&cell.lock()),
+        _ => None,
+    }
+}
+
 /// Builds a fresh inline-cache slot from a resolved [`Global`].
 /// Pulls out the raw builtin fn pointer when the global is a
 /// `Value::Builtin` so the steady-state dispatch is a direct
@@ -1631,6 +1642,7 @@ pub(crate) fn type_token(v: &Value) -> u64 {
 /// alongside the type-version guard).
 fn fill_cache_slot(
     token: u64,
+    type_tag: Option<crate::value::TypeTag>,
     generation: u32,
     callee_name: Option<SmolStr>,
     g: &Global,
@@ -1649,6 +1661,7 @@ fn fill_cache_slot(
     };
     crate::bytecode::CacheSlot {
         type_token: token,
+        _type_tag: type_tag,
         callee_name,
         generation,
         builtin_fn,
@@ -2769,5 +2782,32 @@ fn variant_owner(variant: &str) -> Option<&'static str> {
         "Some" | "None" => Some("Option"),
         "Ok" | "Err" => Some("Result"),
         _ => crate::builtins::variant_owner_of(variant),
+    }
+}
+
+#[cfg(test)]
+mod cache_slot_tests {
+    use super::{Global, fill_cache_slot};
+    use crate::value::Value;
+    use crate::value::intern_type_tag;
+
+    #[test]
+    fn a_filled_slot_keeps_its_receiver_type_identity() {
+        // The slot compares a receiver against its tag's address, so the tag
+        // must outlive every value of the type while the slot names it: a
+        // freed tag's address can be handed to another type's tag.
+        let tag = intern_type_tag("CacheSlotProbeType");
+        let token = tag.id();
+        let slot = fill_cache_slot(
+            token,
+            Some(tag.clone()),
+            1,
+            None,
+            &Global::Value(Value::Int(0)),
+        );
+        assert_eq!(tag.strong_count(), 2, "the slot holds a share of the tag");
+        drop(tag);
+        assert_eq!(intern_type_tag("CacheSlotProbeType").id(), token);
+        drop(slot);
     }
 }

@@ -117,6 +117,11 @@ pub fn check_resolved_unit(
         for diag in crate::check_capture_writes(sf, resolutions, &table, tcx) {
             fatal.push(diag.to_diagnostic());
         }
+        // A binding declared without a value has none to read until a path
+        // assigns it, so a read some path reaches first is refused.
+        for diag in crate::check_definite_assignment(sf, resolutions, &table, tcx) {
+            fatal.push(diag.to_diagnostic());
+        }
         // A parallel adapter's callback runs on many workers at once, so one
         // whose purity cannot be shown is refused on every tier.
         if !earlier_fatal && fatal.is_empty() {
@@ -125,6 +130,9 @@ pub fn check_resolved_unit(
             }
         }
     }
+    if !parse_failed {
+        advisory.extend(typed_lints(sf, resolutions, &table, tcx));
+    }
     observer.phase_done(CheckPhase::Analysis);
 
     UnitChecks {
@@ -132,6 +140,80 @@ pub fn check_resolved_unit(
         fatal,
         advisory,
     }
+}
+
+/// The findings of the lints that read the checked program's types, at the
+/// levels the default registry and the unit's `#[lint(..)]` attributes give
+/// them. They are advisory wherever they are reported from a check:
+/// `gos lint --deny-warnings` is the gate that makes them errors.
+#[must_use]
+pub fn typed_lints(
+    sf: &SourceFile,
+    resolutions: &Resolutions,
+    table: &TypeTable,
+    tcx: &TyCtxt,
+) -> Vec<Diagnostic> {
+    let mut registry = gossamer_lint::Registry::with_defaults();
+    gossamer_lint::apply_attributes(&sf.attrs, &mut registry);
+    let casts = crate::find_lossy_casts(sf, table, tcx)
+        .into_iter()
+        .map(|cast| (cast.span, cast.title, Some(cast.help)))
+        .collect();
+    let mut out = gossamer_lint::leveled(crate::LOSSY_CAST_LINT, sf, &registry, casts);
+    let cycles = crate::find_closure_self_cycles(sf, resolutions, table)
+        .into_iter()
+        .map(|cycle| {
+            let name = cycle.name;
+            (
+                cycle.span,
+                format!(
+                    "this closure is stored in `{name}`, which it captures: the two hold each other, and the cycle is never freed"
+                ),
+                Some(format!(
+                    "capture a weak reference: `[weak {name}] || ..`, where `{name}` in the body is an `Option` that is `None` once the value is gone"
+                )),
+            )
+        })
+        .collect();
+    out.extend(gossamer_lint::leveled(
+        crate::CLOSURE_SELF_CYCLE_LINT,
+        sf,
+        &registry,
+        cycles,
+    ));
+    // Code the toolchain appended, and a dependency's own code, are not the
+    // program's to change.
+    let dependencies = dependency_spans(&sf.items);
+    out.retain(|diag| {
+        diag.labels.first().is_none_or(|label| {
+            let span = label.location.span;
+            sf.is_program_text(span)
+                && !dependencies.iter().any(|dep| {
+                    dep.file == span.file && dep.start <= span.start && span.end <= dep.end
+                })
+        })
+    });
+    for diag in &mut out {
+        diag.severity = gossamer_diagnostics::Severity::Warning;
+    }
+    out
+}
+
+/// The spans of the modules the bundler wrapped a dependency's sources in
+/// (`#[dependency("id")] mod name { .. }`).
+fn dependency_spans(items: &[gossamer_ast::Item]) -> Vec<gossamer_lex::Span> {
+    items
+        .iter()
+        .filter(|item| {
+            matches!(item.kind, ItemKind::Mod(_))
+                && item
+                    .attrs
+                    .outer
+                    .iter()
+                    .any(|attr| attr.is_named("dependency"))
+        })
+        .map(|item| item.span)
+        .collect()
 }
 
 /// Every top-level item name `sf` declares: the candidates a resolve

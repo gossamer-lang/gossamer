@@ -76,8 +76,8 @@ fn main() {
     println("cast_f32: {}", single as i64)
     println("cast_bool: {}", true as i64)
     println("cast_char: {}", 'A' as u8)
-    println("cast_mask: {}", 300 as u8)
+    println("cast_mask: {}", 300 as% u8)
     let nan = 0.0 / 0.0
-    println("cast_nan: {}", nan as i64)
-    println("cast_u64: {}", (0 - 1) as u64)
+    println("cast_nan: {}", nan as% i64)
+    println("cast_u64: {}", (0 - 1) as% u64)
 }

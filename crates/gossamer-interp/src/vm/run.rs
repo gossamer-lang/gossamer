@@ -999,6 +999,7 @@ impl Vm {
                                             let mut cache = state.call_caches.borrow_mut();
                                             cache[cache_idx as usize] = fill_cache_slot(
                                                 token,
+                                                None,
                                                 live_generation,
                                                 Some(SmolStr::from(name)),
                                                 global,
@@ -1162,6 +1163,7 @@ impl Vm {
                                         let mut cache = state.call_caches.borrow_mut();
                                         cache[cache_idx as usize] = fill_cache_slot(
                                             token,
+                                            None,
                                             live_generation,
                                             callee_name.map(SmolStr::from),
                                             g,
@@ -1336,6 +1338,7 @@ impl Vm {
                                                 let mut cache = state.call_caches.borrow_mut();
                                                 cache[cache_idx as usize] = fill_cache_slot(
                                                     recv_token,
+                                                    type_tag_of(&buf[0]),
                                                     live_generation,
                                                     method_name.clone(),
                                                     g,
@@ -1396,6 +1399,7 @@ impl Vm {
                                                 let mut cache = state.call_caches.borrow_mut();
                                                 cache[cache_idx as usize] = fill_cache_slot(
                                                     recv_token,
+                                                    type_tag_of(&call_args[0]),
                                                     live_generation,
                                                     method_name.clone(),
                                                     g,
@@ -2209,7 +2213,7 @@ impl Vm {
                                 // skipping the linear name-scan in `field_get`.
                                 let recv = &registers[receiver as usize];
                                 if let Value::Struct(inner) = recv {
-                                    // `inner.name` is a globally-interned `&'static str`
+                                    // `inner.name` is the type's tag, kept allocated by the slot
                                     // (canonical, pointer-stable across every clone of
                                     // any instance of this type), so its address is a
                                     // ready-made guard token - no second hash needed.
@@ -2236,6 +2240,7 @@ impl Vm {
                                     };
                                     if let Some(pos) = inner.fields.position(field_name) {
                                         slot.type_token.set(token);
+                                        *slot.type_tag.borrow_mut() = Some(inner.name.clone());
                                         slot.offset.set(pos as u16);
                                         let value = inner.fields[pos].clone();
                                         registers[dst as usize] = value;
@@ -4165,9 +4170,10 @@ impl Vm {
                                     }
                                 };
                                 let value = ints[value_i as usize] as u8;
-                                registers[dst_v as usize] = Value::ByteArray(Arc::new(
-                                    crate::value::PackedBytes::from(vec![value; count]),
-                                ));
+                                registers[dst_v as usize] =
+                                    Value::ByteArray(Arc::new(crate::value::PackedBytes::from(
+                                        crate::value::filled_vec(count, || value)?,
+                                    )));
                             }
                             Op::BuildVecWithCapacity {
                                 dst_v,
@@ -4337,16 +4343,30 @@ impl Vm {
                                 // `FloatVec` identically to a boxed array of the same
                                 // scalars, so this is a pure representation change.
                                 registers[dst as usize] = match &registers[value as usize] {
-                                    Value::Int(elem) => Value::IntArray(Arc::new(vec![*elem; n])),
-                                    Value::Float(elem) => Value::FloatVec(Arc::new(vec![*elem; n])),
+                                    Value::Int(elem) => {
+                                        let elem = *elem;
+                                        Value::IntArray(Arc::new(crate::value::filled_vec(
+                                            n,
+                                            || elem,
+                                        )?))
+                                    }
+                                    Value::Float(elem) => {
+                                        let elem = *elem;
+                                        Value::FloatVec(Arc::new(crate::value::filled_vec(
+                                            n,
+                                            || elem,
+                                        )?))
+                                    }
                                     // `vec![elem.clone(); n]` calls `Clone::clone` on one
                                     // shared value, which for a `Map`/`Set` element is an
                                     // `Arc`/handle-id copy - every repeated slot would
                                     // alias the same backing table. Deep-clone each slot
                                     // independently instead, same as `Op::CloneMapLike`.
-                                    elem => Value::Array(Arc::new(
-                                        (0..n).map(|_| map_like_deep_clone(elem)).collect(),
-                                    )),
+                                    elem => {
+                                        Value::Array(Arc::new(crate::value::filled_vec(n, || {
+                                            map_like_deep_clone(elem)
+                                        })?))
+                                    }
                                 };
                             }
                             Op::BuildRange {

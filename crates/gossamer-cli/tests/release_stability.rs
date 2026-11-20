@@ -977,7 +977,7 @@ fn main() {
 fn release_u64_values_print_like_the_vm() {
     // A `u64` / `usize` value renders unsigned by its declared type: a
     // binding typed `u64` at 2^64-1 prints `18446744073709551615`, the same
-    // as a value produced by an explicit `as u64` cast, on both the VM and
+    // as a value produced by an explicit `as% u64` cast, on both the VM and
     // the released binary. (Previously a declared-but-uncast `u64` aliased
     // the signed-i64 `-1` and the tiers disagreed on the comparison form.)
     assert_release_stdout_eq(
@@ -986,7 +986,7 @@ fn release_u64_values_print_like_the_vm() {
 fn main() {
     let n: u64 = 18446744073709551615u64
     println("{}", n)
-    let c = (0 - 1) as u64
+    let c = (0 - 1) as% u64
     println("{}", c)
 }
 "#,
@@ -1152,29 +1152,29 @@ fn main() -> Result<(), errors::Error> {
 }
 
 #[test]
-fn release_narrow_casts_mask_and_float_casts_saturate() {
-    // `as` is the single masking point for narrow int types
-    // (`300 as u8` == 44, `200 as i8` == -56); wrapping arithmetic
+fn release_wrapping_casts_mask_and_float_casts_saturate() {
+    // `as%` is the masking cast for narrow int types
+    // (`300 as% u8` == 44, `200 as% i8` == -56); wrapping arithmetic
     // wraps at the declared width (`200u8 +% 200u8` == 144); and
-    // float -> int saturates at the TARGET's own range
-    // (`300.7 as u8` == 255, `-1.5 as u8` == 0, `1e20 as i64` ==
+    // `as%` from a float saturates at the TARGET's own range
+    // (`300.7 as% u8` == 255, `-1.5 as% u8` == 0, `1e20 as% i64` ==
     // i64::MAX). All match the bytecode VM.
     assert_release_stdout_eq(
         "narrow_casts",
         r#"
 fn main() {
     let x = 300
-    println("{}", x as u8)
+    println("{}", x as% u8)
     let y = 200
-    println("{}", y as i8)
+    println("{}", y as% i8)
     let z: u8 = 200
     println("{}", z +% z)
     let f = 300.7
-    println("{}", f as u8)
+    println("{}", f as% u8)
     let g = -1.5
-    println("{}", g as u8)
+    println("{}", g as% u8)
     let h = 1e20
-    println("{}", h as i64)
+    println("{}", h as% i64)
 }
 "#,
         "44\n-56\n144\n255\n0\n9223372036854775807\n",

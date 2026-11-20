@@ -1,0 +1,49 @@
+// A `for` loop walks the value its iterable held when the loop began. A body
+// that removes, pushes, or writes elements of the collection it walks
+// changes the collection after the loop, not the elements the loop visits.
+
+struct Bag { items: Vec<i64> }
+
+fn main() {
+    let mut xs = #[1, 2, 2, 3]
+    for x in xs {
+        if x == 2 {
+            let pos = xs.iter().position(|y| y == x).unwrap()
+            xs.remove(pos).unwrap()
+        }
+    }
+    println(xs.map(|x| f"{x}").join(","))
+    let mut ys = #[1, 2, 3]
+    let mut seen = 0
+    for y in ys {
+        ys.push(y * 10)
+        seen += 1
+    }
+    println(f"{seen} {ys}")
+    let mut zs = #[5, 6, 7]
+    let mut out = #[]
+    for z in zs {
+        zs[2] = 70
+        out.push(z)
+    }
+    println(f"{out} {zs}")
+    let mut b = Bag { items: #[1, 2] }
+    for i in b.items { b.items.push(i) }
+    println(b.items)
+    let mut ws = #[1, 2, 3]
+    for (i, w) in ws.iter().enumerate() {
+        if i == 0 { ws[2] = 99 }
+        print(f"{w} ")
+    }
+    println(ws)
+    let mut m = { "a": 1 }
+    let mut n = 0
+    for (k, v) in m { m["b"] = 2; n += v }
+    let mut s = #{ 1, 2 }
+    for k in s { s.insert(k + 10); n += 1 }
+    println(f"{n} {m.len()} {s.len()}")
+    let mut total = 0
+    let vs = #[4, 5]
+    for v in vs { total += v }
+    println(total)
+}

@@ -655,7 +655,7 @@ const METHODS: &[Method] = &[
         "abs_diff",
         Receivers::Signed,
         &[],
-        "fn abs_diff(&self, other: T) -> U { if *self > other { (*self as U) -% (other as U) } else { (other as U) -% (*self as U) } }",
+        "fn abs_diff(&self, other: T) -> U { if *self > other { (*self as% U) -% (other as% U) } else { (other as% U) -% (*self as% U) } }",
     ),
     method(
         "abs_diff",
@@ -1092,6 +1092,7 @@ pub(crate) fn synthesize_primitive_surface(source: &str, tokens: &SourceTokens<'
                 .replace(": T", &format!(": {ty}"))
                 .replace("-> T", &format!("-> {ty}"))
                 .replace("<T>", &format!("<{ty}>"))
+                .replace("as% U", &format!("as% {}", unsigned_of(ty)))
                 .replace("as U", &format!("as {}", unsigned_of(ty)))
                 .replace("as T", &format!("as {ty}"))
                 .replace("-> U", &format!("-> {}", unsigned_of(ty)));
