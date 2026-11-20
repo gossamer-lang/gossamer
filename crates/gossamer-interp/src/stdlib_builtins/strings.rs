@@ -525,6 +525,16 @@ pub(crate) fn builtin_strings_ends_with(args: &[Value]) -> RuntimeResult<Value> 
 pub(crate) fn builtin_strings_repeat(args: &[Value]) -> RuntimeResult<Value> {
     let text = args.first().and_then(as_str).unwrap_or("");
     let count = non_negative_usize_arg(args, 1, "strings::repeat", "count")?;
+    let Some(bytes) = text.len().checked_mul(count) else {
+        return Err(RuntimeError::Panic(
+            "string repeat capacity overflow".to_string(),
+        ));
+    };
+    if gossamer_runtime::memory_limit::exceeds_commit_limit(bytes as u128) {
+        return Err(RuntimeError::Panic(
+            gossamer_runtime::memory_limit::out_of_memory_message(bytes as u128),
+        ));
+    }
     Ok(Value::String(strings_std::repeat(text, count).into()))
 }
 

@@ -284,6 +284,21 @@ const SPECS: &[Spec] = &[
     // expression reaches it and whatever the closure returns. The env
     // slot is reference-counted by that type on the compiled tiers.
     spec("feature-testing-examples/closure_capture_types.gos"),
+    // A binding declared without a value and assigned before every read,
+    // including one a closure captures and writes.
+    spec("feature-testing-examples/deferred_init.gos"),
+    // A `for` loop walks the value its iterable held at the loop's start,
+    // whatever its body does to the collection.
+    spec("feature-testing-examples/for_mutated_source.gos"),
+    // `Box::new(x)` answers `x` with its type, so a closure reading a boxed
+    // value's fields lowers when stored in a field and called through it.
+    spec("feature-testing-examples/closure_in_boxed_field.gos"),
+    // The built-in checked conversion between integer types, at both ends
+    // of each target's range.
+    spec("feature-testing-examples/int_try_into.gos"),
+    // `[weak o] || body` and a hand-written `downgrade()` capture: a
+    // closure stored in the value it reads, and one outliving its value.
+    spec("feature-testing-examples/weak_captures.gos"),
     // A callable's `Result` / `Option` return crosses the indirect call
     // through its env blob as the two-word carrier the compiled body
     // answers, rather than as the first of those two words.

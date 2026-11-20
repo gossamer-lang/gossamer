@@ -465,6 +465,7 @@ feature-testing-examples/vec_ordering.gos	no hot body
 feature-testing-examples/vec_single_field_struct.gos	entry shape
 feature-testing-examples/vecdeque_full.gos	no hot body
 feature-testing-examples/waitgroup_many_waiters.gos	cross-goroutine
+feature-testing-examples/weak_captures.gos	bytecode-only local
 feature-testing-examples/weak_into_strong_cycle.gos	bytecode-only local
 feature-testing-examples/weak_refs.gos	bytecode-only local
 feature-testing-examples/weak_upgrade_ownership.gos	bytecode-only local

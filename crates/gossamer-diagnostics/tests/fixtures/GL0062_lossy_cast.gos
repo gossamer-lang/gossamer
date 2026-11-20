@@ -1,0 +1,7 @@
+// ERROR: GL0062
+
+fn main() {
+    let v: i64 = 300
+    let b = v as u8
+    println(b)
+}

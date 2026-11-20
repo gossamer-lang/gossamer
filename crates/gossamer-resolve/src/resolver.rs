@@ -2587,7 +2587,7 @@ impl Resolver {
                 self.resolve_assign_place(place);
                 self.resolve_expr(value);
             }
-            ExprKind::Cast { value, ty } => {
+            ExprKind::Cast { value, ty, .. } => {
                 self.resolve_expr(value);
                 self.resolve_type(ty);
             }

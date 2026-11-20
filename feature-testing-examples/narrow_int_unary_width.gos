@@ -66,8 +66,8 @@ fn div32(a: i32, b: i32) -> i32 { a / b }
 
 fn rem8(a: i8, b: i8) -> i8 { a % b }
 
-fn to_u8(f: f64) -> u8 { f as u8 }
+fn to_u8(f: f64) -> u8 { f as% u8 }
 
-fn to_i8(f: f64) -> i8 { f as i8 }
+fn to_i8(f: f64) -> i8 { f as% i8 }
 
-fn to_u32(f: f64) -> u32 { f as u32 }
+fn to_u32(f: f64) -> u32 { f as% u32 }

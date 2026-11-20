@@ -1392,7 +1392,7 @@ fn __gos_term_handle(fd: i64) -> i64 {
         2 => 0xfffffff4,
         _ => return fd,
     }
-    unsafe { __gos_term_GetStdHandle(which) } as i64
+    unsafe { __gos_term_GetStdHandle(which) } as% i64
 }
 
 #[cfg(windows)]
@@ -1408,7 +1408,7 @@ impl __gos_term_RawMode {
     fn restore(&self) {
         let _ = unsafe { __gos_term_SetConsoleMode(self.input, self.input_mode) }
         if let Some(output_mode) = self.output_mode {
-            let _ = unsafe { __gos_term_SetConsoleMode(__gos_term_handle(1) as usize, output_mode) }
+            let _ = unsafe { __gos_term_SetConsoleMode(__gos_term_handle(1) as% usize, output_mode) }
         }
     }
 }
@@ -1416,13 +1416,13 @@ impl __gos_term_RawMode {
 #[cfg(windows)]
 fn __gos_term_is_terminal_raw(stream: i64) -> bool {
     let mut mode = #[0u32]
-    unsafe { __gos_term_GetConsoleMode(__gos_term_handle(stream) as usize, &mut mode) } != 0
+    unsafe { __gos_term_GetConsoleMode(__gos_term_handle(stream) as% usize, &mut mode) } != 0
 }
 
 #[cfg(windows)]
 fn __gos_term_size_raw(fd: i64) -> Result<(i64, i64), errors::Error> {
     let mut info = __gos_term_ConsoleInfo { size_x: 0, size_y: 0, cursor_x: 0, cursor_y: 0, attributes: 0, left: 0, top: 0, right: 0, bottom: 0, max_x: 0, max_y: 0 }
-    if unsafe { __gos_term_GetConsoleScreenBufferInfo(__gos_term_handle(fd) as usize, &mut info) } == 0 {
+    if unsafe { __gos_term_GetConsoleScreenBufferInfo(__gos_term_handle(fd) as% usize, &mut info) } == 0 {
         return Err(__gos_term_os_error("size"))
     }
     Ok(((info.right - info.left) as i64 + 1, (info.bottom - info.top) as i64 + 1))
@@ -1432,8 +1432,8 @@ fn __gos_term_size_raw(fd: i64) -> Result<(i64, i64), errors::Error> {
 // output redirected elsewhere leaves only the input in raw mode.
 #[cfg(windows)]
 fn __gos_term_enter_raw_on(fd: i64, held: Fn() -> ()) -> Result<__gos_term_RawMode, errors::Error> {
-    let input = __gos_term_handle(fd) as usize
-    let output = __gos_term_handle(1) as usize
+    let input = __gos_term_handle(fd) as% usize
+    let output = __gos_term_handle(1) as% usize
     let mut input_mode = #[0u32]
     if unsafe { __gos_term_GetConsoleMode(input, &mut input_mode) } == 0 {
         return Err(__gos_term_os_error("enter_raw"))
@@ -1461,7 +1461,7 @@ fn __gos_term_enter_raw_on(fd: i64, held: Fn() -> ()) -> Result<__gos_term_RawMo
 fn __gos_term_read_ready(fd: i64) -> Result<Vec<u8>, errors::Error> {
     let mut buf = #[0u8; 4096]
     let mut read = #[0u32]
-    if unsafe { __gos_term_ReadFile(__gos_term_handle(fd) as usize, &mut buf, 4096, &mut read, 0) } == 0 {
+    if unsafe { __gos_term_ReadFile(__gos_term_handle(fd) as% usize, &mut buf, 4096, &mut read, 0) } == 0 {
         return Err(__gos_term_os_error("read_input"))
     }
     Ok(buf[0..read[0] as i64])

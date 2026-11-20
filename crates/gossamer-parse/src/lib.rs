@@ -101,6 +101,7 @@ fn parse_with(mut parser: Parser<'_>, file: FileId) -> (SourceFile, Vec<ParseDia
     source_file.attrs = file_attrs;
     source_file.top_level_stmts = top_level_stmts;
     source_file.next_node_id = next_node_id;
+    source_file.program_end = generated_section_start(parser.source);
     source_file.named_args = named_args;
     gossamer_ast::cfg::apply_package_features(&mut source_file);
     let diagnostics = parser.take_diagnostics();
@@ -135,11 +136,20 @@ pub(crate) fn parse_appended(
     program.uses.extend(parser.take_hoisted_uses());
     program.next_node_id = parser.ids.issued();
     program.named_args.extend(parser.take_named_args());
+    program.program_end = generated_section_start(parser.source);
     // Settling is idempotent, so the program's own items, settled by its
     // own parse, come through unchanged.
     gossamer_ast::cfg::apply_package_features(&mut program);
     let diagnostics = parser.take_diagnostics();
     (program, diagnostics)
+}
+
+/// Where the code the toolchain appended to `source` begins, when it
+/// appended any.
+fn generated_section_start(source: &str) -> Option<u32> {
+    source
+        .rfind(crate::autoderive::GENERATED_SECTION_MARKER)
+        .and_then(|end| u32::try_from(end).ok())
 }
 
 /// The file-scope item loop: items, and the bare statements of an entry

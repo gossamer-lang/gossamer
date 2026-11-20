@@ -1497,6 +1497,12 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "generic function's type arguments not inferred",
         "A generic function is named as a value, or called, with a type argument nothing in the program fixes: `let f = id` with `f` never called, or `fn none<T>() -> Option<T>` called where its answer is never used. Every tier runs one instantiation of the function, so each type argument has to be known. Name it with `id::<i64>`, give the binding a function type (`let f: fn(i64) -> i64 = id`), or use the value where its type is fixed.",
     ),
+    (
+        "GT0129",
+        "Types",
+        "binding read before it is assigned",
+        "A binding declared without a value (`let mut x: i64`) is read on a path that has not assigned it. The value a `let` leaves out is supplied by an assignment after it, so every path that reaches a read has to assign the binding first: `if n > 5 { x = 10 }` followed by a read of `x` reaches the read with no value when `n <= 5`. Give the binding a value where it is declared, assign it in every branch (an `else` included), or move the read inside the branch that assigns it. A closure or a `defer` reads its bindings where it is written, so they have to be assigned before it.",
+    ),
 ];
 
 fn render_diagnostics_page(entries: &[(&str, &str, &str, &str)]) -> String {

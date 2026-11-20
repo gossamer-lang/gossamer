@@ -752,7 +752,7 @@ impl TypeChecker<'_> {
             ExprKind::Index { base, index } => self.check_index_expr(base, index, expr.span),
             ExprKind::Binary { op, lhs, rhs } => self.check_binary(*op, lhs, rhs, expr.span),
             ExprKind::Assign { place, value, op } => self.check_assign(place, value, *op),
-            ExprKind::Cast { value, ty } => {
+            ExprKind::Cast { value, ty, .. } => {
                 let from = self.check_expr(value);
                 let to = self.type_from_ast(ty);
                 self.check_cast(from, to, expr.span);

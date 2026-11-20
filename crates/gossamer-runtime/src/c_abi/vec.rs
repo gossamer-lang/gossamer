@@ -769,14 +769,14 @@ impl TailPlacement {
             // block it answers is 8-aligned, which `layout` asks for.
             let block = unsafe { libmimalloc_sys::mi_heap_malloc(self.heap, layout.size()) };
             if block.is_null() {
-                std::alloc::handle_alloc_error(layout);
+                crate::c_abi::panic::out_of_memory(layout.size());
             }
             return block.cast();
         }
         // SAFETY: the layout has a non-zero size.
         let block = unsafe { std::alloc::alloc(layout) };
         if block.is_null() {
-            std::alloc::handle_alloc_error(layout);
+            crate::c_abi::panic::out_of_memory(layout.size());
         }
         block
     }
@@ -3077,6 +3077,7 @@ pub extern "C" fn gos_rt_vec_new_typed(elem_bytes: u32, elem_kind: u8) -> *mut G
 /// before `push` / copy initialises it, so reserving a large vector does not
 /// need to touch every page up front.
 pub(crate) fn alloc_vec_buffer(bytes: usize) -> *mut u8 {
+    refuse_past_commit_limit(bytes);
     if mapped::is_mapped(bytes) {
         return mapped::map(bytes);
     }
@@ -3087,15 +3088,28 @@ pub(crate) fn alloc_vec_buffer(bytes: usize) -> *mut u8 {
 /// whole of a larger cached mapping to grow into (see
 /// [`mapped::map_growing`]).
 fn alloc_growing_vec_buffer(bytes: usize) -> *mut u8 {
+    refuse_past_commit_limit(bytes);
     if mapped::is_mapped(bytes) {
         return mapped::map_growing(bytes);
     }
     alloc_small_vec_buffer(bytes)
 }
 
+/// Panics for a buffer of `bytes` the system can never back, before any
+/// mapping is asked for, so the refusal is the same whichever allocator
+/// would have served it.
+fn refuse_past_commit_limit(bytes: usize) {
+    if crate::memory_limit::exceeds_commit_limit(bytes as u128) {
+        crate::c_abi::panic::out_of_memory(bytes);
+    }
+}
+
 fn alloc_small_vec_buffer(bytes: usize) -> *mut u8 {
     let words = bytes.div_ceil(8).max(1);
-    let mut buf: Vec<u64> = Vec::with_capacity(words);
+    let mut buf: Vec<u64> = Vec::new();
+    if buf.try_reserve_exact(words).is_err() {
+        crate::c_abi::panic::out_of_memory(bytes);
+    }
     let ptr = buf.as_mut_ptr().cast::<u8>();
     std::mem::forget(buf);
     ptr

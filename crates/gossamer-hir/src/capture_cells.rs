@@ -191,7 +191,7 @@ impl CellPass<'_> {
         for param in &decl.params {
             pattern_bindings(&param.pattern, &mut bindings);
         }
-        let prologue = self.cells_for(&bindings, &mut ScopeMut::Block(&mut body.block, 0));
+        let prologue = self.cells_for(&bindings, &mut ScopeMut::Block(&mut body.block, 0), false);
         if !prologue.is_empty() {
             let mut stmts = prologue;
             stmts.append(&mut body.block.stmts);
@@ -208,7 +208,17 @@ impl CellPass<'_> {
 
     /// The `let` statements creating cells for the `bindings` a scope
     /// introduces that need one, after rewriting the scope's uses of them.
-    fn cells_for(&mut self, bindings: &[String], scope: &mut ScopeMut<'_>) -> Vec<HirStmt> {
+    ///
+    /// A binding `declared_only` (`let mut x: T` with no value) has no value
+    /// to put in its cell, so the cell starts empty and each assignment of
+    /// the whole binding refills it; the checker has proved one precedes
+    /// every read.
+    fn cells_for(
+        &mut self,
+        bindings: &[String],
+        scope: &mut ScopeMut<'_>,
+        declared_only: bool,
+    ) -> Vec<HirStmt> {
         let mut stmts = Vec::new();
         for name in bindings {
             if name == "self" {
@@ -221,9 +231,18 @@ impl CellPass<'_> {
             let cell_name = format!("{CELL_PREFIX}{name}_{}", self.next);
             self.next += 1;
             let cell_ty = self.tcx.intern(TyKind::Vec(ty));
-            self.rename_scope(scope, name, &cell_name, cell_ty);
-            let value = self.path(name, ty, span);
-            let init = self.vec_of(value, cell_ty, span);
+            self.rename_scope(scope, name, &cell_name, cell_ty, declared_only);
+            let init = if declared_only {
+                HirExpr {
+                    id: self.ids.next(),
+                    span,
+                    ty: cell_ty,
+                    kind: HirExprKind::Array(HirArrayExpr::List(Vec::new())),
+                }
+            } else {
+                let value = self.path(name, ty, span);
+                self.vec_of(value, cell_ty, span)
+            };
             stmts.push(self.let_stmt(&cell_name, cell_ty, init, span));
         }
         stmts
@@ -275,16 +294,20 @@ impl CellPass<'_> {
     fn visit_block(&mut self, block: &mut HirBlock) {
         let mut idx = 0;
         while idx < block.stmts.len() {
-            let bindings = match &block.stmts[idx].kind {
-                HirStmtKind::Let { pattern, .. } => {
+            let (bindings, declared_only) = match &block.stmts[idx].kind {
+                HirStmtKind::Let { pattern, init, .. } => {
                     let mut out = Vec::new();
                     pattern_bindings(pattern, &mut out);
-                    out
+                    (out, init.is_none())
                 }
-                _ => Vec::new(),
+                _ => (Vec::new(), false),
             };
             if !bindings.is_empty() {
-                let cells = self.cells_for(&bindings, &mut ScopeMut::Block(block, idx + 1));
+                let cells = self.cells_for(
+                    &bindings,
+                    &mut ScopeMut::Block(block, idx + 1),
+                    declared_only,
+                );
                 let count = cells.len();
                 for (offset, stmt) in cells.into_iter().enumerate() {
                     block.stmts.insert(idx + 1 + offset, stmt);
@@ -315,7 +338,7 @@ impl CellPass<'_> {
                 for param in params.iter() {
                     pattern_bindings(&param.pattern, &mut bindings);
                 }
-                let prologue = self.cells_for(&bindings, &mut ScopeMut::Expr(body));
+                let prologue = self.cells_for(&bindings, &mut ScopeMut::Expr(body), false);
                 self.prepend(body, prologue);
                 self.visit_expr(body);
             }
@@ -332,7 +355,7 @@ impl CellPass<'_> {
     fn visit_arm(&mut self, arm: &mut HirMatchArm) {
         let mut bindings = Vec::new();
         pattern_bindings(&arm.pattern, &mut bindings);
-        let prologue = self.cells_for(&bindings, &mut ScopeMut::Arm(arm));
+        let prologue = self.cells_for(&bindings, &mut ScopeMut::Arm(arm), false);
         self.prepend(&mut arm.body, prologue);
         if let Some(guard) = &mut arm.guard {
             self.visit_expr(guard);
@@ -459,16 +482,23 @@ impl CellPass<'_> {
         uses.written |= written;
     }
 
-    /// Rewrites each use of `name` over `scope` to `cell_name[0]`.
-    fn rename_scope(&mut self, scope: &mut ScopeMut<'_>, name: &str, cell_name: &str, cell_ty: Ty) {
+    /// Rewrites each use of `name` over `scope` to `cell_name[0]`. For a
+    /// `declared_only` binding an assignment of the whole binding becomes
+    /// `{ let v = value; cell.clear(); cell.push(v) }`, which fills the
+    /// empty cell the first time and replaces its element after.
+    fn rename_scope(
+        &mut self,
+        scope: &mut ScopeMut<'_>,
+        name: &str,
+        cell_name: &str,
+        cell_ty: Ty,
+        declared_only: bool,
+    ) {
         let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let unit_ty = self.tcx.unit();
         let ids = &mut *self.ids;
         let mut rewrite = |expr: &mut HirExpr| {
-            if !is_name(expr, name) {
-                return;
-            }
-            let span = expr.span;
-            let base = HirExpr {
+            let cell = |ids: &mut HirIdGenerator, span: Span| HirExpr {
                 id: ids.next(),
                 span,
                 ty: cell_ty,
@@ -477,6 +507,18 @@ impl CellPass<'_> {
                     def: None,
                 },
             };
+            if declared_only
+                && let HirExprKind::Assign { place, .. } = &expr.kind
+                && is_name(place, name)
+            {
+                refill_cell(expr, ids, cell_name, cell_ty, unit_ty);
+                return;
+            }
+            if !is_name(expr, name) {
+                return;
+            }
+            let span = expr.span;
+            let base = cell(ids, span);
             let index = HirExpr {
                 id: ids.next(),
                 span,
@@ -876,4 +918,92 @@ fn rename_expr(expr: &mut HirExpr, name: &str, rewrite: &mut impl FnMut(&mut Hir
         }
         _ => for_each_child_expr_mut(expr, &mut |child| rename_expr(child, name, rewrite)),
     }
+}
+
+/// Rewrites `expr`, an assignment of a whole binding whose cell started
+/// empty, to `{ let v = value; cell.clear(); cell.push(v) }`, which fills the
+/// cell the first time and replaces its element after.
+fn refill_cell(
+    expr: &mut HirExpr,
+    ids: &mut HirIdGenerator,
+    cell_name: &str,
+    cell_ty: Ty,
+    unit_ty: Ty,
+) {
+    let HirExprKind::Assign { value, .. } = &mut expr.kind else {
+        return;
+    };
+    let span = expr.span;
+    let value_ty = value.ty;
+    let unit = HirExpr {
+        id: ids.next(),
+        span,
+        ty: unit_ty,
+        kind: HirExprKind::Literal(HirLiteral::Unit),
+    };
+    let value = std::mem::replace(&mut **value, unit);
+    let temp = format!("{cell_name}_set");
+    let store = HirStmt {
+        id: ids.next(),
+        span,
+        kind: HirStmtKind::Let {
+            pattern: HirPat {
+                id: ids.next(),
+                span,
+                ty: value_ty,
+                kind: HirPatKind::Binding {
+                    name: Ident::new(&temp),
+                    mutable: false,
+                },
+            },
+            ty: value_ty,
+            init: Some(value),
+        },
+    };
+    let method_stmt = |ids: &mut HirIdGenerator, method: &str, args: Vec<HirExpr>| HirStmt {
+        id: ids.next(),
+        span,
+        kind: HirStmtKind::Expr {
+            expr: HirExpr {
+                id: ids.next(),
+                span,
+                ty: unit_ty,
+                kind: HirExprKind::MethodCall {
+                    receiver: Box::new(HirExpr {
+                        id: ids.next(),
+                        span,
+                        ty: cell_ty,
+                        kind: HirExprKind::Path {
+                            segments: vec![Ident::new(cell_name)],
+                            def: None,
+                        },
+                    }),
+                    name: Ident::new(method),
+                    args,
+                    owner: None,
+                },
+            },
+            has_semi: true,
+        },
+    };
+    let clear = method_stmt(ids, "clear", Vec::new());
+    let pushed = HirExpr {
+        id: ids.next(),
+        span,
+        ty: value_ty,
+        kind: HirExprKind::Path {
+            segments: vec![Ident::new(&temp)],
+            def: None,
+        },
+    };
+    let push = method_stmt(ids, "push", vec![pushed]);
+    expr.ty = unit_ty;
+    expr.kind = HirExprKind::Block(HirBlock {
+        id: ids.next(),
+        span,
+        stmts: vec![store, clear, push],
+        tail: None,
+        ty: unit_ty,
+        is_comptime: false,
+    });
 }

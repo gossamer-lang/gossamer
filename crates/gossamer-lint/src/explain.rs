@@ -267,6 +267,28 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
             from its own defaults, so the derive says nothing.\n\
             `gos lint --fix` drops `Default` from the derive."
         }
+        "lossy_cast" => {
+            "An `as` conversion that can change the value: a narrowing integer\n\
+            cast (`v as u8` with `v: i64`), a signed and unsigned swap, a cast\n\
+            from a float to an integer, or between `char` and a type too narrow\n\
+            for it. `as` keeps the low bits of an integer and saturates a float,\n\
+            silently. Say which you mean: `v.try_into()` answers a `Result` that\n\
+            is `Err` when the value does not fit, `(v & 0xFF) as u8` keeps the\n\
+            low bits, `v.clamp(0, 255) as u8` saturates, and\n\
+            `x.round().clamp(0.0, 255.0) as u8` rounds and saturates a float.\n\
+            A cast the compiler can see fits (a literal in range, a widening\n\
+            cast, a mask, a clamp to the target's range) is not reported."
+        }
+        "closure_self_cycle" => {
+            "A closure stored in a value it captures: `o.callback = Some(|| o.x)`,\n\
+            or `handlers.push(|| handlers.len())`. A closure names the bindings it\n\
+            captures, so the value holds the closure and the closure holds the\n\
+            value. Neither is ever released, and the runtime does not collect the\n\
+            cycle. Capture a weak reference instead: in `[weak o] || ..` the name\n\
+            `o` is, inside the body, an `Option` that is `Some` while the value\n\
+            lives and `None` once it is gone. `o.downgrade()` written before the\n\
+            closure and upgraded inside it is the same capture."
+        }
         "non_upper_case_globals" => {
             "A const or static whose name is not `SCREAMING_SNAKE_CASE`, as Rust\n\
             spells them. A single name in a pattern matches the const it names,\n\

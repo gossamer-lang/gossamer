@@ -11,17 +11,17 @@ fn main() {
 
     // i64 → i32 truncation (wrapping cast)
     let large: i64 = 2147483648
-    let truncated = large as i32
+    let truncated = large as% i32
     println("2147483648 as i32 = {}", truncated)
 
     // Negative i64 → u64 (reinterpret)
     let neg: i64 = -1
-    let as_u64 = neg as u64
+    let as_u64 = neg as% u64
     println("-1 as u64 = {}", as_u64)
 
     // u64 → i64 (high bit)
     let max_u: u64 = 18446744073709551615
-    let as_signed = max_u as i64
+    let as_signed = max_u as% i64
     println("u64::MAX as i64 = {}", as_signed)
 
     // f64 → i64 truncation

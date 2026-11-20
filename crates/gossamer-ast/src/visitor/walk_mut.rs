@@ -229,7 +229,7 @@ fn walk_expr_mut_compound<V: VisitorMut + ?Sized>(visitor: &mut V, expr: &mut Ex
             visitor.visit_expr(place);
             visitor.visit_expr(value);
         }
-        ExprKind::Cast { value, ty } => {
+        ExprKind::Cast { value, ty, .. } => {
             visitor.visit_expr(value);
             visitor.visit_type(ty);
         }

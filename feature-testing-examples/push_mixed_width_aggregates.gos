@@ -4,7 +4,7 @@
 struct Rec { flag: bool, tag: u8, ch: char, weight: f64, id: i64 }
 
 fn rec(i: i64) -> Rec {
-    Rec { flag: i % 2 == 0, tag: (i * 37) as u8, ch: if i % 3 == 0 { 'é' } else { 'z' }, weight: i as f64 / 4.0, id: i * 1000 }
+    Rec { flag: i % 2 == 0, tag: (i * 37) as% u8, ch: if i % 3 == 0 { 'é' } else { 'z' }, weight: i as f64 / 4.0, id: i * 1000 }
 }
 
 fn main() {

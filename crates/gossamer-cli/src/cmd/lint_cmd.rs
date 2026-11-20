@@ -1,8 +1,9 @@
 //! `gos lint [PATH] [--deny-warnings] [--explain ID] [--fix]` -
 //! runs the lint suite and applies / reports findings.
 
+use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 
@@ -45,6 +46,10 @@ fn run(path: &PathBuf, deny_warnings: bool, explain: Option<&str>, fix: bool) ->
     let render_opts = gossamer_diagnostics::RenderOptions {
         colour: stderr_supports_colour(),
     };
+    let linted: Vec<PathBuf> = files
+        .iter()
+        .map(|file| std::path::absolute(file).unwrap_or_else(|_| file.clone()))
+        .collect();
     for file in files {
         let source = read_source(&file)?;
         let mut map = gossamer_lex::SourceMap::new();
@@ -97,9 +102,89 @@ fn run(path: &PathBuf, deny_warnings: bool, explain: Option<&str>, fix: bool) ->
         outln!("fix: {edits_applied} total edit(s) applied");
         return Ok(());
     }
+    for entry in unit_entries(&linted) {
+        for diag in typed_lint_diagnostics(&entry, &linted, deny_warnings, render_opts) {
+            eprintln!("{}", diag.0);
+            if diag.1 {
+                errors += 1;
+            } else {
+                warnings += 1;
+            }
+        }
+    }
     outln!("lint: {warnings} warning(s), {errors} error(s)");
     if errors > 0 {
         return Err(anyhow!("{errors} lint error(s)"));
     }
     Ok(())
+}
+
+/// The units the type-aware lints check to cover `files`: each directory's
+/// `main.gos` or `lib.gos`, which bundles its sibling modules, or each file
+/// on its own in a directory with neither.
+fn unit_entries(files: &[PathBuf]) -> BTreeSet<PathBuf> {
+    let mut entries = BTreeSet::new();
+    for file in files {
+        let dir = file.parent().unwrap_or_else(|| Path::new("."));
+        let entry = ["main.gos", "lib.gos"]
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| file.clone());
+        entries.insert(entry);
+    }
+    entries
+}
+
+/// The findings of the lints that read types (`gossamer_lint::TYPED_LINTS`)
+/// over the unit `entry` bundles, rendered, for the spans that come from one
+/// of the `linted` files. Each is paired with whether it counts as an error.
+/// A unit that cannot be assembled reports nothing here: its files were
+/// already linted for syntax, and `gos check` names what keeps it from
+/// building.
+fn typed_lint_diagnostics(
+    entry: &Path,
+    linted: &[PathBuf],
+    deny_warnings: bool,
+    render_opts: gossamer_diagnostics::RenderOptions,
+) -> Vec<(String, bool)> {
+    let Ok(unit) = crate::paths::read_entry_unit(entry) else {
+        return Vec::new();
+    };
+    let prepared =
+        crate::unit_cache::prepare(&unit.source, &entry.to_string_lossy(), &unit.origins);
+    let source = prepared.source;
+    let mut map = gossamer_lex::SourceMap::new();
+    let file_id = map.add_file(entry.to_string_lossy().into_owned(), source.clone());
+    crate::paths::register_unit_origins(&mut map, file_id, &unit.entry, &unit.origins);
+    crate::paths::register_generated_tail(&mut map, file_id, prepared.generated_len);
+    let outcome = gossamer_driver::check_frontend_with_program(&source, file_id, prepared.program);
+    let typed_codes: Vec<&str> = gossamer_lint::TYPED_LINTS
+        .iter()
+        .map(|id| gossamer_lint::lint_code(id).as_str())
+        .collect();
+    let mut out = Vec::new();
+    for diag in outcome.warnings {
+        if !typed_codes.contains(&diag.code.as_str()) {
+            continue;
+        }
+        let Some(label) = diag.labels.first() else {
+            continue;
+        };
+        let (origin, _) = map.origin_of(label.location.span.file, label.location.span.start);
+        let origin = Path::new(map.file_name(origin));
+        if !linted.iter().any(|file| file == origin) {
+            continue;
+        }
+        let mut diag = diag;
+        if deny_warnings {
+            diag.severity = gossamer_diagnostics::Severity::Error;
+        }
+        let is_error = diag.severity == gossamer_diagnostics::Severity::Error;
+        out.push((
+            gossamer_diagnostics::render(&diag, &map, render_opts),
+            is_error,
+        ));
+    }
+    out
 }

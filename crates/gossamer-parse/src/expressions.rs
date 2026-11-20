@@ -7,9 +7,9 @@ use gossamer_ast::visitor::{
     VisitorMut, walk_expr_mut, walk_item_mut, walk_pattern_mut, walk_stmt_mut, walk_type_mut,
 };
 use gossamer_ast::{
-    ArrayExpr, AssignOp, BinaryOp, Block, ClosureParam, Expr, ExprKind, FieldSelector, Ident, Item,
-    Label, Literal, MatchArm, Mutability, NodeIdGenerator, PathExpr, PathSegment, Pattern,
-    PatternKind, RangeKind, Stmt, StmtKind, StructExprField, Type, UnaryOp,
+    ArrayExpr, AssignOp, BinaryOp, Block, BlockKind, ClosureParam, Expr, ExprKind, FieldSelector,
+    Ident, Item, Label, Literal, MatchArm, Mutability, NodeIdGenerator, PathExpr, PathSegment,
+    Pattern, PatternKind, RangeKind, Stmt, StmtKind, StructExprField, Type, UnaryOp,
 };
 use gossamer_ast::{
     PAD_REQUEST_CENTER, PAD_REQUEST_DEFAULT, PAD_REQUEST_LEFT, PAD_REQUEST_RIGHT,
@@ -277,6 +277,7 @@ impl Parser<'_> {
             }
             if self.at_keyword(Keyword::As) {
                 self.bump();
+                let wrapping = self.eat_punct(Punct::Percent);
                 let ty = self.parse_type();
                 let span = self.join(lhs.span, ty.span);
                 let id = self.alloc_id();
@@ -286,6 +287,7 @@ impl Parser<'_> {
                     ExprKind::Cast {
                         value: Box::new(lhs),
                         ty: Box::new(ty),
+                        wrapping,
                     },
                 );
                 continue;
@@ -1301,6 +1303,9 @@ impl Parser<'_> {
         if self.eat_punct(Punct::LParen) {
             return self.parse_paren_or_tuple();
         }
+        if self.at_weak_capture_list() {
+            return self.parse_weak_capture_closure(pipe_step);
+        }
         if self.eat_punct(Punct::LBracket) {
             return self.parse_array_expr();
         }
@@ -2159,6 +2164,142 @@ impl Parser<'_> {
             self.peek_span(),
         );
         ExprKind::Error
+    }
+
+    /// `true` at a closure's capture list, `[weak a, weak b] |..| body`:
+    /// a bracket holding only `weak NAME` entries, followed by a closure's
+    /// parameter list. No array literal is spelled that way.
+    fn at_weak_capture_list(&self) -> bool {
+        if !self.at_punct(Punct::LBracket) {
+            return false;
+        }
+        let mut offset = 1;
+        loop {
+            let word = self.peek_nth(offset);
+            let weak_entry = matches!(word.kind, TokenKind::Ident)
+                && self.slice(word.span) == "weak"
+                && matches!(self.peek_nth(offset + 1).kind, TokenKind::Ident);
+            if !weak_entry {
+                return false;
+            }
+            offset += 2;
+            if self.peek_nth_is_punct(offset, Punct::Comma) {
+                offset += 1;
+                continue;
+            }
+            return self.peek_nth_is_punct(offset, Punct::RBracket)
+                && (self.peek_nth_is_punct(offset + 1, Punct::Pipe)
+                    || self.peek_nth_is_punct(offset + 1, Punct::PipePipe));
+        }
+    }
+
+    /// Parses `[weak a] |..| body`, which captures a weak reference to each
+    /// listed binding instead of the binding, so a closure stored in the
+    /// value it reads forms no reference cycle. It is
+    /// `{ let w = a.downgrade(); |..| { let a = w.upgrade(); body } }`: in
+    /// the body each name is the `Option` its weak reference upgrades to on
+    /// that call, `None` once the value is gone.
+    fn parse_weak_capture_closure(&mut self, pipe_step: bool) -> ExprKind {
+        let start = self.peek_span();
+        self.bump();
+        let mut names = Vec::new();
+        while !self.at_punct(Punct::RBracket) && !self.at_eof() {
+            self.bump();
+            let span = self.peek_span();
+            self.bump();
+            names.push((Ident::new(self.slice(span)), span));
+            if !self.eat_punct(Punct::Comma) {
+                break;
+            }
+        }
+        self.expect_punct(Punct::RBracket, "to close the capture list");
+        let ExprKind::Closure { params, ret, body } = self.parse_closure_expr(pipe_step) else {
+            return ExprKind::Error;
+        };
+        let span = self.join(start, body.span);
+        let mut outer = Vec::new();
+        let mut inner = Vec::new();
+        for (name, name_span) in names {
+            let weak = Ident::new(format!("__weak_{}", name.name));
+            let downgrade = self.weak_method_call(&name, "downgrade", name_span);
+            outer.push(self.weak_let(weak.clone(), downgrade, name_span));
+            let upgrade = self.weak_method_call(&weak, "upgrade", name_span);
+            inner.push(self.weak_let(name, upgrade, name_span));
+        }
+        let body_span = body.span;
+        let body = Expr::new(
+            self.alloc_id(),
+            body_span,
+            ExprKind::Block(Block {
+                stmts: inner,
+                tail: Some(body),
+                synthetic: false,
+                kind: BlockKind::Plain,
+            }),
+        );
+        let closure = Expr::new(
+            self.alloc_id(),
+            span,
+            ExprKind::Closure {
+                params,
+                ret,
+                body: Box::new(body),
+            },
+        );
+        ExprKind::Block(Block {
+            stmts: outer,
+            tail: Some(Box::new(closure)),
+            synthetic: false,
+            kind: BlockKind::Plain,
+        })
+    }
+
+    /// `name.method()`, for the weak capture desugar.
+    fn weak_method_call(&mut self, name: &Ident, method: &str, span: Span) -> Expr {
+        let receiver = Expr::new(
+            self.alloc_id(),
+            span,
+            ExprKind::Path(PathExpr {
+                segments: vec![PathSegment {
+                    name: name.clone(),
+                    generics: Vec::new(),
+                }],
+            }),
+        );
+        Expr::new(
+            self.alloc_id(),
+            span,
+            ExprKind::MethodCall {
+                receiver: Box::new(receiver),
+                name: Ident::new(method),
+                name_span: span,
+                desugared_from: None,
+                generics: Vec::new(),
+                args: Vec::new(),
+            },
+        )
+    }
+
+    /// `let name = value`, for the weak capture desugar.
+    fn weak_let(&mut self, name: Ident, value: Expr, span: Span) -> Stmt {
+        let pattern = Pattern::new(
+            self.alloc_id(),
+            span,
+            PatternKind::Ident {
+                mutability: Mutability::Immutable,
+                name,
+                subpattern: None,
+            },
+        );
+        Stmt::new(
+            self.alloc_id(),
+            span,
+            StmtKind::Let {
+                pattern,
+                ty: None,
+                init: Some(Box::new(value)),
+            },
+        )
     }
 
     fn parse_closure_expr(&mut self, pipe_step: bool) -> ExprKind {

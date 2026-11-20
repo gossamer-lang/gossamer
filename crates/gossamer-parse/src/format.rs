@@ -811,6 +811,10 @@ fn decide_space(
     if cur.kind == TK::Punct(P::Bang) && ends_expr(prev.kind) {
         return false;
     }
+    // `as%` is one cast operator spelled as two tokens.
+    if prev.kind == TK::Keyword(Keyword::As) && cur.kind == TK::Punct(P::Percent) {
+        return false;
+    }
     // Anonymous function expressions and `fn(...)` types hug the paren.
     if prev.kind == TK::Keyword(Keyword::Fn) && cur.kind == TK::Punct(P::LParen) {
         return false;
@@ -1202,6 +1206,16 @@ mod tests {
         let once = fmt(source);
         assert_eq!(once, source);
         assert_eq!(fmt(&once), once);
+    }
+
+    #[test]
+    fn wrapping_cast_keeps_percent_attached_to_as() {
+        let source = "fn narrow(v: i64) -> u8 {\n    v as% u8\n}\n";
+        assert_eq!(fmt(source), source);
+        assert_eq!(
+            fmt("fn narrow(v: i64) -> u8 { v as %u8 }\n"),
+            "fn narrow(v: i64) -> u8 { v as% u8 }\n"
+        );
     }
 
     #[test]

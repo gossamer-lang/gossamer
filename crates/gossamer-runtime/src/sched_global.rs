@@ -936,11 +936,14 @@ pub fn check_program_blocked() {
     if PENDING_HANDOFFS.load(Ordering::Acquire) > 0 || EXTERNAL_ACTORS.load(Ordering::Acquire) > 0 {
         return;
     }
-    let Some(on_channels) = BOOTED
-        .get()
-        .and_then(|booted| (booted.blocked_on_program)())
-    else {
-        return;
+    // With no scheduler ever built no goroutine exists, so none is parked on
+    // a channel and none can end `main`'s wait.
+    let on_channels = match BOOTED.get() {
+        None => 0,
+        Some(booted) => match (booted.blocked_on_program)() {
+            Some(on_channels) => on_channels,
+            None => return,
+        },
     };
     // Every other channel waiter has to be one of the parked goroutines: a
     // thread outside the goroutine set inside a channel wait is an actor

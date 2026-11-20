@@ -34,6 +34,11 @@ pub struct SourceFile {
     /// synthesis) can mint fresh ids for the wrapper nodes without colliding.
     #[serde(default)]
     pub next_node_id: u32,
+    /// Byte offset where the program's own text ends and the code the
+    /// toolchain appended after it begins, or `None` when nothing was
+    /// appended. A lint reports only on the program's own text.
+    #[serde(default)]
+    pub program_end: Option<u32>,
     /// Argument labels written at a call site, keyed by the call
     /// expression's id.
     ///
@@ -59,6 +64,13 @@ pub struct NamedArg {
 }
 
 impl SourceFile {
+    /// Whether `span` lies in the program's own text rather than in code
+    /// the toolchain appended after it.
+    #[must_use]
+    pub fn is_program_text(&self, span: gossamer_lex::Span) -> bool {
+        self.program_end.is_none_or(|end| span.start < end)
+    }
+
     /// Constructs a new source file with the given contents.
     #[must_use]
     pub fn new(file: FileId, uses: Vec<UseDecl>, items: Vec<Item>) -> Self {
@@ -69,6 +81,7 @@ impl SourceFile {
             items,
             top_level_stmts: Vec::new(),
             next_node_id: 0,
+            program_end: None,
             named_args: std::collections::HashMap::new(),
         }
     }

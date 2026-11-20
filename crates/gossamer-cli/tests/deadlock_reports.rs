@@ -95,6 +95,17 @@ fn a_cohort_whose_child_cannot_send_reports_the_join() {
     );
 }
 
+/// `main` locking a mutex it already holds, with no goroutine ever started,
+/// has nothing left that could release it.
+#[test]
+fn main_relocking_its_own_mutex_reports_the_lock() {
+    assert_reports(
+        "main_relock",
+        "use std::sync::Mutex\n\nfn main() {\n    let lock = Mutex::new()\n    lock.lock()\n    lock.lock()\n    println(\"unreachable\")\n}\n",
+        "error[GX0005]: panic: all goroutines are asleep - deadlock! (Mutex::lock can never complete)\n",
+    );
+}
+
 /// The reader finishes on its own while the writer and `main` wait on each
 /// other. Whichever of those happens last, the program is left with nothing
 /// able to run, so the order the goroutines settle in is varied by running

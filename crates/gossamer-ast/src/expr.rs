@@ -134,12 +134,16 @@ pub enum ExprKind {
         /// Right-hand value.
         value: Box<Expr>,
     },
-    /// Cast expression `expr as Type`.
+    /// Cast expression `expr as Type` or `expr as% Type`.
     Cast {
         /// Expression being cast.
         value: Box<Expr>,
         /// Target type.
         ty: Box<Type>,
+        /// `true` for `expr as% Type`, which keeps an integer's low bits and
+        /// saturates a float rather than checking that the value fits.
+        #[serde(default)]
+        wrapping: bool,
     },
     /// `if` / `else if` / `else` chain.
     If {

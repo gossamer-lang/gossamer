@@ -1,0 +1,27 @@
+// `Box::new(x)` is `x`: the call answers its argument with its argument's
+// type, so a closure that reads a boxed value's fields, stored in a field
+// and called through it, lowers on every tier.
+
+struct Obj {
+    payload: [u8; 16]
+    callback: Option<Fn() -> i64>
+}
+
+fn main() {
+    let mut total = 0
+    let mut i = 0
+    while i < 3 {
+        let mut source = Box::new(Obj { payload: [0u8; 16], callback: None })
+        source.payload[0] = i as u8
+        let mut holder = Box::new(Obj { payload: [1u8; 16], callback: None })
+        holder.callback = Some(|| source.payload.len() + source.payload[0] as i64)
+        if let Some(cb) = holder.callback {
+            total += cb()
+        }
+        i += 1
+    }
+    println(total)
+    let shared = Arc::new("text")
+    let reader = Rc::new(|| shared.len())
+    println(reader())
+}

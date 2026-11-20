@@ -1,0 +1,69 @@
+// A binding declared without a value, assigned on every path before it is
+// read: through branches, a match, a loop's break, a diverging arm, an
+// early return, `let ... else`, and a destructuring assignment. A closure
+// capturing one reads the value assigned before it and every assignment
+// after, and its own writes reach the binding.
+
+struct P { x: i64 }
+
+fn pick(n: i64) -> i64 {
+    let mut a: i64
+    if n > 0 { a = 1 } else { a = 2 }
+    let mut b: i64
+    match n {
+        0 => b = 5
+        _ => { b = 6 }
+    }
+    let mut c: i64
+    loop {
+        c = 3
+        break
+    }
+    let mut d: i64
+    if n > 100 { panic("big") } else { d = 4 }
+    let mut e: i64
+    if n < -100 { return 0 }
+    e = 9
+    let mut f: i64
+    let mut g: i64
+    f, g = 1, 2
+    let mut h: i64
+    let Some(v) = Some(n) else { return 0 }
+    h = v
+    let x = 7
+    let p = P { x }
+    let k = || a + b
+    a + b + c + d + e + f + g + h + p.x + k()
+}
+
+fn main() {
+    println(f"{pick(0)} {pick(1)}")
+
+    let mut a: String
+    a = "x"
+    let k = || a.len()
+    a = "hello"
+    println(k())
+
+    let mut n: i64
+    n = 1
+    let mut inc = || n += 1
+    inc()
+    inc()
+    println(n)
+
+    let mut v: Vec<String>
+    if n > 2 { v = #["p"] } else { v = #[] }
+    let count = || v.len()
+    v = #["q", "r"]
+    println(f"{count()} {v}")
+
+    let mut i = 0
+    let mut s: String
+    while i < 3 {
+        s = f"it{i}"
+        let show = || s + "!"
+        println(show())
+        i += 1
+    }
+}

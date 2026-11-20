@@ -4071,6 +4071,8 @@ impl TypeChecker<'_> {
             self.deferred_conversion_targets
                 .push((result, "into", span));
         } else if method == "try_into" {
+            self.deferred_try_into_conversions
+                .push((receiver_ty, result, span));
             self.deferred_conversion_targets
                 .push((result, "try_into", span));
         }
@@ -4168,6 +4170,57 @@ impl TypeChecker<'_> {
                     from,
                     to: target,
                     borrowed_sequence,
+                    fallible: false,
+                },
+                span,
+            );
+        }
+    }
+
+    /// Audits `.try_into()` once its target is known. Between two integer
+    /// types the conversion is built in and its error is an
+    /// `errors::Error`; any other pair needs an `impl TryFrom` on the
+    /// target.
+    pub(super) fn check_deferred_try_into_conversions(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_try_into_conversions);
+        for (recv, result, span) in deferred {
+            let mut recv = self.deep_resolve(recv);
+            while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(recv) {
+                recv = self.deep_resolve(*inner);
+            }
+            let result = self.deep_resolve(result);
+            let Some(ok) = self.result_ok_payload(result) else {
+                continue;
+            };
+            let ok = self.deep_resolve(ok);
+            if matches!(self.tcx.kind(recv), Some(TyKind::Var(_)))
+                || matches!(self.tcx.kind(ok), Some(TyKind::Var(_)))
+            {
+                continue;
+            }
+            if matches!(self.tcx.kind(recv), Some(TyKind::Int(_)))
+                && matches!(self.tcx.kind(ok), Some(TyKind::Int(_)))
+            {
+                let error = self.tcx.dyn_error_ty();
+                let built_in = self.result_adt_ty(ok, error);
+                self.unify(built_in, result, span);
+                continue;
+            }
+            let target = self.render_public_ty(ok);
+            if self
+                .user_method_owners
+                .get("try_from")
+                .is_some_and(|owners| owners.contains(&target))
+            {
+                continue;
+            }
+            let from = self.render_public_ty(recv);
+            self.emit(
+                TypeError::NoConversion {
+                    from,
+                    to: target,
+                    borrowed_sequence: false,
+                    fallible: true,
                 },
                 span,
             );

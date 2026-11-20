@@ -15,15 +15,15 @@ fn main() {
     let mut b: u64 = max_u64 - 2
     b += 1
     // Both VM (i64-internal) and compiled tier agree when printing as i64.
-    println("u64 near-max + 1 = {}", b as i64)
+    println("u64 near-max + 1 = {}", b as% i64)
 
     // Casts across signed/unsigned boundaries
     let c: i64 = -1
-    let casted: u64 = c as u64
+    let casted: u64 = c as% u64
     println("-1 as u64 = {}", casted)
 
     let d: u64 = 18446744073709551615
-    let back: i64 = d as i64
+    let back: i64 = d as% i64
     println("max u64 as i64 = {}", back)
 
     // Comparisons at boundaries

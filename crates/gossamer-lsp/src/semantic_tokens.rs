@@ -482,7 +482,7 @@ fn visit_expr(expr: &Expr, out: &mut Vec<RawToken>) {
             visit_expr(rhs, out);
         }
         ExprKind::Unary { operand, .. } => visit_expr(operand, out),
-        ExprKind::Cast { value, ty } => {
+        ExprKind::Cast { value, ty, .. } => {
             visit_expr(value, out);
             visit_type(ty, out);
         }

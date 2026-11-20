@@ -1,7 +1,12 @@
 //! Lowering `for` loops over sequences, ranges, lazy chains, and user iterators.
 
-use gossamer_ast::{Expr as AstExpr, Ident, NodeId, Pattern as AstPat};
+use gossamer_ast::visitor::{Visitor, walk_expr};
+use gossamer_ast::{
+    Expr as AstExpr, ExprKind as AstExprKind, Ident, NodeId, Pattern as AstPat, UnaryOp,
+};
 use gossamer_lex::Span;
+use gossamer_resolve::{Resolution, Resolutions};
+use gossamer_types::TypeTable;
 
 use crate::tree::{
     HirBlock, HirExpr, HirExprKind, HirLiteral, HirMatchArm, HirPat, HirPatKind, HirStmt,
@@ -9,6 +14,78 @@ use crate::tree::{
 };
 
 use super::{BTREE_SET_DEF_LOCAL, HASH_SET_DEF_LOCAL, Lowerer};
+
+/// The binding a `for` loop walks when its body writes the place it names.
+const FOR_SOURCE: &str = "__for_source";
+
+/// The local binding a place expression is rooted at, through fields and
+/// indices.
+fn local_root(resolutions: &Resolutions, place: &AstExpr) -> Option<NodeId> {
+    match &place.kind {
+        AstExprKind::Path(_) => match resolutions.get(place.id) {
+            Some(Resolution::Local(binding)) => Some(binding),
+            _ => None,
+        },
+        AstExprKind::FieldAccess { receiver, .. } | AstExprKind::Index { base: receiver, .. } => {
+            local_root(resolutions, receiver)
+        }
+        _ => None,
+    }
+}
+
+/// The place a `for` iterable walks, under any `iter()`, `enumerate()`, or
+/// `chars()` applied to it.
+fn iterated_place(expr: &mut HirExpr) -> Option<&mut HirExpr> {
+    match &expr.kind {
+        HirExprKind::MethodCall { name, .. }
+            if matches!(name.name.as_str(), "iter" | "enumerate" | "chars") =>
+        {
+            let HirExprKind::MethodCall { receiver, .. } = &mut expr.kind else {
+                return None;
+            };
+            iterated_place(receiver)
+        }
+        HirExprKind::Path { .. } | HirExprKind::Field { .. } | HirExprKind::Index { .. } => {
+            Some(expr)
+        }
+        _ => None,
+    }
+}
+
+/// Finds a write to one binding: an assignment or `&mut` of a place rooted
+/// at it, or a method call that writes a receiver rooted at it.
+struct WriteFinder<'a> {
+    resolutions: &'a Resolutions,
+    table: &'a TypeTable,
+    binding: NodeId,
+    found: bool,
+}
+
+impl WriteFinder<'_> {
+    fn rooted(&self, place: &AstExpr) -> bool {
+        local_root(self.resolutions, place) == Some(self.binding)
+    }
+}
+
+impl Visitor for WriteFinder<'_> {
+    fn visit_expr(&mut self, expr: &AstExpr) {
+        if self.found {
+            return;
+        }
+        self.found = match &expr.kind {
+            AstExprKind::Assign { place, .. } => self.rooted(place),
+            AstExprKind::Unary {
+                op: UnaryOp::RefMut,
+                operand,
+            } => self.rooted(operand),
+            AstExprKind::MethodCall { receiver, .. } => {
+                self.table.writes_receiver(receiver.id) && self.rooted(receiver)
+            }
+            _ => false,
+        };
+        walk_expr(self, expr);
+    }
+}
 
 impl Lowerer<'_> {
     pub(super) fn lower_for(
@@ -19,7 +96,107 @@ impl Lowerer<'_> {
         label: Option<String>,
         span: Span,
     ) -> HirExprKind {
+        let snapshot = self.body_writes_iterated_binding(iter, body);
         let mut iter_expr = self.lower_expr(iter);
+        let Some(source) = snapshot
+            .then(|| self.bind_iterated_source(&mut iter_expr))
+            .flatten()
+        else {
+            return self.lower_for_walk(pattern, iter_expr, body, label, span);
+        };
+        // The loop walks the value its source held when the loop began, so
+        // a body that changes the source changes what follows the loop, not
+        // which elements the loop visits.
+        let unit = self.tcx.unit();
+        let walk = self.lower_for_walk(pattern, iter_expr, body, label, span);
+        HirExprKind::Block(HirBlock {
+            id: self.fresh(),
+            span,
+            stmts: vec![source],
+            tail: Some(Box::new(HirExpr {
+                id: self.fresh(),
+                span,
+                ty: unit,
+                kind: walk,
+            })),
+            ty: unit,
+            is_comptime: false,
+        })
+    }
+
+    /// `true` when `iter` walks a place rooted at a local binding (`xs`,
+    /// `self.items`, `xs.iter()`, `xs.iter().enumerate()`) that `body`
+    /// writes: assigns, lends `&mut`, or calls a method that writes it.
+    fn body_writes_iterated_binding(&self, iter: &AstExpr, body: &AstExpr) -> bool {
+        let mut place = iter;
+        while let AstExprKind::MethodCall {
+            receiver,
+            name,
+            args,
+            ..
+        } = &place.kind
+        {
+            if !args.is_empty() || !matches!(name.name.as_str(), "iter" | "enumerate") {
+                return false;
+            }
+            place = receiver;
+        }
+        let Some(binding) = local_root(self.resolutions, place) else {
+            return false;
+        };
+        let mut finder = WriteFinder {
+            resolutions: self.resolutions,
+            table: self.table,
+            binding,
+            found: false,
+        };
+        finder.visit_expr(body);
+        finder.found
+    }
+
+    /// Replaces the place `iter_expr` walks with a fresh binding of its
+    /// value and answers the `let` that binds it.
+    fn bind_iterated_source(&mut self, iter_expr: &mut HirExpr) -> Option<HirStmt> {
+        let place = iterated_place(iter_expr)?;
+        let (ty, span) = (place.ty, place.span);
+        let read = HirExpr {
+            id: self.fresh(),
+            span,
+            ty,
+            kind: HirExprKind::Path {
+                segments: vec![Ident::new(FOR_SOURCE)],
+                def: None,
+            },
+        };
+        let value = std::mem::replace(place, read);
+        Some(HirStmt {
+            id: self.fresh(),
+            span,
+            kind: HirStmtKind::Let {
+                pattern: HirPat {
+                    id: self.fresh(),
+                    span,
+                    ty,
+                    kind: HirPatKind::Binding {
+                        name: Ident::new(FOR_SOURCE),
+                        mutable: false,
+                    },
+                },
+                ty,
+                init: Some(value),
+            },
+        })
+    }
+
+    /// Lowers the walk itself, over `iter_expr` as it stands.
+    fn lower_for_walk(
+        &mut self,
+        pattern: &AstPat,
+        mut iter_expr: HirExpr,
+        body: &AstExpr,
+        label: Option<String>,
+        span: Span,
+    ) -> HirExprKind {
         // A reference to a `String` walks the text it names, so the cursor is
         // chosen from the referent's type. Reading the reference's own type
         // here left the loop on the generic sequence walk, which hands the

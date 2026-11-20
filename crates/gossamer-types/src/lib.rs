@@ -18,8 +18,10 @@ mod arena_escape;
 pub mod builtin_traits;
 mod capture_writes;
 mod checker;
+mod closure_cycles;
 mod context;
 pub mod data_first;
+mod definite_assignment;
 mod error;
 mod exhaustiveness;
 mod foreign_layout;
@@ -27,6 +29,7 @@ mod foreign_policy;
 mod frontend_checks;
 mod infer;
 pub mod instantiate;
+mod lossy_casts;
 mod normalize;
 pub mod printer;
 pub mod purity;
@@ -79,7 +82,9 @@ pub use checker::{
     is_vec_only_sequence_method, iterator_adapter_is_lazy, iterator_receiver_accepts_method,
     typecheck_source_file, typecheck_source_file_for_repl_inspection,
 };
+pub use closure_cycles::{CLOSURE_SELF_CYCLE_LINT, ClosureSelfCycle, find_closure_self_cycles};
 pub use context::{FlatEnumLayout, PackedLayout, PlainLayout, TyCtxt, UNION_TYPE_NAME};
+pub use definite_assignment::{UnassignedReadDiagnostic, check_definite_assignment};
 pub use error::{
     ForeignError, ForeignLibrary, IntegerCastFix, NotDisplayableClass, TypeDiagnostic, TypeError,
 };
@@ -87,9 +92,10 @@ pub use exhaustiveness::{ExhaustivenessDiagnostic, ExhaustivenessError, check_ex
 pub use foreign_layout::{CLeaf, CStep, c_class_signed, c_class_width};
 pub use foreign_policy::ForeignPolicy;
 pub use frontend_checks::{
-    CheckPhase, PhaseObserver, UnitChecks, check_resolved_unit, top_level_names,
+    CheckPhase, PhaseObserver, UnitChecks, check_resolved_unit, top_level_names, typed_lints,
 };
 pub use infer::{InferCtxt, UnifyError};
+pub use lossy_casts::{CastCheck, LOSSY_CAST_LINT, LossyCast, cast_check, find_lossy_casts};
 pub use normalize::normalize_caller_side_spellings;
 pub use printer::{public_type_name, render_public_ty, render_ty, stable_type_name};
 pub use stdlib_signatures::{

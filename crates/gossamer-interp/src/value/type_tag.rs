@@ -22,6 +22,12 @@ impl TypeTag {
         &self.0
     }
 
+    /// How many owners hold this tag's allocation.
+    #[cfg(test)]
+    pub(crate) fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+
     /// Returns the compact numeric identity stored in aggregate nodes.
     #[must_use]
     pub fn id(&self) -> u64 {

@@ -13,7 +13,7 @@
 #![allow(static_mut_refs)]
 #![allow(clippy::wildcard_imports)]
 
-use std::alloc::{Layout, handle_alloc_error};
+use std::alloc::Layout;
 #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
 use std::alloc::{alloc, dealloc};
 use std::ffi::CStr;
@@ -1067,6 +1067,11 @@ fn alloc_growable(parts: &[&[u8]], cap: usize) -> *mut c_char {
 /// is the system one and mixing would free across allocators.
 #[inline]
 fn string_body_alloc(layout: Layout) -> *mut u8 {
+    // A body the system can never back is refused like an allocation that
+    // failed, rather than mapped lazily by an allocator that overcommits.
+    if crate::memory_limit::exceeds_commit_limit(layout.size() as u128) {
+        return std::ptr::null_mut();
+    }
     #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
     {
         // SAFETY: `mi_malloc` accepts any size and answers null on failure.
@@ -1328,7 +1333,7 @@ pub(crate) unsafe fn alloc_slice_pieces(source: *const c_char, pieces: &[&str]) 
     let layout = Layout::from_size_align(total, 8).expect("slab layout is valid");
     let base = string_body_alloc(layout);
     if base.is_null() {
-        handle_alloc_error(layout);
+        crate::c_abi::panic::out_of_memory(layout.size());
     }
     crate::c_abi::ledger::benchmark_allocation(total);
     let mut out = Vec::with_capacity(pieces.len());
@@ -1472,7 +1477,7 @@ where
         // matching `dealloc` below reconstructs the exact same layout.
         let base = string_body_alloc(layout);
         if base.is_null() {
-            handle_alloc_error(layout);
+            crate::c_abi::panic::out_of_memory(layout.size());
         }
         (base, STR_BUILDER_TAG, true)
     } else {
@@ -3875,8 +3880,12 @@ pub unsafe extern "C-unwind" fn gos_rt_str_repeat(s: *const c_char, n: i64) -> *
             crate::c_abi::panic::panic_text("strings::repeat: count must be non-negative");
         }
         let n = n as usize;
-        if s.len().checked_mul(n).is_none() {
+        let Some(bytes) = s.len().checked_mul(n) else {
             crate::c_abi::panic::panic_text("string repeat capacity overflow");
+            return std::ptr::null_mut();
+        };
+        if crate::memory_limit::exceeds_commit_limit(bytes as u128) {
+            crate::c_abi::panic::out_of_memory(bytes);
         }
         alloc_cstring(s.repeat(n).as_bytes())
     })

@@ -233,14 +233,14 @@ fn main() {
     println("{}", false as i64)
     println("{}", 'A' as i64)
     println("{}", 65 as u8 as char)
-    println("{}", 300.7 as u8)
-    println("{}", 1e20 as i64)
+    println("{}", 300.7 as% u8)
+    println("{}", 1e20 as% i64)
     let nan = 0.0 / 0.0
-    println("{}", nan as i64)
+    println("{}", nan as% i64)
     println("{}", -3.9 as i64)
     println("{}", 'A' as u8)
     println("{}", true as u8)
-    println("{}", (0 - 1) as u64)
+    println("{}", (0 - 1) as% u64)
 }
 "#,
     );

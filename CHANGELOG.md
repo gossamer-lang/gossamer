@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.82.2 - Checked casts, weak captures, definite assignment
+
+- `as` checks that a value fits its target and panics with `cast overflow` when it does not, as `+` panics on overflow: `300 as u8`, `-1 as u64`, `1e20 as i64`, and a NaN cast to an integer all stop the program on every tier, where they wrapped or saturated silently. `as%` is the explicit wrapping cast (`300 as% u8 == 44`), saturating a float; `v.clamp(lo, hi) as T` saturates. The test is compiled only where the operand may not fit.
+- `v.try_into()` between two integer types answers `Ok(v as T)` or an `errors::Error` when `v` does not fit, on every tier. It was accepted by the checker and then failed to run; `try_into()` to a type with no `impl TryFrom` is now `GT0066`.
+- `gos fmt` keeps `as%` together; it wrote `as % u8`.
+- New lint `lossy_cast` (`GL0062`): an `as` that can panic because its operand may not fit, with the explicit spellings in its help. It reports in `gos check`, `gos lint`, the language server, and MCP.
+- A closure may capture weakly: in `[weak o] || ..` the name `o` is, inside the body, the `Option` its weak reference upgrades to. A closure stored in the value it captures, which leaks a reference cycle the runtime does not collect, is reported by the new lint `closure_self_cycle` (`GL0063`) with the weak form in its help.
+- A binding declared without a value (`let mut x: i64`) must be assigned on every path before it is read: a read some path reaches unassigned is `GT0129`. Such a read printed `<void>` on the VM and an undefined value natively.
+- A closure capturing a binding declared without a value reads the value later assigned to it. The VM failed with an uninitialized-value error and native code trapped.
+- A `for` loop over a collection walks the value the collection held when the loop began, on every tier. A body that removed elements skipped the next one, and the VM went out of bounds.
+- `Box::new(x)`, `Arc::new(x)`, and `Rc::new(x)` have the type of `x`. They were left untyped, so `let n: i64 = Box::new("s")` was accepted and a closure reading a boxed value's fields stopped native compilation with an internal error.
+- A program whose `main` locks a mutex it already holds, with no goroutine started, reports the deadlock on the native tiers as the VM does, instead of hanging.
+- `#[x; n]`, `Vec::with_capacity(n)`, and `strings::repeat` past the memory the machine can back panic with `out of memory: cannot allocate N bytes` on every tier, naming the statement, where native code aborted with a core dump, the VM failed internally, and a repeated string was killed by the system while it was filled.
+- A runtime panic raised inside a statement's own allocation or call names that statement's line in debug builds rather than its enclosing block's.
+- The bytecode VM's method and field caches keep the type they were filled for alive, so a type created after another's last value is gone can no longer be served the other type's method or field.
+
 ## 0.82.1 - Const generics in type bodies and field defaults
 
 - A method written in the body of a const-generic type (`struct Ring<const N: usize> { .. fn push(&mut self, v: i64) { .. } }`) reads the type's own `N`, as the same method in an `impl<const N: usize> Ring<N>` block does; it read 0, so an index through `N` went out of bounds.

@@ -390,7 +390,7 @@ pub enum TypeError {
         /// Target type.
         to: String,
     },
-    /// `.into()` was written across an opaque alias boundary that has no
+    /// `.into()` or `.try_into()` was written between two types with no
     /// conversion behind it.
     #[error("no conversion from `{from}` to `{to}`")]
     NoConversion {
@@ -402,6 +402,8 @@ pub enum TypeError {
         /// the target the owned `Vec` of the same element, which copies
         /// with `to_vec()` rather than through a `From` impl.
         borrowed_sequence: bool,
+        /// `true` for `.try_into()`, which needs an `impl TryFrom`.
+        fallible: bool,
     },
     /// `.into()` / `.try_into()` written where nothing says what to
     /// convert to, so the target stays an inference variable.
@@ -1890,24 +1892,9 @@ impl TypeDiagnostic {
                 from,
                 to,
                 borrowed_sequence,
+                fallible,
             } => {
-                if *borrowed_sequence {
-                    out = out.with_help(
-                        "copy the sequence with `.to_vec()`; `.into()` takes the array itself"
-                            .to_string(),
-                    );
-                } else if from == to {
-                    out = out.with_help(format!(
-                        "`.into()` here converts `{to}` to itself and nothing backs it; remove it - the value is already `{to}`"
-                    ));
-                } else {
-                    out = out
-                        .with_help(format!("write `impl From<{from}> for {to}`"))
-                        .with_note(
-                            "an opaque alias converts to and from its own representation with `.into()`; every other pair needs a `From` impl"
-                                .to_string(),
-                        );
-                }
+                out = no_conversion_help(out, from, to, *borrowed_sequence, *fallible);
             }
             TypeError::ConversionTargetUnknown { method } => {
                 out = out
@@ -3413,4 +3400,38 @@ fn literal_overflow_help(literal: &str, ty: &str) -> String {
     } else {
         format!("`{literal}` exceeds the range of `{ty}`")
     }
+}
+
+/// The help and note for `NoConversion`: what spelling converts `from` to
+/// `to`, by the conversion that was asked for.
+fn no_conversion_help(
+    mut out: gossamer_diagnostics::Diagnostic,
+    from: &str,
+    to: &str,
+    borrowed_sequence: bool,
+    fallible: bool,
+) -> gossamer_diagnostics::Diagnostic {
+    if fallible {
+        out = out.with_help(format!("write `impl TryFrom<{from}> for {to}`"))
+                        .with_note(
+                            "`.try_into()` between two integer types is built in; every other pair needs a `TryFrom` impl"
+                                .to_string(),
+                        );
+    } else if borrowed_sequence {
+        out = out.with_help(
+            "copy the sequence with `.to_vec()`; `.into()` takes the array itself".to_string(),
+        );
+    } else if from == to {
+        out = out.with_help(format!(
+                        "`.into()` here converts `{to}` to itself and nothing backs it; remove it - the value is already `{to}`"
+                    ));
+    } else {
+        out = out
+                        .with_help(format!("write `impl From<{from}> for {to}`"))
+                        .with_note(
+                            "an opaque alias converts to and from its own representation with `.into()`; every other pair needs a `From` impl"
+                                .to_string(),
+                        );
+    }
+    out
 }

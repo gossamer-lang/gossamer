@@ -307,9 +307,7 @@ fn take_from(
 /// The process cannot continue without the buffer it asked for; report it the
 /// way the global allocator reports an exhausted heap.
 fn out_of_memory(bytes: usize) -> ! {
-    let layout = std::alloc::Layout::from_size_align(bytes.max(1), 8)
-        .unwrap_or_else(|_| std::alloc::Layout::new::<u64>());
-    std::alloc::handle_alloc_error(layout)
+    crate::c_abi::panic::out_of_memory(bytes)
 }
 
 #[cfg(all(unix, not(any(tsan, miri, fuzzing, target_arch = "wasm32"))))]
