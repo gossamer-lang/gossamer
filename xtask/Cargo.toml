@@ -30,3 +30,4 @@ gossamer-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde-reflection = "0.6"
+sbom-attest = { version = "0.4.1", default-features = false }

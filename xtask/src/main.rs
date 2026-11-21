@@ -22,6 +22,8 @@
 //! - `schema` - regenerate `benchmarks/frontend_parser/schema/blob.json`,
 //!   the frontend blob's schema, and the parser benchmarks' generated AST,
 //!   from the serde types the cache encodes.
+//! - `sbom OUT` - write the release CycloneDX SBOM for the shipped
+//!   packages (`gossamer-cli`, `gossamer-runtime`) to `OUT`.
 
 #![forbid(unsafe_code)]
 
@@ -30,6 +32,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod sbom;
 mod schema;
 
 use anyhow::{Context, Result};
@@ -57,6 +60,7 @@ fn main() -> Result<()> {
             println!("  lint-budget         tally #[allow(...)] sites per crate");
             println!("  audit-allows        list every #[allow(...)] with surrounding context");
             println!("  migrate-struct-constructors <PATH>  rewrite braced struct constructors");
+            println!("  sbom <OUT>          write the release CycloneDX SBOM to OUT");
             Ok(())
         }
         Some(command @ ("docs-stdlib" | "docs-lints" | "docs-diagnostics" | "stdlib-coverage")) => {
@@ -99,6 +103,10 @@ fn main() -> Result<()> {
                 .get(1)
                 .context("migrate-struct-constructors requires a path")?;
             migrate_struct_constructors(Path::new(path))
+        }
+        Some("sbom") => {
+            let out = args.get(1).context("sbom requires an output path")?;
+            sbom::export(&locate_workspace_root()?, Path::new(out))
         }
         Some(other) => {
             eprintln!("xtask: unknown subcommand {other:?}");
