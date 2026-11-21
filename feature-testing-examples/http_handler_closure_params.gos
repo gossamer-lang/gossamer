@@ -97,5 +97,4 @@ fn main() -> Result<(), errors::Error> {
     probe("free", "http://" + free + "/f/j")
     probe("free", "http://" + free + "/f/x")
     process::exit(0)
-    Ok(())
 }

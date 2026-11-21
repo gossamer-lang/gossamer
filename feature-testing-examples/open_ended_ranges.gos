@@ -6,7 +6,6 @@ fn classify(n: i64) -> String {
         ..=-1 => "negative"
         0 => "zero"
         1.. => "positive"
-        _ => "unreachable"
     }
 }
 
@@ -15,7 +14,6 @@ fn band(b: u8) -> i64 {
         ..=63 => 0
         64..=191 => 1
         192.. => 2
-        _ => -1
     }
 }
 
@@ -24,7 +22,6 @@ fn exclusive_open(n: i64) -> String {
         ..0 => "below"
         0..10 => "single-digit"
         10.. => "ten-plus"
-        _ => "unreachable"
     }
 }
 

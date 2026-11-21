@@ -566,15 +566,21 @@ fn the_editor_reports_what_the_command_line_does() {
 /// both (pinned in the command line's own tests); the editor must too.
 #[test]
 fn the_editor_reports_a_warning_beside_a_comptime_failure() {
-    let source = "comptime fn boom() -> i64 { panic(\"no\") }\nconst N: i64 = comptime { boom() }\nfn main() {\n    let x: u8 = 5\n    match x { 0..=255 => println(\"{}\", N), _ => println(\"never\") }\n}\n";
+    let source = "comptime fn boom() -> i64 { panic(\"no\") }\nconst N: i64 = comptime { boom() }\nfn add(a: i64, b: i64) {\n    a + b\n}\nfn main() {\n    add(1, 2)\n    println(\"{}\", N)\n}\n";
     let uri = "file:///comptime_and_warning.gos";
     let server = server_with(uri, source);
-    let lsp = lsp_findings(&diagnostics_from(&server.publish_diagnostics(uri)));
+    let diags = diagnostics_from(&server.publish_diagnostics(uri));
     assert_eq!(
-        lsp,
-        [
-            ("GM0002".to_string(), "warning".to_string()),
-            ("GX0005".to_string(), "error".to_string())
-        ]
+        lsp_findings(&diags),
+        [("GX0005".to_string(), "error".to_string())]
+    );
+    // `lsp_findings` sets the `GL` codes aside, so the checker's warning is
+    // read from the published diagnostics directly.
+    assert!(
+        diags
+            .iter()
+            .any(|diag| diagnostic_code(diag).as_deref() == Some("GL0055")
+                && field_f64(diag, "severity") == Some(2.0)),
+        "{diags:?}"
     );
 }

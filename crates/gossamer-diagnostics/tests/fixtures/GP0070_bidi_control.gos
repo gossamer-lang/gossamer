@@ -1,0 +1,5 @@
+// ERROR: GP0070
+
+fn main() {
+    println("‮admin")
+}

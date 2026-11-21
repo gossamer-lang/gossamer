@@ -335,7 +335,7 @@ pub const STRINGS: StdModule = StdModule {
         StdItem {
             name: "byte_at",
             kind: StdItemKind::Function,
-            doc: "Returns the UTF-8 byte at an index.",
+            doc: "Returns the UTF-8 byte at a byte offset; an offset outside the string's bytes panics.",
         },
         StdItem {
             name: "byte_find",

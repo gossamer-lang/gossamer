@@ -133,6 +133,11 @@ documentation; a run of `//` comments at the very top of a file is the
 module's documentation. Tooling reads these by position. This keeps one
 comment form instead of three (`//`, `///`, `//!`).
 
+A Unicode bidirectional control character (U+202A to U+202E, U+2066 to
+U+2069, U+200E, U+200F) anywhere in the source text, a comment or a literal
+included, is `GP0070`: it reorders how the line displays without changing
+what compiles. A literal spells one as an escape, `"\u{202E}"`.
+
 ### 2.2 Tokens
 
 Four classes: identifiers, keywords, literals, punctuation. The longest
@@ -321,6 +326,9 @@ with its comma, `(a,)`.
 
 A line break before a binary operator never continues an expression, with
 one exception: `|>`, which may begin a line to continue a pipeline.
+
+`return`, `break`, and `continue` at the end of a line end their statement:
+the next line is a statement of its own, never their value.
 
 - An operator that also begins an expression (`&`, `*`, `-`, `<`, `^`, `..`,
   `..=`, a closure's `|`, and `||`) begins a new statement, or a new element
@@ -534,7 +542,9 @@ parameter. String literals have type `String`.
 `char` is a 32-bit Unicode scalar value. A `String` is not indexable by
 `char`; iteration is via `.chars()` (an iterator of `char`) or
 `.bytes()` (an iterator of `u8`). Byte-level substring operations go
-through `.as_bytes()` which returns an owned `Vec<u8>`.
+through `.as_bytes()` which returns an owned `Vec<u8>`. `s.byte_at(i)`
+answers the byte at offset `i` as an `i64`, and an offset outside the
+string's bytes panics, as `s[i]` does past its scalars.
 
 ### 3.3 Collections (built-in generic types)
 
@@ -560,7 +570,10 @@ and Vec is the only sequence type that owns growable storage.
 #### Collection literals
 
 `#[a, b, c]` creates a `Vec<T>`. `[a, b, c]` and `[value; N]` create fixed
-`[T; N]` arrays; `N` must be a compile-time constant. An expected type can
+`[T; N]` arrays; `N` must be a compile-time constant. An index the compiler
+evaluates (a literal, a `const`, or arithmetic on them) past either end of a
+fixed array is `GT0133`. A map literal that spells one constant key twice
+(`{"a": 1, "a": 2}`), or a set literal one element twice, is `GT0137`. An expected type can
 shape either spelling into the other where the shapes agree. The repeat form
 follows the same spelling as the list form: `[value; N]` is a fixed array and
 `#[value; N]` is a `Vec`.
@@ -1516,6 +1529,13 @@ a stored key. Float keys compare by IEEE total order, unlike Rust, which
 has no float keys: `-0.0` and `0.0` are two keys, a NaN key finds itself, and
 a `BTreeMap` orders negatives, `-0.0`, `0.0`, positives, then NaN.
 
+A key type with a hand-written `impl PartialEq` is `GT0138` where the
+container would never call that `eq`: a `Map` or `Set` hashes and compares
+keys structurally, and a `BTreeMap` / `BTreeSet` seats them by `cmp`, which is
+structural unless the type writes its own `impl Ord`. Key such a type by the
+fields its `eq` compares, or give it a `cmp` that answers 0 exactly when `eq`
+is true and key an ordered container.
+
 ---
 
 ## 4. Variables, expressions, statements
@@ -1598,6 +1618,42 @@ For a simple top-level copy, `let value = *reference` is usually the clearest
 spelling. Reference patterns remain useful and uniform when nested, such as
 `let name, &mut count = entry`.
 
+### 4.1a Constants and statics
+
+```
+ConstItem  = "const" Ident ":" Type "=" Expr
+StaticItem = "static" [ "mut" ] Ident ":" Type "=" Expr
+```
+
+A `const` is a value fixed while compiling. An integer `const` or `static`
+initializer is evaluated in its declared type at every step, as the same
+arithmetic would run: a step that overflows, divides by zero, or shifts by an
+amount outside `0..BITS` is `GT0134`
+(`const SPAN: i64 = 1_000_000_000 * 60 * 60 * 24 * 365 * 300`). The wrapping
+operators (`+%`, `*%`), unary `-`, and a signed `MIN / -1` wrap there as they
+do at run time. The same evaluation reaches arithmetic in a function body
+whose operands are literals, `const` items, and immutable bindings a constant
+initializes: an overflow there, a division or remainder by a constant `0`,
+and a non-wrapping `as` of a constant that does not fit its target
+(`300 as u8`) would panic every time the line runs, and are `GT0134` too; a
+constant index past a fixed array's end through such a binding is
+`GT0133`.
+
+A `static` is one cell for the whole program. A `static mut` is read and
+written only inside `unsafe { }` (`GT0132`): every goroutine reaches the cell
+with no lock, so the access site vouches that nothing else touches it at the
+same time. State goroutines share lives in a synchronized `static`:
+
+```gossamer
+use std::sync
+
+static HITS: sync::AtomicI64 = sync::AtomicI64::new(0)
+static mut SETUP_RUNS: i64 = 0
+
+fn record() { HITS.fetch_add(1) }
+fn setup() { unsafe { SETUP_RUNS += 1 } }
+```
+
 ### 4.2 Expressions
 
 Every construct except `let`, `use`, item declarations, and control
@@ -1613,7 +1669,13 @@ let n = {
 
 The control-flow constructs `if`, `match`, `loop`, `while`, `for`,
 `unsafe { ... }`, and `{ ... }` are expressions. `while` and `for`
-evaluate to `()`. `loop` can return a value via `break value;`.
+evaluate to `()`. `loop` can return a value via `break value`; a `loop`
+left only by plain `break`s evaluates to `()`, and one nothing breaks out of
+has type `!`.
+
+A comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`), or comparisons joined by
+`&&` / `||`, written as a statement drops its answer and is `GT0136`: `count == 5` on its own line meant `count = 5`, an
+`assert`, or a condition.
 
 ### 4.3 Reference expressions
 
@@ -1685,8 +1747,8 @@ the type need no `_` (`0..=127` and `128..=255` cover a `u8`; the `char`
 ranges skip the surrogate code points no `char` holds). A guarded arm
 does not count, and a missing span is reported as a range
 (`100..=199`). An arm every value of which earlier unguarded arms already
-match, a `_` after ranges that tile the type included, is the warning
-`GM0002`. An
+match, a `_` after ranges that tile the type included, can never run and is
+the error `GM0002`. An
 inclusive marker requires an upper bound, so bare `..=` and `lo..=` are
 parse errors. A bound is a literal or a primitive integer limit
 (`i64::MIN..=-1`, `128..=u8::MAX`), which stands for its literal; any other
@@ -1738,7 +1800,12 @@ and iterate that.
 
 #### `return`
 
-`return expr;` exits the enclosing function. `return;` returns `()`.
+`return expr` exits the enclosing function. A bare `return`, or one at the
+end of its line, returns `()`. A statement after one that never completes
+(`return`, `break`, `continue`, a call of `panic`, `todo`,
+`unimplemented`, or `unreachable`, or an expression of type `!` such as
+`process::exit(..)`, a `loop` nothing breaks out of, or an `if`
+whose every branch leaves) can never run and is `GT0135`.
 
 #### `arena`
 
@@ -3105,8 +3172,9 @@ An `unsafe { ... }` block evaluates like an ordinary block expression. It
 permits what the compiler cannot check: calling a function declared in an
 `unsafe extern "C"` block (§12), and reading or writing foreign memory
 (`ffi::read`, `ffi::write`, `ffi::View::new`, the `ffi::atomic_*`
-operations). The call site states that its author vouches for it. A
-foreign call outside an `unsafe` block is `GT0097`.
+operations), and reading or writing a `static mut` (§4.1a). The call site
+states that its author vouches for it. A foreign call outside an `unsafe`
+block is `GT0097`, and a `static mut` named outside one is `GT0132`.
 
 `unsafe` is only a block. `unsafe fn`, `unsafe impl`, and `unsafe trait`
 withhold nothing and are rejected with `GP0046`, whose rewrite drops the

@@ -1,0 +1,18 @@
+// A block that only names a place is that place: a method called on
+// `unsafe { XS }` or on `{ v }` writes `XS` or `v`, and binding the block
+// copies the value, as binding the place does. Identical on every tier.
+
+static mut STACK: Vec<i64> = #[1, 2, 3]
+static mut TALLY: Map<String, i64> = {}
+
+fn main() {
+    let popped = unsafe { STACK }.pop()
+    unsafe { STACK }.push(10)
+    unsafe { TALLY }.insert("a", 1)
+    unsafe { TALLY["b"] = 2 }
+    let mut local = #[4, 5]
+    let _ = { local }.pop()
+    let mut copy = unsafe { STACK }
+    copy.push(99)
+    println(f"{popped} {unsafe { STACK }} {unsafe { TALLY.len() }} {local} {copy.len()}")
+}

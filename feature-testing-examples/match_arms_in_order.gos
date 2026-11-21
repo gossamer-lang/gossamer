@@ -1,0 +1,38 @@
+// Specific arms come before a catch-all, so every arm can run. An arm that an
+// earlier arm already covers can never run and is GM0002, as is a catch-all
+// after ranges that cover the whole type.
+
+enum Shape {
+    Circle
+    Square
+    Triangle
+}
+
+fn name(s: Shape) -> String {
+    match s {
+        Shape::Circle => "circle"
+        _ => "other"
+    }
+}
+
+fn band(b: u8) -> i64 {
+    match b {
+        0..=63 => 0
+        64..=191 => 1
+        192..=255 => 2
+    }
+}
+
+fn sign(n: i64) -> String {
+    match n {
+        0 => "zero"
+        1.. => "positive"
+        _ => "negative"
+    }
+}
+
+fn main() {
+    println(f"{name(Shape::Circle)} {name(Shape::Square)} {name(Shape::Triangle)}")
+    println(f"{band(10)} {band(100)} {band(250)}")
+    println(f"{sign(0)} {sign(7)} {sign(-7)}")
+}

@@ -3,7 +3,6 @@ fn classify(n: i64) -> String {
         i64::MIN..=-1 => "neg"
         0 => "zero"
         1..=i64::MAX => "pos"
-        _ => "unreachable"
     }
 }
 
@@ -11,7 +10,6 @@ fn byte(b: u8) -> String {
     match b {
         0..=127 => "ascii"
         128..=u8::MAX => "high"
-        _ => "unreachable"
     }
 }
 

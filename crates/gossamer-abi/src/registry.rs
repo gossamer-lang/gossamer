@@ -2056,7 +2056,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_str_append_u64", (Ptr, I64) -> Ptr, Both, "Append a u64's decimal form onto a growable string in place."),
     rt_vec!("gos_rt_str_as_bytes", (Ptr) -> Ptr, Cranelift, "Return the raw byte data of a String as a HeapU8."),
     rt!("gos_rt_str_as_bytes_view", (Ptr) -> Ptr, Both, "s.as_bytes() for a Vec<u8> compiled code only reads: a view of the string's own bytes holding a share of the string."),
-    rt!("gos_rt_str_byte_at", (Ptr, I64) -> I64, Both, "Return the byte value at the given index in a String."),
+    rt_unwind!("gos_rt_str_byte_at", (Ptr, I64) -> I64, Both, "Return the byte value at the given index in a String; an index outside its bytes panics."),
     rt!("gos_rt_str_byte_find", (Ptr, Ptr) -> I128, Cranelift, "strings::byte_find: Option<i64> of the byte offset of the first substring match."),
     rt!("gos_rt_str_byte_len", (Ptr) -> I64, Both, "Return the UTF-8 byte length of a String."),
     rt!("gos_rt_str_byte_offset", (Ptr, I64) -> I128, Cranelift, "strings::byte_offset: Option<i64> of the byte offset where a scalar index starts."),

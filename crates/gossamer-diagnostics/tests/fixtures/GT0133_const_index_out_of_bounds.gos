@@ -1,0 +1,7 @@
+// ERROR: GT0133
+
+fn main() {
+    let table = [10, 20, 30]
+    println(f"{table[1]}")
+    println(f"{table[5]}")
+}

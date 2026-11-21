@@ -1304,6 +1304,16 @@ impl Lowerer<'_> {
 
     fn lower_expr_plain(&mut self, expr: &AstExpr) -> HirExpr {
         use gossamer_types::TyKind;
+        // A block that only names a place is that place, so a method call or
+        // a write through `unsafe { XS }` reaches `XS`.
+        if let AstExprKind::Block(block) | AstExprKind::Unsafe(block) = &expr.kind
+            && block.stmts.is_empty()
+            && block.kind == gossamer_ast::BlockKind::Plain
+            && let Some(tail) = block.tail.as_deref()
+            && is_place_expr(tail)
+        {
+            return self.lower_expr(tail);
+        }
         if self.recursion_depth >= RECURSION_LIMIT {
             let ty = self.error_ty();
             return HirExpr {
@@ -2897,6 +2907,16 @@ impl Lowerer<'_> {
 
     fn lower_expr_as_block(&mut self, expr: &AstExpr) -> HirBlock {
         if let AstExprKind::Block(block) = &expr.kind {
+            // A body that is one plain or `unsafe` block and nothing else runs
+            // exactly that block, so it lowers as the body itself.
+            if block.stmts.is_empty()
+                && block.kind == gossamer_ast::BlockKind::Plain
+                && let Some(tail) = &block.tail
+                && let AstExprKind::Block(inner) | AstExprKind::Unsafe(inner) = &tail.kind
+                && inner.kind == gossamer_ast::BlockKind::Plain
+            {
+                return self.lower_expr_as_block_inner(tail);
+            }
             return self.lower_block(block, expr.span);
         }
         let lowered = self.lower_expr(expr);
@@ -2908,6 +2928,14 @@ impl Lowerer<'_> {
             tail: Some(Box::new(lowered)),
             ty,
             is_comptime: false,
+        }
+    }
+
+    /// Lowers the block a body's only expression is.
+    fn lower_expr_as_block_inner(&mut self, expr: &AstExpr) -> HirBlock {
+        match &expr.kind {
+            AstExprKind::Unsafe(block) => self.lower_block(block, expr.span),
+            _ => self.lower_expr_as_block(expr),
         }
     }
 
@@ -3605,5 +3633,16 @@ fn collect_hir_bindings(pattern: &HirPat, out: &mut Vec<(Ident, bool, gossamer_t
         | HirPatKind::Literal(_)
         | HirPatKind::Rest
         | HirPatKind::Range { .. } => {}
+    }
+}
+
+/// Whether `expr` names storage: a path, or a field, element, or tuple slot
+/// of one.
+fn is_place_expr(expr: &AstExpr) -> bool {
+    match &expr.kind {
+        AstExprKind::Path(_) => true,
+        AstExprKind::FieldAccess { receiver, .. } => is_place_expr(receiver),
+        AstExprKind::Index { base, .. } => is_place_expr(base),
+        _ => false,
     }
 }

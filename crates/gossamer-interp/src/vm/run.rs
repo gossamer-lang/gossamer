@@ -2124,44 +2124,37 @@ impl Vm {
                                 registers[dst as usize] = index_get(b, i)?;
                             }
                             Op::StrByteAt { dst, recv, idx } => {
-                                // Matches `builtin_str_byte_at`: non-string receiver,
-                                // non-integer index, or out-of-range index all yield 0.
-                                let byte = if let Value::String(s) = &registers[recv as usize] {
-                                    let i = match &registers[idx as usize] {
-                                        Value::Int(n) => *n,
-                                        other => match auto_deref_cell(other) {
-                                            Some(Value::Int(n)) => n,
-                                            _ => -1,
-                                        },
-                                    };
-                                    let bytes = s.as_str().as_bytes();
-                                    if i < 0 || (i as usize) >= bytes.len() {
-                                        0
-                                    } else {
-                                        i64::from(bytes[i as usize])
-                                    }
-                                } else {
-                                    0
+                                let i = match &registers[idx as usize] {
+                                    Value::Int(n) => *n,
+                                    other => match auto_deref_cell(other) {
+                                        Some(Value::Int(n)) => n,
+                                        _ => -1,
+                                    },
                                 };
-                                registers[dst as usize] = Value::Int(byte);
+                                let bytes = match &registers[recv as usize] {
+                                    Value::String(s) => s.as_str().as_bytes(),
+                                    _ => &[],
+                                };
+                                let byte = usize::try_from(i)
+                                    .ok()
+                                    .and_then(|at| bytes.get(at))
+                                    .ok_or_else(|| super::string_byte_oob_panic(i, bytes.len()))?;
+                                registers[dst as usize] = Value::Int(i64::from(*byte));
                             }
                             Op::StrByteAtI64 { dst_i, recv, idx_i } => unsafe {
                                 // Static typing and bytecode validation guarantee the
-                                // register files. Keep the hot path free of bounds checks
-                                // and `Value::Int` allocation.
+                                // register files. Keep the hot path free of register
+                                // bounds checks and `Value::Int` allocation.
                                 let i = *ints.get_unchecked(idx_i as usize);
-                                let byte = match registers.get_unchecked(recv as usize) {
-                                    Value::String(s) => {
-                                        let bytes = s.as_str().as_bytes();
-                                        if i < 0 || (i as usize) >= bytes.len() {
-                                            0
-                                        } else {
-                                            i64::from(*bytes.get_unchecked(i as usize))
-                                        }
-                                    }
-                                    _ => 0,
+                                let bytes = match registers.get_unchecked(recv as usize) {
+                                    Value::String(s) => s.as_str().as_bytes(),
+                                    _ => &[],
                                 };
-                                *ints.get_unchecked_mut(dst_i as usize) = byte;
+                                let byte = usize::try_from(i)
+                                    .ok()
+                                    .and_then(|at| bytes.get(at))
+                                    .ok_or_else(|| super::string_byte_oob_panic(i, bytes.len()))?;
+                                *ints.get_unchecked_mut(dst_i as usize) = i64::from(*byte);
                             },
                             Op::StrByteAtAddI64 {
                                 dst_i,
@@ -2170,19 +2163,17 @@ impl Vm {
                                 idx_i,
                             } => unsafe {
                                 let i = *ints.get_unchecked(idx_i as usize);
-                                let byte = match registers.get_unchecked(recv as usize) {
-                                    Value::String(s) => {
-                                        let bytes = s.as_str().as_bytes();
-                                        if i < 0 || (i as usize) >= bytes.len() {
-                                            0
-                                        } else {
-                                            i64::from(*bytes.get_unchecked(i as usize))
-                                        }
-                                    }
-                                    _ => 0,
+                                let bytes = match registers.get_unchecked(recv as usize) {
+                                    Value::String(s) => s.as_str().as_bytes(),
+                                    _ => &[],
                                 };
-                                *ints.get_unchecked_mut(dst_i as usize) =
-                                    ints.get_unchecked(lhs_i as usize).wrapping_add(byte);
+                                let byte = usize::try_from(i)
+                                    .ok()
+                                    .and_then(|at| bytes.get(at))
+                                    .ok_or_else(|| super::string_byte_oob_panic(i, bytes.len()))?;
+                                *ints.get_unchecked_mut(dst_i as usize) = ints
+                                    .get_unchecked(lhs_i as usize)
+                                    .wrapping_add(i64::from(*byte));
                             },
                             Op::StrLenI64 { dst_i, recv } => unsafe {
                                 let len = match registers.get_unchecked(recv as usize) {

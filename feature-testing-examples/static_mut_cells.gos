@@ -10,24 +10,24 @@ mod nested {
 }
 
 fn record(n: i64) {
-    ITEMS.push(n)
-    TALLY.inc("calls")
-    COUNT += 1
-    nested::HITS.push(format("hit{}", n))
+    unsafe { ITEMS.push(n) }
+    unsafe { TALLY.inc("calls") }
+    unsafe { COUNT += 1 }
+    unsafe { nested::HITS.push(format("hit{}", n)) }
 }
 
 fn main() {
     record(1)
     record(2)
     record(3)
-    println("items: {} len={}", ITEMS, ITEMS.len())
-    println("tally: {}", TALLY.get_or("calls", -1))
-    println("count: {}", COUNT)
-    println("hits: {}", nested::HITS)
-    LABEL = "done"
-    println("label: {}", LABEL)
-    for i in 0..2000 { COUNT += tally(i) }
-    println("hot count: {}", COUNT)
+    unsafe { println("items: {} len={}", ITEMS, ITEMS.len()) }
+    unsafe { println("tally: {}", TALLY.get_or("calls", -1)) }
+    unsafe { println("count: {}", COUNT) }
+    unsafe { println("hits: {}", nested::HITS) }
+    unsafe { LABEL = "done" }
+    unsafe { println("label: {}", LABEL) }
+    for i in 0..2000 { unsafe { COUNT += tally(i) } }
+    unsafe { println("hot count: {}", COUNT) }
     cross_module_cells()
 }
 
@@ -40,17 +40,17 @@ fn tally(i: i64) -> i64 {
 mod left {
     static mut SEED: i64 = 10
     static mut TRAIL: Vec<i64> = #[]
-    pub fn reset() { SEED = 10 }
-    pub fn step() -> i64 { SEED = (SEED * 3 + 1) % 100003; TRAIL.push(SEED); SEED }
-    pub fn seen() -> i64 { TRAIL.len() }
+    pub fn reset() { unsafe { SEED = 10 } }
+    pub fn step() -> i64 { unsafe { SEED = (SEED * 3 + 1) % 100003; TRAIL.push(SEED); SEED } }
+    pub fn seen() -> i64 { unsafe { TRAIL.len() } }
 }
 
 mod right {
     static mut SEED: i64 = 100
     static mut TRAIL: Vec<i64> = #[]
-    pub fn reset() { SEED = 100 }
-    pub fn step() -> i64 { SEED = (SEED * 5 + 2) % 100019; TRAIL.push(SEED); SEED }
-    pub fn seen() -> i64 { TRAIL.len() }
+    pub fn reset() { unsafe { SEED = 100 } }
+    pub fn step() -> i64 { unsafe { SEED = (SEED * 5 + 2) % 100019; TRAIL.push(SEED); SEED } }
+    pub fn seen() -> i64 { unsafe { TRAIL.len() } }
 }
 
 fn cross_module_cells() {

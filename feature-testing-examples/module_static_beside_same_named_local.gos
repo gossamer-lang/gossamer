@@ -8,12 +8,12 @@ mod text {
         static mut LOG: Vec<String> = #[]
 
         pub fn layout(text: String, layout: i64) -> String {
-            MISSES += 1
-            LOG.push(text)
-            f"{text}:{layout}:{MISSES}"
+            unsafe { MISSES += 1 }
+            unsafe { LOG.push(text) }
+            unsafe { f"{text}:{layout}:{MISSES}" }
         }
 
-        pub fn stats() -> (i64, i64) { (MISSES, LOG.len()) }
+        pub fn stats() -> (i64, i64) { unsafe { (MISSES, LOG.len()) } }
     }
 }
 

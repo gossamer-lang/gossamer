@@ -318,14 +318,19 @@ pub(crate) fn builtin_set_insert(args: &[Value]) -> RuntimeResult<Value> {
         return Ok(Value::Bool(false));
     };
     let key = MapKey::from_value(value);
-    // A displaced element is dropped after the registry is released: it may
-    // hold the last handle of another set.
-    let displaced = SET_REGISTRY.with(|r| {
-        r.borrow_mut()
-            .get_mut(&id)
-            .map(|s| s.insert(key, value.clone()))
+    // An element equal to one the set holds leaves the held one in place, as
+    // a compiled set does: with a user `cmp`, equal elements can differ.
+    let added = SET_REGISTRY.with(|r| {
+        r.borrow_mut().get_mut(&id).is_some_and(|s| {
+            if s.contains_key(&key) {
+                false
+            } else {
+                s.insert(key, value.clone());
+                true
+            }
+        })
     });
-    Ok(Value::Bool(matches!(displaced, Some(None))))
+    Ok(Value::Bool(added))
 }
 
 pub(crate) fn builtin_set_remove(args: &[Value]) -> RuntimeResult<Value> {

@@ -1,0 +1,11 @@
+// Map and set literals spell each constant key once. Keys that only look
+// alike are distinct (`"a"` and `"A"`, `1` and `-1`, `(1, 'x')` and
+// `(1, 'y')`), and a key spelled twice is GT0137.
+
+fn main() {
+    let ages = { "ada": 36, "Ada": 37, "alan": 41 }
+    let signs = { 1: "plus", -1: "minus", 0x10: "sixteen" }
+    let grid = { (1, 'x'): 10, (1, 'y'): 20, (2, 'x'): 30 }
+    let letters = #{ 'a', 'b', 'A' }
+    println(f"{ages.len()} {ages["Ada"]} {signs[-1]} {signs[16]} {grid[(1, 'y')]} {letters.len()}")
+}

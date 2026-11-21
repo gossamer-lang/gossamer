@@ -61,7 +61,32 @@ impl<'src> Lexer<'src> {
             return Token::new(TokenKind::Eof, self.span_from(start));
         }
         let kind = self.dispatch(first, start);
+        self.reject_bidi_controls(start);
         Token::new(kind, self.span_from(start))
+    }
+
+    /// Reports each bidirectional control character in the text of the
+    /// token that began at `start`: one reorders how the source displays
+    /// without changing how it compiles.
+    fn reject_bidi_controls(&mut self, start: u32) {
+        let end = self.cursor.offset();
+        let Some(text) = self.cursor.source().get(start as usize..end) else {
+            return;
+        };
+        // Every bidirectional control is encoded with a leading 0xE2 byte.
+        if !text.as_bytes().contains(&0xE2) {
+            return;
+        }
+        for (at, character) in text.char_indices() {
+            if is_bidi_control(character) {
+                let from = start + u32::try_from(at).unwrap_or(u32::MAX);
+                let to = from + u32::try_from(character.len_utf8()).unwrap_or(0);
+                self.diagnostics.push(LexError::BidiControl {
+                    span: Span::new(self.file, from, to),
+                    codepoint: u32::from(character),
+                });
+            }
+        }
     }
 
     /// Dispatches to the appropriate helper based on the first character.
@@ -256,6 +281,17 @@ impl<'src> Lexer<'src> {
     fn span_from(&self, start: u32) -> Span {
         Span::new(self.file, start, self.current_offset())
     }
+}
+
+/// Returns `true` for the Unicode bidirectional embedding, override, and
+/// isolate controls (U+202A..=U+202E, U+2066..=U+2069) and the directional
+/// marks U+200E and U+200F.
+#[must_use]
+pub(crate) fn is_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}'
+    )
 }
 
 /// Returns `true` when `character` is ASCII whitespace.

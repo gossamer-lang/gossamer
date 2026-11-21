@@ -11,11 +11,11 @@ static mut NAMES: Vec<String> = #["first"]
 static mut LOOKUP: Map<String, i64> = {}
 
 fn note(name: String) {
-    NAMES.push(name)
+    unsafe { NAMES.push(name) }
 }
 
 fn main() {
     note("second")
     note("third")
-    println(f"{NAMES.len()} names: {NAMES}")
+    unsafe { println(f"{NAMES.len()} names: {NAMES}") }
 }

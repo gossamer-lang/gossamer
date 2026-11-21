@@ -39,14 +39,14 @@ impl FakeDriver {
         if op == OP_STMT_QUERY {
             let rows = sql::native_out_handle(h)
             sql::native_push_column(rows, "greeting")
-            ROW_PENDING = true
+            unsafe { ROW_PENDING = true }
             return 0
         }
         if op == OP_ROWS_NEXT {
-            if ROW_PENDING {
+            if unsafe { ROW_PENDING } {
                 sql::native_push_value(h, sql::value_text("hello, native driver"))
                 sql::native_row_ready(h)
-                ROW_PENDING = false
+                unsafe { ROW_PENDING = false }
             }
             return 0
         }

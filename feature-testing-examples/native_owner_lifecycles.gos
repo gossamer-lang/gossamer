@@ -6,24 +6,24 @@ static mut KEYS: Set<String> = #{}
 static mut TITLE: Option<String> = None
 fn replace(title: String) {
     for i in 0..100 {
-        ROWS = #[i]
-        VALUES = Map::new()
-        VALUES[title] = #[title]
-        KEYS = #{}
-        KEYS.insert(title)
-        TITLE = Some(title)
+        unsafe { ROWS = #[i] }
+        unsafe { VALUES = Map::new() }
+        unsafe { VALUES[title] = #[title] }
+        unsafe { KEYS = #{} }
+        unsafe { KEYS.insert(title) }
+        unsafe { TITLE = Some(title) }
     }
 }
 fn check_statics() {
     replace("saved")
-    ROWS = ROWS
-    VALUES = VALUES
-    KEYS = KEYS
-    TITLE = TITLE
-    assert_eq(ROWS, #[99])
-    assert_eq(VALUES.get("saved").unwrap(), #["saved"])
-    assert(KEYS.contains("saved"))
-    assert_eq(TITLE.unwrap(), "saved")
+    unsafe { ROWS = ROWS }
+    unsafe { VALUES = VALUES }
+    unsafe { KEYS = KEYS }
+    unsafe { TITLE = TITLE }
+    unsafe { assert_eq(ROWS, #[99]) }
+    unsafe { assert_eq(VALUES.get("saved").unwrap(), #["saved"]) }
+    unsafe { assert(KEYS.contains("saved")) }
+    unsafe { assert_eq(TITLE.unwrap(), "saved") }
 
 }
 

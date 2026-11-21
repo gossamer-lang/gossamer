@@ -697,7 +697,7 @@ pub(crate) fn insert_vec_elem_metas(
         } else {
             return None;
         };
-        let by_address = tcx.is_flat_inline_aggregate(key) || tcx.is_flat_enum_ty(key);
+        let by_address = tcx.elem_is_addressed_aggregate(key) || tcx.is_flat_enum_ty(key);
         Some((symbol, by_address))
     };
 

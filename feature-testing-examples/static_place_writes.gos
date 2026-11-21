@@ -10,27 +10,27 @@ static mut CUR: Catalog = Catalog { locale: "en", count: 0, faces: #[], table: {
 static mut PAIR: (i64, String) = (1, "one")
 static mut GRID: [i64; 3] = [0, 0, 0]
 
-fn bump(i: i64) { LIST[i].units += 1 }
+fn bump(i: i64) { unsafe { LIST[i].units += 1 } }
 
 fn main() {
-    LIST.push(Face { family: "Sans", units: 2048 })
-    LIST.push(Face { family: "Mono", units: 1000 })
-    LIST[0].units = 4096
-    LIST[1].family = "Serif"
+    unsafe { LIST.push(Face { family: "Sans", units: 2048 }) }
+    unsafe { LIST.push(Face { family: "Mono", units: 1000 }) }
+    unsafe { LIST[0].units = 4096 }
+    unsafe { LIST[1].family = "Serif" }
     bump(1)
     bump(1)
-    CUR.count = 3
-    CUR.count = CUR.count * 2 + 1
-    CUR.locale = "fr"
-    CUR.faces.push(Face { family: "x", units: 1 })
-    CUR.faces[0].units = 9
-    CUR.table["a"] = 5
-    CUR.table["a"] += 1
-    PAIR.0 = 2
-    PAIR.1 = "two"
-    GRID[1] = 7
-    GRID[2] = GRID[1] * 3
-    println(f"{LIST[0].family} {LIST[0].units} {LIST[1].family} {LIST[1].units}")
-    println(f"{CUR.locale} {CUR.count} {CUR.faces.len()} {CUR.faces[0].units} {CUR.table["a"]}")
-    println(f"{PAIR.0} {PAIR.1} {GRID[0]} {GRID[1]} {GRID[2]}")
+    unsafe { CUR.count = 3 }
+    unsafe { CUR.count = CUR.count * 2 + 1 }
+    unsafe { CUR.locale = "fr" }
+    unsafe { CUR.faces.push(Face { family: "x", units: 1 }) }
+    unsafe { CUR.faces[0].units = 9 }
+    unsafe { CUR.table["a"] = 5 }
+    unsafe { CUR.table["a"] += 1 }
+    unsafe { PAIR.0 = 2 }
+    unsafe { PAIR.1 = "two" }
+    unsafe { GRID[1] = 7 }
+    unsafe { GRID[2] = GRID[1] * 3 }
+    unsafe { println(f"{LIST[0].family} {LIST[0].units} {LIST[1].family} {LIST[1].units}") }
+    unsafe { println(f"{CUR.locale} {CUR.count} {CUR.faces.len()} {CUR.faces[0].units} {CUR.table["a"]}") }
+    unsafe { println(f"{PAIR.0} {PAIR.1} {GRID[0]} {GRID[1]} {GRID[2]}") }
 }

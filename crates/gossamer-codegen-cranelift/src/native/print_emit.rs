@@ -217,6 +217,12 @@ pub(super) fn emit_per_arg_print(
             // The spelling was taken off the kind above, so a sequence
             // reaching here carries the kind it wraps.
             PrintKind::Seq(_) => unreachable!("the sequence spelling is unwrapped above"),
+            PrintKind::Unit => {
+                let text = intrinsics.intern_string(module, "()")?;
+                let text = intrinsics.static_string_body_ptr(module, builder, text);
+                let fref = module.declare_func_in_func(print_str, builder.func);
+                builder.ins().call(fref, &[text]);
+            }
             PrintKind::StrPtr => {
                 let fref = module.declare_func_in_func(print_str, builder.func);
                 builder.ins().call(fref, &[value]);
@@ -840,6 +846,13 @@ pub(super) fn emit_args_to_concat_string(
             // The spelling was taken off the kind above, so a sequence
             // reaching here carries the kind it wraps.
             PrintKind::Seq(_) => unreachable!("the sequence spelling is unwrapped above"),
+            PrintKind::Unit => {
+                let text = intrinsics.intern_string(module, "()")?;
+                let text = intrinsics.static_string_body_ptr(module, builder, text);
+                let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
+                let fref = module.declare_func_in_func(f, builder.func);
+                builder.ins().call(fref, &[text]);
+            }
             PrintKind::StrPtr => {
                 let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
                 let fref = module.declare_func_in_func(f, builder.func);

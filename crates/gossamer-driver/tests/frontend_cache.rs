@@ -164,14 +164,14 @@ fn scratch(name: &str) -> PathBuf {
 
 #[test]
 fn a_restored_pass_reports_the_warnings_the_first_pass_did() {
-    const WARNS: &str = "fn main() {\n    let x: u8 = 5\n    match x { 0..=255 => println(\"all\"), _ => println(\"never\") }\n}\n";
+    const WARNS: &str = "fn add(a: i64, b: i64) {\n    a + b\n}\nfn main() {\n    add(1, 2)\n}\n";
     let root = scratch("warnings");
     let mut map = SourceMap::new();
     let file = map.add_file("warnings.gos".to_string(), WARNS.to_string());
     let outcome = check_frontend(map.source(file), file);
     assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
     let codes: Vec<&str> = outcome.warnings.iter().map(|w| w.code.as_str()).collect();
-    assert_eq!(codes, ["GM0002"]);
+    assert_eq!(codes, ["GL0055"]);
 
     let key = FrontendCacheKey::new(WARNS, "warnings");
     let checked = outcome.checked;

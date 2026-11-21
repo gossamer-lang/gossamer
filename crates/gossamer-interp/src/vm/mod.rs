@@ -764,6 +764,14 @@ pub(crate) fn index_oob_panic(index: i64, len: usize) -> RuntimeError {
         "vec index out of bounds: the len is {len} but the index is {index}"
     ))
 }
+/// The panic `s.byte_at(i)` reports for an index outside the string's bytes,
+/// worded as the compiled tiers word it.
+pub(crate) fn string_byte_oob_panic(index: i64, len: usize) -> RuntimeError {
+    RuntimeError::Panic(format!(
+        "string byte index out of bounds: the len is {len} but the index is {index}"
+    ))
+}
+
 /// Per-VM free list of register-file `Vec`s. Stack-discipline:
 /// `take_*` pops a Vec sized to the requested length (or
 /// allocates a fresh one when the list is empty); `give_*`

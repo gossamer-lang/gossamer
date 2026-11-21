@@ -1,0 +1,6 @@
+// ERROR: GT0137
+
+fn main() {
+    let ages = {"ada": 36, "alan": 41, "ada": 37}
+    println(f"{ages.len()}")
+}

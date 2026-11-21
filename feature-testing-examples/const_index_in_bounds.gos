@@ -1,0 +1,16 @@
+// Indexes the compiler evaluates (literals, `const` items, and arithmetic on
+// them) reach their elements of a fixed array on every tier; one past the end
+// is GT0133 before the program runs.
+
+const LAST: i64 = 4
+const MIDDLE: i64 = LAST / 2
+
+fn main() {
+    let primes = [2, 3, 5, 7, 11]
+    let names = ["zero", "one", "two"]
+    println(f"{primes[0]} {primes[MIDDLE]} {primes[LAST]} {primes[LAST - 1]}")
+    println(f"{names[2]} {names[1 + 0]}")
+    let mut total = 0
+    for i in 0..5 { total += primes[i] }
+    println(f"total {total}")
+}

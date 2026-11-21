@@ -353,7 +353,6 @@ use std::runtime
 
 fn leave(x: ffi::c_int, ctx: Ptr<ffi::c_void>) -> ffi::c_int {
     process::exit(3)
-    x
 }
 
 fn main() {

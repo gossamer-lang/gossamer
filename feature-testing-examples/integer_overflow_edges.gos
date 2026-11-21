@@ -3,6 +3,9 @@
 // comparisons to surface overflow handling differences between
 // execution modes.
 
+// The difference is computed at run time, where a `u64` below 0 panics.
+fn predecessor(v: u64) -> u64 { v - 1 }
+
 fn main() {
     let math_max_int: i64 = 9223372036854775807
     let max_u64: u64 = 18446744073709551615
@@ -31,8 +34,7 @@ fn main() {
     println("i64 min = {}", e)
     println("i64 min < 0 = {}", e < 0)
 
-    let f: u64 = 0
-    println("u64 zero - 1 (as i64) = {}", (f - 1) as i64)
+    println("u64 zero - 1 (as i64) = {}", predecessor(0) as i64)
 
     // Explicit widening via intermediate
     let g: i32 = 2147483647

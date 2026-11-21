@@ -1,0 +1,42 @@
+// A type whose hand-written `eq` ignores a field keys an ordered container
+// through an `Ord` whose `cmp` agrees with that `eq`, so values `eq` calls
+// equal share one entry; keys wider than one word reach the comparator by
+// address on every tier. A hashed container never calls `eq`, so keying one
+// by such a type is GT0138: key it by the fields `eq` compares instead.
+
+struct Point {
+    x: i64
+    y: i64
+    label: String
+}
+
+impl PartialEq for Point {
+    fn eq(&self, other: Point) -> bool { self.x == other.x && self.y == other.y }
+}
+
+impl Ord for Point {
+    fn cmp(&self, other: Point) -> i64 {
+        if self.x != other.x { self.x - other.x } else { self.y - other.y }
+    }
+}
+
+fn main() {
+    let mut seen = BTreeSet::new()
+    seen.insert(Point { x: 1, y: 2, label: "a" })
+    seen.insert(Point { x: 1, y: 2, label: "b" })
+    seen.insert(Point { x: 0, y: 5, label: "c" })
+    let mut firsts = #[]
+    for p in seen.iter() { firsts.push(p.label) }
+    println(f"{seen.len()} {firsts}")
+
+    let mut owners: BTreeMap<Point, String> = BTreeMap::new()
+    owners.insert(Point { x: 3, y: 3, label: "x" }, "first")
+    owners.insert(Point { x: 3, y: 3, label: "y" }, "second")
+    println(f"{owners.len()} {owners[Point { x: 3, y: 3, label: "z" }]}")
+
+    let mut by_position = #{}
+    for p in #[Point { x: 1, y: 2, label: "a" }, Point { x: 1, y: 2, label: "b" }] {
+        by_position.insert((p.x, p.y))
+    }
+    println(f"{by_position.len()}")
+}

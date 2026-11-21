@@ -1269,13 +1269,12 @@ impl ExhaustivenessDiagnostic {
         use gossamer_diagnostics::{Code, Diagnostic, Location};
         let location = Location::new(self.span.file, self.span);
         let title = format!("{}", self.error);
+        let out = Diagnostic::error(Code(self.error.code()), title.clone());
         let out = match self.error {
-            ExhaustivenessError::UnreachableArm => {
-                Diagnostic::warning(Code(self.error.code()), title.clone())
-            }
-            ExhaustivenessError::NonExhaustive { .. } => {
-                Diagnostic::error(Code(self.error.code()), title.clone())
-            }
+            ExhaustivenessError::UnreachableArm => out.with_help(
+                "delete the arm, or move it above the earlier arm that already matches its values",
+            ),
+            ExhaustivenessError::NonExhaustive { .. } => out,
         };
         out.with_primary(location, title)
     }

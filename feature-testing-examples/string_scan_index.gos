@@ -68,10 +68,11 @@ fn main() {
         long[119] as i64
     )
 
-    // Bytes outside the content read as zero; characters outside it panic,
-    // which the parity fixture for that shape covers separately.
+    // The last byte of a multibyte character is in range; a byte or a
+    // character outside the content panics, which the parity fixtures for
+    // those shapes cover separately.
     let s = "hé"
-    println("oob bytes: {} {} {}", s.byte_at(-1), s.byte_at(3), s.byte_at(99))
+    println("edge bytes: {} {} {}", s.byte_at(0), s.byte_at(1), s.byte_at(s.byte_len() - 1))
 
     // A string built at run time carries the same two index spaces a literal
     // does, whichever tier built it.

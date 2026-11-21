@@ -4,17 +4,17 @@
 static mut STACK: Vec<String> = #[]
 
 fn enter(key: String) {
-    STACK.push(key)
+    unsafe { STACK.push(key) }
 }
 
 fn leave() -> Option<String> {
-    STACK.pop()
+    unsafe { STACK.pop() }
 }
 
 fn main() {
     enter("main")
     enter("dialog")
-    println(f"{STACK.len()} {leave()} {STACK.len()}")
-    let _ = STACK.pop()
-    println(f"{STACK.len()} {STACK.pop()}")
+    unsafe { println(f"{STACK.len()} {leave()} {STACK.len()}") }
+    let _ = unsafe { STACK }.pop()
+    unsafe { println(f"{STACK.len()} {STACK.pop()}") }
 }

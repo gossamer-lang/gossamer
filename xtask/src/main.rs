@@ -1138,6 +1138,12 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "Write `regex::compile(\"…\")` and `sql::statement(\"…\")`. A literal argument is still validated while the program is compiled.",
     ),
     (
+        "GP0070",
+        "Parser",
+        "bidirectional control character in source text",
+        "The source text holds a Unicode bidirectional control character (U+202A to U+202E, U+2066 to U+2069, U+200E, or U+200F), inside a string, a character literal, a comment, or anywhere else. These characters reorder how an editor or a review tool displays the line without changing what compiles, so the code a reader sees is not the code that runs (the Trojan Source attack, CVE-2021-42574). Write the character as an escape inside the literal instead: `\"\\u{202E}\"`.",
+    ),
+    (
         "GT0079",
         "Types",
         "pointer wrapper written",
@@ -1514,6 +1520,48 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "Types",
         "user type written by index",
         "A user type is written by index: `w[0] = 2` where `W` implements `Index`. Its `index` method answers a value, so `w[i]` reads it but names no storage to write. Write the field `index` reads from (`w.items[i] = v`), or give the type a method that sets an element.",
+    ),
+    (
+        "GT0132",
+        "Types",
+        "`static mut` used outside `unsafe`",
+        "A `static mut` is read or written outside an `unsafe { }` block. Every goroutine reaches the one cell with no lock, so two goroutines writing it at once lose updates, and a `Vec`, `Map`, or `String` held there can be torn. The `unsafe` block is the access site vouching that nothing else touches the static at the same time: `unsafe { COUNT += 1 }`. Keep state goroutines share in a synchronized `static` instead: `static COUNT: sync::AtomicI64 = sync::AtomicI64::new(0)` or `sync::Shared`.",
+    ),
+    (
+        "GT0133",
+        "Types",
+        "constant index out of bounds",
+        "An index the compiler can evaluate (a literal, a `const`, an immutable binding a constant initializes, or arithmetic on them) names no element of a fixed-size array: `[10, 20, 30][5]`, or `t[i]` after `let i = 5`. The access would panic every time it runs. Use an index in `0..N` for an array of `N` elements, or a `Vec` and `get(i)` when the length is not fixed.",
+    ),
+    (
+        "GT0134",
+        "Types",
+        "constant arithmetic fails",
+        "Integer arithmetic the compiler can evaluate has no value in its type: an operation overflows, divides by zero, shifts by an amount outside `0..BITS`, or a non-wrapping `as` casts a constant that does not fit (`300 as u8`). A `const` or `static` initializer is evaluated in its declared type at every step, as it would run, so `const SPAN: i64 = 1_000_000_000 * 60 * 60 * 24 * 365 * 300` overflows `i64` at its last multiplication; arithmetic in a body whose operands are literals, constants, and immutable bindings of them is checked the same way, as is any division by a constant `0`. Each would panic every time it runs. Widen the type, change the operands, or use a wrapping operator (`+%`, `*%`, `as%`) where wrapping is meant.",
+    ),
+    (
+        "GT0135",
+        "Types",
+        "unreachable code",
+        "A statement follows one that never completes: `return`, `break`, `continue`, a call of `panic`, `todo`, `unimplemented`, or `unreachable`, or an expression of type `!` such as `process::exit(..)`, a `loop` nothing breaks out of, or an `if` / `match` whose every branch leaves. The later statement can never run. Delete it, or move it before the statement that leaves the block.",
+    ),
+    (
+        "GT0136",
+        "Types",
+        "comparison used as a statement",
+        "A comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`), or comparisons joined by `&&` / `||`, is written as a statement, so its answer is computed and dropped (CWE-482). `count == 5` on its own line almost always meant the assignment `count = 5`, an `assert(count == 5)`, or a condition. Write the one that was meant.",
+    ),
+    (
+        "GT0137",
+        "Types",
+        "duplicate key in a map or set literal",
+        "A map literal spells the same constant key twice, `{\"a\": 1, \"a\": 2}`, or a set literal the same element twice. A map holds one value per key, so the later entry silently replaces the earlier one, and a set holds each element once. Keep one entry for each key.",
+    ),
+    (
+        "GT0138",
+        "Types",
+        "key type compares by a hand-written `eq`",
+        "A `Map` key or `Set` element type is, or holds, a type with a hand-written `impl PartialEq`, and the container never calls that `eq`. A hashed `Map` / `Set` hashes and compares keys structurally, field by field, and a `BTreeMap` / `BTreeSet` seats them by `cmp`, which is structural unless the type writes its own. Either way the container keeps two keys `eq` calls equal. Key on exactly what `eq` compares (a tuple of those fields), or give the type an `impl Ord` whose `cmp` answers 0 exactly when `eq` is true and use a `BTreeMap` / `BTreeSet`.",
     ),
 ];
 

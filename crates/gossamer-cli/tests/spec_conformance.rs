@@ -407,16 +407,34 @@ fn spec_14_unimplemented_macro_rejected() {
 
 #[test]
 fn spec_3_1_debug_overflow_panics_at_the_declared_width() {
+    // The operands reach the operation as arguments, so it runs: constant
+    // operands that overflow are refused while compiling (GT0134).
     let cases = [
-        ("u8_add", "200u8 + 200u8", "add"),
-        ("i8_sub", "-127i8 - 2i8", "subtract"),
-        ("u16_mul", "300u16 * 300u16", "multiply"),
-        ("i32_add", "2147483647i32 + 1i32", "add"),
-        ("i64_add", "9223372036854775807i64 + 1i64", "add"),
-        ("u64_add", "18446744073709551615u64 + 1u64", "add"),
+        ("u8_add", "u8", "200u8", "200u8", "+", "add"),
+        ("i8_sub", "i8", "-127i8", "2i8", "-", "subtract"),
+        ("u16_mul", "u16", "300u16", "300u16", "*", "multiply"),
+        ("i32_add", "i32", "2147483647i32", "1i32", "+", "add"),
+        (
+            "i64_add",
+            "i64",
+            "9223372036854775807i64",
+            "1i64",
+            "+",
+            "add",
+        ),
+        (
+            "u64_add",
+            "u64",
+            "18446744073709551615u64",
+            "1u64",
+            "+",
+            "add",
+        ),
     ];
-    for (name, expression, operation) in cases {
-        let src = format!("fn main() {{ println(\"{{}}\", {expression}) }}\n");
+    for (name, ty, a, b, op, operation) in cases {
+        let src = format!(
+            "fn apply(a: {ty}, b: {ty}) -> {ty} {{ a {op} b }}\nfn main() {{ println(\"{{}}\", apply({a}, {b})) }}\n"
+        );
         let (ok, _stdout, stderr) = run_program(name, &src, &[]);
         assert!(!ok, "debug overflow case {name} must panic");
         assert!(
@@ -438,10 +456,10 @@ fn main() {
 #[test]
 fn spec_3_1_native_profiles_both_check_overflow() {
     let src = r#"
+fn add(a: u8, b: u8) -> u8 { a + b }
+
 fn main() {
-    let a: u8 = 200u8
-    let b: u8 = 200u8
-    println("{}", a + b)
+    println("{}", add(200u8, 200u8))
 }
 "#;
     let (debug_ok, _debug_stdout, debug_stderr) =

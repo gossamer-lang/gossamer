@@ -225,6 +225,13 @@ pub(super) fn lower_intrinsic_call_io_math(
                     other => (other, false),
                 };
                 match kind {
+                    PrintKind::Unit => {
+                        let text = intrinsics.intern_string(module, "()")?;
+                        let text = intrinsics.static_string_body_ptr(module, builder, text);
+                        let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
+                        let fref = module.declare_func_in_func(f, builder.func);
+                        builder.ins().call(fref, &[text]);
+                    }
                     PrintKind::StrPtr => {
                         let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
                         let fref = module.declare_func_in_func(f, builder.func);
@@ -2412,8 +2419,8 @@ pub(super) fn lower_intrinsic_call_io_math(
             if !destination.projection.is_empty() {
                 bail!("native codegen: gos_rt_str_byte_at destination cannot have projections");
             }
-            // Bound the read by the string's byte length: any index outside
-            // `[0, len)` yields 0 without dereferencing past the content.
+            // Bound the read by the string's byte length: an index outside
+            // `[0, len)` calls the shim, which raises the bounds panic.
             // `gos_rt_str_byte_len` is O(1) for header-carrying strings and is
             // null-safe (returns 0 for a null pointer).
             let str_len_fn =
@@ -2454,8 +2461,16 @@ pub(super) fn lower_intrinsic_call_io_math(
                 .jump(done_blk, &[ir::BlockArg::Value(read_val)]);
 
             builder.switch_to_block(oob_blk);
-            let zero = builder.ins().iconst(types::I64, 0);
-            builder.ins().jump(done_blk, &[ir::BlockArg::Value(zero)]);
+            let byte_at_fn = intrinsics.extern_fn(
+                module,
+                "gos_rt_str_byte_at",
+                &[ptr_ty, types::I64],
+                &[types::I64],
+            )?;
+            let byte_at_ref = module.declare_func_in_func(byte_at_fn, builder.func);
+            let raised = builder.ins().call(byte_at_ref, &[ptr, idx_i64]);
+            let raised = builder.inst_results(raised)[0];
+            builder.ins().jump(done_blk, &[ir::BlockArg::Value(raised)]);
 
             builder.switch_to_block(done_blk);
             let value = builder.block_params(done_blk)[0];

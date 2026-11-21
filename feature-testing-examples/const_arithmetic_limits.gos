@@ -1,0 +1,23 @@
+// `const` and `static` integers evaluate in their declared type at every
+// step: values at the edge of the type are accepted, wrapping operators wrap,
+// and a step that overflows is GT0134 before the program runs.
+
+const DAY_NS: i64 = 1_000_000_000 * 60 * 60 * 24
+const YEAR_NS: i64 = DAY_NS * 365
+const CENTURIES: i64 = YEAR_NS * 100 * 2
+const TOP: i64 = 9_223_372_036_854_775_807
+const BOTTOM: i64 = -9_223_372_036_854_775_807 - 1
+const BYTE_MAX: u8 = 200 + 55
+const WRAPPED: u8 = 200 +% 100
+const SCALED: u32 = 70_000 *% 70_000
+const UNSIGNED_TOP: u64 = 18_446_744_073_709_551_615
+const SHIFTED: i64 = 1 << 62
+const REMAINDER: i64 = -7 % 3
+static LIMIT: i64 = YEAR_NS / DAY_NS - 1
+
+fn main() {
+    println(f"{DAY_NS} {YEAR_NS} {CENTURIES}")
+    println(f"{TOP} {BOTTOM}")
+    println(f"{BYTE_MAX} {WRAPPED} {SCALED} {UNSIGNED_TOP}")
+    println(f"{SHIFTED} {REMAINDER} {LIMIT}")
+}

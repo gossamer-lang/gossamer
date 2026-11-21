@@ -5,18 +5,18 @@ static mut NAMES: Map<String, i64> = {}
 static mut WORD: String = ""
 
 fn tables() -> Vec<u64> {
-    if TABLES.is_empty() { TABLES = #[11, 22, 33, 44, 55, 66, 77, 88, 99] }
-    TABLES
+    unsafe { if TABLES.is_empty() { TABLES = #[11, 22, 33, 44, 55, 66, 77, 88, 99] } }
+    unsafe { TABLES }
 }
 
 fn names() -> Map<String, i64> {
-    if NAMES.is_empty() { NAMES = { "a": 1, "b": 2 } }
-    NAMES
+    unsafe { if NAMES.is_empty() { NAMES = { "a": 1, "b": 2 } } }
+    unsafe { NAMES }
 }
 
 fn word() -> String {
-    if WORD.is_empty() { WORD = "static text" + "!" }
-    WORD
+    unsafe { if WORD.is_empty() { WORD = "static text" + "!" } }
+    unsafe { WORD }
 }
 
 fn churn() -> i64 {

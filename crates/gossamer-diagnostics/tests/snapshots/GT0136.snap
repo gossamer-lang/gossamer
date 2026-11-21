@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0136]: A comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`), or comparisons - here
+--- framed ---
+error[GT0136]: A comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`), or comparisons
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

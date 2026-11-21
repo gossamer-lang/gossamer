@@ -220,7 +220,6 @@ fn main() {
         Err(e) => {
             eprintln("[FAIL] starting the service: {}", e)
             process::exit(1)
-            0
         }
     }
     if !await_listener(settings.port) {

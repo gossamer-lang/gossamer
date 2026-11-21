@@ -51,7 +51,7 @@ fn wide_from(code: i64) -> Wide {
 
 // Reaching the static makes this a compiled entry the interpreter calls.
 fn decode(kind: i64, code: i64) -> Option<Event> {
-    LOG.push(kind)
+    unsafe { LOG.push(kind) }
     match kind {
         0 => Some(Event::Themed { theme: theme_from(code) })
         1 => Some(Event::Dragged { drag: code * 10, operation: op_from(code) })
@@ -73,4 +73,4 @@ fn main() {
     println(logged())
 }
 
-fn logged() -> i64 { LOG.len() }
+fn logged() -> i64 { unsafe { LOG.len() } }

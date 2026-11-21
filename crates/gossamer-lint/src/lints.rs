@@ -1094,6 +1094,10 @@ fn lint_no_effect_statement(sf: &SourceFile) -> Vec<Finding> {
                 let StmtKind::Expr { expr, .. } = &stmt.kind else {
                     continue;
                 };
+                if is_comparison(expr) {
+                    // The type checker refuses a comparison statement (GT0136).
+                    continue;
+                }
                 if computes_without_effect(expr) {
                     out.push((
                         expr.span,
@@ -1113,6 +1117,22 @@ fn lint_no_effect_statement(sf: &SourceFile) -> Vec<Finding> {
         });
     });
     out
+}
+
+fn is_comparison(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Binary {
+            op:
+                BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge,
+            ..
+        } => true,
+        ExprKind::Binary {
+            op: BinaryOp::And | BinaryOp::Or,
+            lhs,
+            rhs,
+        } => is_comparison(lhs) && is_comparison(rhs),
+        _ => false,
+    }
 }
 
 /// Builtin methods that answer a new value and write nothing, so a call

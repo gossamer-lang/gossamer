@@ -1240,7 +1240,10 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/let_chains.gos"),
     spec("feature-testing-examples/open_ended_ranges.gos"),
     spec("feature-testing-examples/slice_pattern_fixed_array.gos"),
-    spec("feature-testing-examples/string_byte_at_oob.gos"),
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/string_byte_at_oob.gos")
+    },
     spec("feature-testing-examples/vec_inplace_growth.gos"),
     spec("feature-testing-examples/record_update.gos"),
     spec("feature-testing-examples/nested_struct_record_update.gos"),
@@ -1952,6 +1955,20 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/scheduler_drain.gos"),
     spec("feature-testing-examples/static_mut_basic.gos"),
     spec("feature-testing-examples/static_mut_goroutines.gos"),
+    spec("feature-testing-examples/static_atomic_shared_counter.gos"),
+    spec("feature-testing-examples/static_mut_through_unsafe_block.gos"),
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/string_byte_at_bounds.gos")
+    },
+    spec("feature-testing-examples/const_index_in_bounds.gos"),
+    spec("feature-testing-examples/const_arithmetic_limits.gos"),
+    spec("feature-testing-examples/loop_exits_and_bare_return.gos"),
+    spec("feature-testing-examples/comparison_results_used.gos"),
+    spec("feature-testing-examples/match_arms_in_order.gos"),
+    spec("feature-testing-examples/map_literal_distinct_keys.gos"),
+    spec("feature-testing-examples/bidi_escapes_in_literals.gos"),
+    spec("feature-testing-examples/custom_eq_ordered_keys.gos"),
     spec("feature-testing-examples/closure_goroutine.gos"),
     spec("feature-testing-examples/go_stdlib_spawn.gos"),
     spec("feature-testing-examples/spawn_operand_order.gos"),

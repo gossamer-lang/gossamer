@@ -239,11 +239,10 @@ pub(crate) fn builtin_strings_byte_len(args: &[Value]) -> RuntimeResult<Value> {
 pub(crate) fn builtin_strings_byte_at(args: &[Value]) -> RuntimeResult<Value> {
     let text = args.first().and_then(as_str).unwrap_or("");
     let index = args.get(1).and_then(value_to_int).unwrap_or(-1);
-    let byte = if index < 0 {
-        0
-    } else {
-        strings_std::byte_at(text, index as usize)
-    };
+    let byte = usize::try_from(index)
+        .ok()
+        .and_then(|at| strings_std::byte_at(text, at))
+        .ok_or_else(|| crate::vm::string_byte_oob_panic(index, text.len()))?;
     Ok(Value::Int(i64::from(byte)))
 }
 

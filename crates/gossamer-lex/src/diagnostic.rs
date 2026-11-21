@@ -66,6 +66,15 @@ pub enum LexError {
         /// Span of the offending digit.
         span: Span,
     },
+    /// A bidirectional control character appears in the source text, where
+    /// it reorders what a reader sees without changing what compiles.
+    #[error("bidirectional control character U+{codepoint:04X} in source text")]
+    BidiControl {
+        /// Span of the character.
+        span: Span,
+        /// The character's scalar value.
+        codepoint: u32,
+    },
     /// A numeric literal had no digits after its base prefix or `_` placeholder.
     #[error("numeric literal requires at least one digit after its base prefix")]
     EmptyNumericLiteral {
@@ -89,7 +98,8 @@ impl LexError {
             | Self::BadEscape { span }
             | Self::BadUnicodeEscape { span }
             | Self::BadNumericDigit { span }
-            | Self::EmptyNumericLiteral { span } => span,
+            | Self::EmptyNumericLiteral { span }
+            | Self::BidiControl { span, .. } => span,
         }
     }
 
@@ -109,7 +119,8 @@ impl LexError {
             | Self::BadEscape { span }
             | Self::BadUnicodeEscape { span }
             | Self::BadNumericDigit { span }
-            | Self::EmptyNumericLiteral { span } => {
+            | Self::EmptyNumericLiteral { span }
+            | Self::BidiControl { span, .. } => {
                 *span = Span::new(span.file, span.start + offset, span.end + offset);
             }
         }

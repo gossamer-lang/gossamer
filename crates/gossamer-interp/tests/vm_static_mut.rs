@@ -47,8 +47,8 @@ fn static_mut_write_is_observable_across_functions() {
     let source = r#"
 static mut COUNTER: i64 = 0
 
-fn bump() { COUNTER += 1 }
-fn read() -> i64 { COUNTER }
+fn bump() { unsafe { COUNTER += 1 } }
+fn read() -> i64 { unsafe { COUNTER } }
 
 fn main() {
     println("start = {}", read())
@@ -56,7 +56,7 @@ fn main() {
     bump()
     bump()
     println("after 3 bumps = {}", read())
-    COUNTER = 100
+    unsafe { COUNTER = 100 }
     println("after assign 100 = {}", read())
 }
 "#;
@@ -82,10 +82,10 @@ static mut COUNTER: i64 = 0
 fn bump_n(n: i64) -> i64 {
     let mut i = 0
     while i < n {
-        COUNTER += 1
+        unsafe { COUNTER += 1 }
         i += 1
     }
-    COUNTER
+    unsafe { COUNTER }
 }
 
 fn main() {
@@ -94,7 +94,7 @@ fn main() {
     let h2 = spawn(|| bump_n(1000))
     let _ = h2.join()
     println("mid = {}", mid)
-    println("counter = {}", COUNTER)
+    unsafe { println("counter = {}", COUNTER) }
 }
 "#;
     let out = run_vm_main(source);

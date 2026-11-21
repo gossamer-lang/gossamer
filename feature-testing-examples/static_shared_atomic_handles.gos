@@ -6,14 +6,14 @@ mod effects {
     static HEAD: AtomicI64 = AtomicI64::new(0)
     pub fn perform(effect: Effect) {
         let n = NEXT.fetch_add(1)
-        QUEUE[n] = effect
+        unsafe { QUEUE[n] = effect }
     }
     pub fn take() -> Vec<Effect> {
         let mut out = #[]
         let end = NEXT.load()
         let mut k = HEAD.load()
         while k < end {
-            if let Some(e) = QUEUE.remove(k) { out.push(e) }
+            unsafe { if let Some(e) = QUEUE.remove(k) { out.push(e) } }
             k += 1
         }
         HEAD.store(end)

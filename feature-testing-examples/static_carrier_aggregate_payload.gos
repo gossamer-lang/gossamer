@@ -3,19 +3,19 @@ static mut ACTIVE: Option<Drag> = None
 static mut LAST: Option<i64> = None
 
 fn start(n: i64) {
-    ACTIVE = Some(Drag { id: n as u64, types: #[7, 8, 9], name: f"drag {n}" })
+    unsafe { ACTIVE = Some(Drag { id: n as u64, types: #[7, 8, 9], name: f"drag {n}" }) }
 }
 
 fn move_to(n: i64) {
-    let Some(mut drag) = ACTIVE else {
+    let Some(mut drag) = unsafe { ACTIVE } else {
         return
     }
     drag.types.push(n as u64)
-    ACTIVE = Some(drag)
+    unsafe { ACTIVE = Some(drag) }
 }
 
 fn show() {
-    match ACTIVE {
+    match unsafe { ACTIVE } {
         Some(d) => println(f"{d.id} {d.types.len()} {d.name}")
         None => println("none")
     }
@@ -23,13 +23,13 @@ fn show() {
 
 fn main() {
     for n in 0..3 {
-        LAST = Some(n)
+        unsafe { LAST = Some(n) }
         start(n)
         move_to(n)
         show()
     }
-    println(f"last {LAST}")
-    ACTIVE = None
+    unsafe { println(f"last {LAST}") }
+    unsafe { ACTIVE = None }
     show()
     start(9)
     show()

@@ -12,6 +12,9 @@ use std::env
 use std::fs
 use std::path
 
+// The sum is computed at run time, where a `u8` result past 255 panics.
+fn doubled(v: u8) -> u8 { v + v }
+
 fn main() -> Result<(), errors::Error> {
     // [u8] literal: accumulation must run at 64-bit width even
     // though `sum` infers as u8 (200+200+60+4 = 464, not 208).
@@ -37,8 +40,7 @@ fn main() -> Result<(), errors::Error> {
     println("300 as u8 = {}", x as% u8)
     let y = 200
     println("200 as i8 = {}", y as% i8)
-    let z: u8 = 200
-    println("u8 200+200 = {}", z + z)
+    println("u8 200+200 = {}", doubled(200))
 
     // Float -> int saturates at i64 width, no narrow mask.
     let f = 300.7

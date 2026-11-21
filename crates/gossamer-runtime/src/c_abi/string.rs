@@ -2375,19 +2375,18 @@ pub unsafe extern "C" fn gos_rt_i64_chars(n: i64) -> *mut GosVec {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_str_byte_at(s: *const c_char, i: i64) -> i64 {
-    // Bare (no `ffi_entry!`): byte access is a generated-code primitive, is
-    // panic-free, and commonly executes once per input byte. Wrapping each
-    // read in `catch_unwind` and an allocation-registry lock made parsers pay
-    // synchronization overhead in their innermost loop.
-    if s.is_null() || i < 0 {
-        return 0;
+pub unsafe extern "C-unwind" fn gos_rt_str_byte_at(s: *const c_char, i: i64) -> i64 {
+    // Bare (no `ffi_entry!`): byte access is a generated-code primitive that
+    // commonly executes once per input byte, and its one fault is the bounds
+    // panic raised here, which unwinds to the goroutine as `s[i]`'s does.
+    if s.is_null() {
+        crate::c_abi::panic::panic_oob_text("string byte index", i, 0);
     }
     // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract); non-null, checked
     // above.
     let len = unsafe { typed_str_len(s) };
-    if i as usize >= len {
-        return 0;
+    if i < 0 || i as usize >= len {
+        crate::c_abi::panic::panic_oob_text("string byte index", i, len as i64);
     }
     // SAFETY: `i` lies in `[0, len)`, so the byte at offset `i` is within the
     // compiler-typed string's content bytes.

@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0137]: A map literal spells the same constant key twice, `{"a": 1, - here
+--- framed ---
+error[GT0137]: A map literal spells the same constant key twice, `{"a": 1,
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

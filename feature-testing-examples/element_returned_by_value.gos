@@ -31,13 +31,13 @@ impl Face {
 static mut FACES: Vec<Face> = #[]
 
 fn ensure() {
-    if FACES.len() > 0 { return }
-    FACES.push(Face { name: "static", data: #[7u8, 8u8, 9u8], n: 4 })
+    unsafe { if FACES.len() > 0 { return } }
+    unsafe { FACES.push(Face { name: "static", data: #[7u8, 8u8, 9u8], n: 4 }) }
 }
 
 fn static_face(i: i64) -> Face {
     ensure()
-    let f = FACES[i]
+    let f = unsafe { FACES }[i]
     f
 }
 

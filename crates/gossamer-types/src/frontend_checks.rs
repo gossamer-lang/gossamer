@@ -12,7 +12,7 @@ use gossamer_diagnostics::Diagnostic;
 use gossamer_resolve::{Resolutions, ResolveDiagnostic};
 
 use crate::context::TyCtxt;
-use crate::exhaustiveness::ExhaustivenessError;
+use crate::exhaustiveness::ExhaustivenessDiagnostic;
 use crate::table::TypeTable;
 
 /// What [`check_resolved_unit`] found.
@@ -97,12 +97,11 @@ pub fn check_resolved_unit(
     let exhaustive = crate::check_exhaustiveness(sf, resolutions, &table, tcx);
     observer.phase_done(CheckPhase::Exhaustiveness);
     if !parse_failed {
-        for diag in &exhaustive {
-            match diag.error {
-                ExhaustivenessError::NonExhaustive { .. } => fatal.push(diag.to_diagnostic()),
-                ExhaustivenessError::UnreachableArm => advisory.push(diag.to_diagnostic()),
-            }
-        }
+        fatal.extend(
+            exhaustive
+                .iter()
+                .map(ExhaustivenessDiagnostic::to_diagnostic),
+        );
     }
 
     if !parse_failed {

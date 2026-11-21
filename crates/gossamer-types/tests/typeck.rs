@@ -957,7 +957,7 @@ fn mutable_reference_respects_static_mutability() {
         immutable.diagnostics
     );
 
-    let mutable = run("static mut X: i64 = 1\nfn main() { let p = &mut X }\n");
+    let mutable = run("static mut X: i64 = 1\nfn main() { unsafe { let p = &mut X } }\n");
     assert!(mutable.diagnostics.is_empty(), "{:?}", mutable.diagnostics);
 }
 

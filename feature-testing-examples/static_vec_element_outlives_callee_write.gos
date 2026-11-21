@@ -5,13 +5,13 @@ struct Face { name: String, tables: Map<i64, i64>, sizes: Vec<i64> }
 
 impl Face {
     fn count_after_wipe(&self) -> i64 {
-        FACES.clear()
+        unsafe { FACES.clear() }
         self.tables.len() + self.sizes.len()
     }
 
     fn name_after_growth(&self) -> String {
         for i in 0..64 {
-            FACES.push(face(f"extra{i}"))
+            unsafe { FACES.push(face(f"extra{i}")) }
         }
         self.name
     }
@@ -24,7 +24,7 @@ fn face(name: String) -> Face {
 }
 
 fn sum_after_wipe(f: Face) -> i64 {
-    FACES.clear()
+    unsafe { FACES.clear() }
     let mut total = 0
     for (k, v) in f.tables { total += k + v }
     for s in f.sizes { total += s }
@@ -32,14 +32,14 @@ fn sum_after_wipe(f: Face) -> i64 {
 }
 
 fn main() {
-    FACES.push(face("first"))
-    println(FACES[0].count_after_wipe())
-    println(FACES.len())
+    unsafe { FACES.push(face("first")) }
+    unsafe { println(FACES[0].count_after_wipe()) }
+    unsafe { println(FACES.len()) }
 
-    FACES.push(face("second"))
-    println(FACES[0].name_after_growth())
-    println(FACES.len())
+    unsafe { FACES.push(face("second")) }
+    unsafe { println(FACES[0].name_after_growth()) }
+    unsafe { println(FACES.len()) }
 
-    println(sum_after_wipe(FACES[1]))
-    println(FACES.len())
+    unsafe { println(sum_after_wipe(FACES[1])) }
+    unsafe { println(FACES.len()) }
 }

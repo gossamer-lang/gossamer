@@ -19,32 +19,32 @@ fn record(items: Vec<Item>) {
     for item in items {
         guard.lock()
         defer guard.unlock()
-        COUNT += item.weight
-        MARK = item.name[0]
+        unsafe { COUNT += item.weight }
+        unsafe { MARK = item.name[0] }
     }
-    ON = !ON
-    SCALE *= 2.0
-    SMALL = 7
+    unsafe { ON = !ON }
+    unsafe { SCALE *= 2.0 }
+    unsafe { SMALL = 7 }
 }
 
 fn hot(n: i64) -> i64 {
     let mut acc = 0
     for i in 0..n {
-        acc += COUNT + i
-        COUNT += 1
+        unsafe { acc += COUNT + i }
+        unsafe { COUNT += 1 }
     }
-    if ON {
+    if unsafe { ON } {
         acc += 1000
     }
-    if MARK == 'z' {
+    if unsafe { MARK } == 'z' {
         acc += 2000
     }
-    acc + (SCALE * 10.0) as i64 + SMALL as i64
+    unsafe { acc + (SCALE * 10.0) as i64 + SMALL as i64 }
 }
 
 fn main() {
     println(hot(10))
     record(#[Item { name: "apple", weight: 5 }, Item { name: "zest", weight: 7 }])
     println(hot(10))
-    println(f"{COUNT} {SCALE} {ON} {MARK} {SMALL}")
+    unsafe { println(f"{COUNT} {SCALE} {ON} {MARK} {SMALL}") }
 }

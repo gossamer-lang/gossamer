@@ -11,8 +11,8 @@ static mut SEED: i64 = 123456789
 fn next() -> i64 {
     // Keep the arithmetic in range so this JIT fixture is independent of the
     // debug-checked versus release-wrapping profile contract.
-    SEED = (SEED * 48271 + 1) % 2147483647
-    SEED
+    unsafe { SEED = (SEED * 48271 + 1) % 2147483647 }
+    unsafe { SEED }
 }
 
 fn main() {

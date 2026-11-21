@@ -478,7 +478,8 @@ impl<'a> Builder<'a> {
         );
         // An aggregate crosses the comparator's boundary by the address of
         // its slots, a node or a scalar by the word that names it.
-        let by_address = self.tcx.is_flat_inline_aggregate(elem) || self.tcx.is_flat_enum_ty(elem);
+        let by_address =
+            self.tcx.elem_is_addressed_aggregate(elem) || self.tcx.is_flat_enum_ty(elem);
         let unit_ty = self.tcx.unit();
         let dest = self.fresh(unit_ty);
         self.emit_assign(

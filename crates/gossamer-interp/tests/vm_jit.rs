@@ -551,7 +551,7 @@ fn jit_filters_are_applied_per_vm_when_artifact_is_reused() {
 #[test]
 fn writable_static_artifacts_are_not_reused_between_vms() {
     let _g = GosJitGuard::new();
-    let source = "static mut CACHE_COUNTER: i64 = 0i64\nfn static_tick(n: i64) -> i64 { CACHE_COUNTER += 1i64\nif n == 0i64 { CACHE_COUNTER } else { static_tick(n - 1i64) } }\nfn main() -> i64 { static_tick(4i64) }\n";
+    let source = "static mut CACHE_COUNTER: i64 = 0i64\nfn static_tick(n: i64) -> i64 { unsafe { CACHE_COUNTER += 1i64\nif n == 0i64 { CACHE_COUNTER } else { static_tick(n - 1i64) } } }\nfn main() -> i64 { static_tick(4i64) }\n";
     let (first, _) = build_vm(source);
     warm_up(&first, "static_tick", &[Value::Int(8)]);
     assert_eq!(first.jit_metrics().compile_attempts, 1);
