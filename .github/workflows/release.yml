@@ -464,12 +464,16 @@ jobs:
           prepare: |
             pkg install -y bash git cmake gmake pkgconf curl
             curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "$RUSTUP_TOOLCHAIN"
+          # The action copies the working directory back out of the VM when
+          # the step ends, so the build writes outside it: only the sources
+          # and the package cross back, not gigabytes of build products.
           run: |
             . "$HOME/.cargo/env"
+            export CARGO_TARGET_DIR="$HOME/gos-target"
             cargo build --release --bin gos
             BASE="gos-${VERSION}-freebsd-x86_64"
             mkdir "$BASE"
-            cp target/release/gos target/release/libgossamer_runtime.a "$BASE/"
+            cp "$CARGO_TARGET_DIR/release/gos" "$CARGO_TARGET_DIR/release/libgossamer_runtime.a" "$BASE/"
             cp README.md LICENSE scripts/install.sh "$BASE/"
             chmod +x "$BASE/install.sh"
             tar -czf "${BASE}.tar.gz" "$BASE"
