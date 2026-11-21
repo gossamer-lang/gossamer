@@ -510,11 +510,7 @@ jobs:
             -exec mv {} release/ \;
 
       - name: Generate SBOM (CycloneDX)
-        uses: anchore/sbom-action@v0
-        with:
-          path: .
-          format: cyclonedx-json
-          output-file: release/gossamer-sbom.cdx.json
+        run: cargo run --locked -p xtask -- sbom release/gossamer-sbom.cdx.json
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3

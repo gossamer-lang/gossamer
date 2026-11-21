@@ -3452,6 +3452,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sbom-attest"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9df401d179f3e803c354ca8e9a5b737edb652101a26c87d3b73e6cb50226f441"
+dependencies = [
+ "anyhow",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4572,6 +4583,7 @@ dependencies = [
  "gossamer-resolve",
  "gossamer-std",
  "gossamer-types",
+ "sbom-attest",
  "serde",
  "serde-reflection",
  "serde_json",
