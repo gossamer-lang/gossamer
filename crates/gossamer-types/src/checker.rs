@@ -28,9 +28,9 @@ fn qualified_type_name(module_path: &[String], name: &str) -> String {
 
 use gossamer_ast::{
     ArrayExpr, BinaryOp, Block, ClosureParam, Expr, ExprKind, FieldPattern, FnDecl, FnParam,
-    GenericArg as AstGenericArg, ImplDecl, ImplItem, Item, ItemKind, Literal, MatchArm, NodeId,
-    Pattern, PatternKind, SourceFile, Stmt, StmtKind, StructBody, TraitItem, Type as AstType,
-    TypeKind as AstTypeKind, TypePath, UnaryOp, Visibility,
+    GenericArg as AstGenericArg, ImplDecl, ImplItem, Item, ItemKind, Label, Literal, MatchArm,
+    NodeId, Pattern, PatternKind, SourceFile, Stmt, StmtKind, StructBody, TraitItem,
+    Type as AstType, TypeKind as AstTypeKind, TypePath, UnaryOp, Visibility,
 };
 use gossamer_lex::Span;
 use gossamer_resolve::{DefId, FloatWidth, IntWidth, PrimitiveTy, Resolution, Resolutions};
@@ -41,6 +41,19 @@ use crate::infer::{InferCtxt, UnifyError};
 use crate::printer::render_ty;
 use crate::table::TypeTable;
 use crate::ty::{FloatTy, FnSig, IntTy, Mutbl, Ty, TyKind};
+
+/// A loop the checker is inside, as `break` statements see it.
+struct LoopFrame {
+    /// The loop's label, without the apostrophe.
+    label: Option<String>,
+    /// The break-value type of a `loop`; `None` for `while` and `for`.
+    break_ty: Option<Ty>,
+    /// Whether a `break value` targeted it, which leaves the value's type
+    /// (possibly still an unresolved literal variable) as the loop's type.
+    value_break: bool,
+    /// Whether any `break` targeted it, so the loop can complete.
+    exited: bool,
+}
 
 /// Runs type inference on `source` using the name-resolution output in
 /// `resolutions` and the shared type interner `tcx`.
@@ -121,6 +134,8 @@ impl TypeChecker<'_> {
         self.check_deferred_adt_bounds();
         self.check_deferred_type_mismatches();
         self.check_deferred_conversion_targets();
+        self.check_deferred_hash_keys();
+        self.check_deferred_const_exprs();
         self.check_deferred_into_conversions();
         self.check_deferred_try_into_conversions();
         self.check_deferred_try_conversions();
@@ -877,14 +892,11 @@ struct TypeChecker<'a> {
     /// declared initializer, which a user body may not write, so the
     /// assign check keys off this to let those through.
     current_fn_name: Option<String>,
-    /// Per-enclosing-`loop` break-value type var plus whether any value
-    /// break fired. A `loop` pushes `(fresh_var, false)`; each `break value`
-    /// inside unifies its value with the var and sets the flag, so `let x =
-    /// loop { break v }` infers `x` as `v`'s type. The flag distinguishes a
-    /// value break whose type is still an unresolved (e.g. integer-literal)
-    /// var from a loop with no value break at all - the former yields the
-    /// var (it defaults later), the latter stays divergent (`never`).
-    loop_break_tys: Vec<(Ty, bool)>,
+    /// One frame per enclosing `loop`, `while`, and `for`, innermost last.
+    /// A `break` marks the frame its label names (the innermost without
+    /// one); a `break value` also unifies its value with a `loop` frame's
+    /// break type, so `let x = loop { break v }` infers `x` as `v`'s type.
+    loop_frames: Vec<LoopFrame>,
     /// Declared return types of non-generic `impl` methods, keyed by
     /// `(self type name, method name, arity)`. When a method-call
     /// receiver resolves to that Adt, the call types as the declared
@@ -1034,6 +1046,22 @@ struct TypeChecker<'a> {
     /// so it is read here rather than at run time: a `const` is a
     /// compile-time constant, and naming one as a length resolves to its value.
     const_int_values: HashMap<gossamer_resolve::DefId, u128>,
+    /// Each integer `const` item's initializer and declared type, which
+    /// constant expressions naming it evaluate.
+    const_int_exprs: HashMap<gossamer_resolve::DefId, (Expr, IntTy)>,
+    /// Values of immutable bindings a constant initializes, keyed by the
+    /// binding's node.
+    local_int_consts: HashMap<NodeId, i128>,
+    /// Body expressions whose constant operands are evaluated once their
+    /// type settles (GT0134).
+    deferred_const_exprs: Vec<Expr>,
+    /// Spans GT0134 already reported, so a nested expression faults once.
+    reported_const_faults: HashSet<(u32, u32)>,
+    /// Hashed `Map` / `Set` types met while checking, with a span each, whose
+    /// key types are checked once inference settles.
+    deferred_hash_keys: Vec<(Ty, Span)>,
+    /// The container types already in [`Self::deferred_hash_keys`].
+    noted_hashed_containers: HashSet<Ty>,
     /// Declared mutability of `static` items, keyed by `DefId`, so place
     /// mutability checks treat `static` and `static mut` like their local
     /// binding counterparts.
@@ -1388,7 +1416,7 @@ impl<'a> TypeChecker<'a> {
             method_arg_sigs: HashMap::new(),
             current_fn_ret: None,
             current_fn_name: None,
-            loop_break_tys: Vec::new(),
+            loop_frames: Vec::new(),
             method_ret_types: HashMap::new(),
             method_param_types: HashMap::new(),
             generic_method_ret_types: HashMap::new(),
@@ -1427,6 +1455,12 @@ impl<'a> TypeChecker<'a> {
             enum_tys: HashMap::new(),
             const_tys: HashMap::new(),
             const_int_values: HashMap::new(),
+            const_int_exprs: HashMap::new(),
+            deferred_hash_keys: Vec::new(),
+            local_int_consts: HashMap::new(),
+            deferred_const_exprs: Vec::new(),
+            reported_const_faults: HashSet::new(),
+            noted_hashed_containers: HashSet::new(),
             static_mutability: HashMap::new(),
             alias_targets: HashMap::new(),
             alias_expanding: std::collections::HashSet::new(),
@@ -5359,8 +5393,10 @@ fn render_ast_type(ty: &gossamer_ast::Type) -> String {
 // The checker's methods, by responsibility.
 mod big_integers;
 mod calls;
+mod const_eval;
 mod deferred;
 mod foreign;
+mod hash_keys;
 mod items;
 mod methods;
 mod operators;

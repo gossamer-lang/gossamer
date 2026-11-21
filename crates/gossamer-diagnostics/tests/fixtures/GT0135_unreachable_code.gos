@@ -1,0 +1,15 @@
+// ERROR: GT0135
+
+fn check(n: i64) {
+    if n > 100 {
+        println("big")
+        return
+    }
+    println("ok")
+    return
+    println("checked")
+}
+
+fn main() {
+    check(1)
+}

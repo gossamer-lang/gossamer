@@ -402,6 +402,10 @@ fn main() {
 - `select { Some(v) = rx.recv() => .., None = rx.recv() => .., default => .. }`
   multiplexes (a receive answers `Option<T>`; a bare name binds it whole);
   `time::after(Duration::from_millis(n))` is a timeout arm.
+- Global state goroutines share is a synchronized `static`
+  (`static HITS: sync::AtomicI64 = sync::AtomicI64::new(0)`). A `static mut`
+  is read and written only inside `unsafe { }` (GT0132), where the access
+  vouches that nothing else touches it at the same time.
 - `std::sync` has `Mutex`, `RwLock`, atomics, `WaitGroup`, `Once`, and
   `Shared<i64>`, one integer under a lock: read-modify-write it with
   `x.update(|n| n + 1)`, never `x.set(x.get() + 1)`, which loses concurrent

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.84.0 - Compile-time refusals for unsafe statics, dead code, and constant errors
+
+- A `static mut` is read and written only inside `unsafe { }` (`GT0132`), where any goroutine reached it with no lock and concurrent writes were lost. Shared state belongs in a synchronized `static` such as `sync::AtomicI64`.
+- A constant index past either end of a fixed array (`[10, 20, 30][5]`, or `t[i]` after `let i = 5`) is `GT0133`, where it compiled and panicked every time it ran.
+- A `const` or `static` integer initializer that overflows its declared type, divides by zero, or shifts out of range is `GT0134`, where the VM failed to load the program and native code printed a wrapped value. Arithmetic in a function body whose operands are literals, constants, or immutable bindings of them is checked the same way, as are a division by a constant `0` and `300 as u8`, each of which panicked every time it ran.
+- A statement after one that never completes (`return`, `break`, `continue`, `panic(..)`, `todo(..)`, `process::exit(..)`, or a branch whose every arm leaves) is `GT0135`.
+- `return` at the end of a line ends the statement, as `break` does, where it took the next line as its value and ran it: `return` followed by `println("x")` printed `x`.
+- A `loop` left only by plain `break`s has type `()`, so code after it type-checks as reachable; `break 'label` marks the labelled loop.
+- A comparison written as a statement (`count == 5`, `a == 1 && b == 2`) is `GT0136`, where it was a lint warning.
+- A `match` arm an earlier arm already covers, a `_` after a catch-all or after ranges that tile the type included, is the error `GM0002`, where it was a warning.
+- A map literal that spells one constant key twice (`{"a": 1, "a": 2}`), or a set literal one element twice, is `GT0137`, where the later entry silently replaced the earlier one.
+- A Unicode bidirectional control character (U+202A to U+202E, U+2066 to U+2069, U+200E, U+200F) anywhere in the source text is `GP0070` (Trojan Source, CVE-2021-42574); a literal spells one as an escape.
+- A `Map` key or `Set` element type with a hand-written `PartialEq` is `GT0138` where the container never calls it, where a set kept two values `eq` called equal; an ordered container whose key type writes an `Ord` that agrees with `eq` is accepted.
+- A `BTreeMap` key or `BTreeSet` element wider than one word with its own `cmp` works natively, where the first comparison faulted.
+- A method called on a block that only names a place (`unsafe { XS }.pop()`, `{ v }.pop()`) writes that place on every tier, where the VM popped a copy of a static and native code popped the static.
+- `s.byte_at(i)` with an offset outside the string's bytes panics with `string byte index out of bounds` on every tier, where it answered 0.
+- Inserting into a `BTreeSet` an element its `cmp` calls equal to one already held keeps the held one on the VM, as compiled code does, where the VM replaced it.
+- The JIT prints `()` for a unit value, where it printed `0`; a `loop` left by a plain `break` prints `()` natively, where it printed an arbitrary number.
+- `term::resized()` keeps the size it last saw in one atomic word, so goroutines calling it at once never tear it.
+
 ## 0.83.0 - Decimal, IndexMap and BitSet, big integer operators, backtraces
 
 - `math::Decimal`, an exact decimal number (`0.1 + 0.2 == 0.3`): `Decimal::parse`, `Decimal::from_i64`, `+ - * /`, unary `-`, comparison and ordering, `round` and `div_scaled` rounding half to even, `abs`, `is_zero`, `to_f64`; `/` keeps 28 digits after the point.

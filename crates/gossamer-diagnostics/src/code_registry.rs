@@ -843,6 +843,17 @@ pub const REGISTRY: &[(&str, &str)] = &[
             standalone `impl Debug for T { fn fmt(&self) -> String { .. } }`.",
     ),
     (
+        "GP0070",
+        "The source text holds a Unicode bidirectional control character\n\
+            (U+202A to U+202E, U+2066 to U+2069, U+200E, or U+200F), inside a\n\
+            string, a character literal, a comment, or anywhere else. These\n\
+            characters reorder how an editor or a review tool displays the\n\
+            line without changing what compiles, so the code a reader sees is\n\
+            not the code that runs (the Trojan Source attack, CVE-2021-42574).\n\
+            Write the character as an escape inside the literal instead:\n\
+            `\"\\u{202E}\"`.",
+    ),
+    (
         "GR0001",
         "A name used in source could not be resolved to a declaration.\n\
                      Check the spelling, whether a `use` brings the name into scope,\n\
@@ -2015,6 +2026,79 @@ pub const REGISTRY: &[(&str, &str)] = &[
             `Index`. Its `index` method answers a value, so `w[i]` reads it but\n\
             names no storage to write. Write the field `index` reads from\n\
             (`w.items[i] = v`), or give the type a method that sets an element.",
+    ),
+    (
+        "GT0132",
+        "A `static mut` is read or written outside an `unsafe { }` block.\n\
+            Every goroutine reaches the one cell with no lock, so two\n\
+            goroutines writing it at once lose updates, and a `Vec`, `Map`, or\n\
+            `String` held there can be torn. The `unsafe` block is the access\n\
+            site vouching that nothing else touches the static at the same\n\
+            time: `unsafe { COUNT += 1 }`. Keep state goroutines share in a\n\
+            synchronized `static` instead: `static COUNT: sync::AtomicI64 =\n\
+            sync::AtomicI64::new(0)` or `sync::Shared`.",
+    ),
+    (
+        "GT0133",
+        "An index the compiler can evaluate (a literal, a `const`, an\n\
+            immutable binding a constant initializes, or arithmetic on them)\n\
+            names no element of a fixed-size array: `[10, 20, 30][5]`, or\n\
+            `t[i]` after `let i = 5`. The access would panic every time it\n\
+            runs. Use an index in `0..N` for an array of `N` elements, or a\n\
+            `Vec` and `get(i)` when the length is not fixed.",
+    ),
+    (
+        "GT0134",
+        "Integer arithmetic the compiler can evaluate has no value in its\n\
+            type: an operation overflows, divides by zero, shifts by an amount\n\
+            outside `0..BITS`, or a non-wrapping `as` casts a constant that\n\
+            does not fit (`300 as u8`). A `const` or `static` initializer is\n\
+            evaluated in its declared type at every step, as it would run, so\n\
+            `const SPAN: i64 = 1_000_000_000 * 60 * 60 * 24 * 365 * 300`\n\
+            overflows `i64` at its last multiplication; arithmetic in a body\n\
+            whose operands are literals, constants, and immutable bindings of\n\
+            them is checked the same way, as is any division by a constant\n\
+            `0`. Each would panic every time it runs. Widen the type, change\n\
+            the operands, or use a wrapping operator (`+%`, `*%`, `as%`) where\n\
+            wrapping is meant.",
+    ),
+    (
+        "GT0135",
+        "A statement follows one that never completes: `return`, `break`,\n\
+            `continue`, a call of `panic`, `todo`, `unimplemented`, or\n\
+            `unreachable`, or an expression of type `!` such as\n\
+            `process::exit(..)`, a `loop` nothing breaks out of, or an `if` /\n\
+            `match` whose every branch leaves. The later statement can never\n\
+            run. Delete it, or move it before the statement that leaves the\n\
+            block.",
+    ),
+    (
+        "GT0136",
+        "A comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`), or comparisons\n\
+            joined by `&&` / `||`, is written as a statement, so its answer is\n\
+            computed and dropped (CWE-482). `count == 5` on its own line\n\
+            almost always meant the assignment `count = 5`, an `assert(count\n\
+            == 5)`, or a condition. Write the one that was meant.",
+    ),
+    (
+        "GT0137",
+        "A map literal spells the same constant key twice, `{\"a\": 1,\n\
+            \"a\": 2}`, or a set literal the same element twice. A map holds\n\
+            one value per key, so the later entry silently replaces the\n\
+            earlier one, and a set holds each element once. Keep one entry for\n\
+            each key.",
+    ),
+    (
+        "GT0138",
+        "A `Map` key or `Set` element type is, or holds, a type with a\n\
+            hand-written `impl PartialEq`, and the container never calls that\n\
+            `eq`. A hashed `Map` / `Set` hashes and compares keys\n\
+            structurally, field by field, and a `BTreeMap` / `BTreeSet` seats\n\
+            them by `cmp`, which is structural unless the type writes its own.\n\
+            Either way the container keeps two keys `eq` calls equal. Key on\n\
+            exactly what `eq` compares (a tuple of those fields), or give the\n\
+            type an `impl Ord` whose `cmp` answers 0 exactly when `eq` is true\n\
+            and use a `BTreeMap` / `BTreeSet`.",
     ),
     (
         "GX0001",

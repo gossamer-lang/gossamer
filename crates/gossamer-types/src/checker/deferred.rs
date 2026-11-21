@@ -2,11 +2,11 @@
 
 use super::{
     BinaryOp, CATALOG_TYPE_PARAM_SLOTS, DeferredStructural, DeferredStructuralKind, Expectation,
-    Expr, ExprKind, FnDecl, FnParam, FnSig, HashMap, HashSet, INT_SUFFIXES, IntTy, Literal,
-    LiteralConsts, MethodCallSite, Mutbl, ProjectionKind, Resolution, Span, SpawnScopeScan, Ty,
-    TyKind, TypeChecker, TypeError, UnaryOp, WriteArgPathCollector, body_value_span,
-    builtin_trait_methods, combinator_module_name, field_name_span, int_literal_fits,
-    is_compiler_generated, is_soft_for_structural_use, op_trait_name,
+    Expr, ExprKind, FnDecl, FnParam, FnSig, HashMap, HashSet, INT_SUFFIXES, IntTy, Label, Literal,
+    LiteralConsts, LoopFrame, MethodCallSite, Mutbl, ProjectionKind, Resolution, Span,
+    SpawnScopeScan, Ty, TyKind, TypeChecker, TypeError, UnaryOp, WriteArgPathCollector,
+    body_value_span, builtin_trait_methods, combinator_module_name, field_name_span,
+    int_literal_fits, is_compiler_generated, is_soft_for_structural_use, op_trait_name,
     struct_literal_positional_index, with_field_span,
 };
 
@@ -472,6 +472,8 @@ impl TypeChecker<'_> {
         }
         let ty = self.check_expr_kind(expr, expected);
         self.check_ffi_expr(expr, ty);
+        self.note_hashed_container(ty, expr.span);
+        self.note_const_candidate(expr);
         self.check_expected_integer_literal_range(expr, expected, ty);
         self.leave_recursion();
         let ty = self.record(expr.id, ty);
@@ -592,16 +594,51 @@ impl TypeChecker<'_> {
     /// Type of a `loop` expression: the unified type of its value-carrying
     /// breaks (`let x = loop { break v }` => `x: typeof(v)`); a value-less
     /// loop keeps the divergent `never` type.
-    pub(super) fn check_loop(&mut self, body: &Expr) -> Ty {
+    /// Types a `loop`: the type its `break value`s carry, unit when only
+    /// plain `break`s leave it, and `!` when nothing does.
+    pub(super) fn check_loop(&mut self, label: Option<&Label>, body: &Expr) -> Ty {
         let break_ty = self.fresh();
-        self.loop_break_tys.push((break_ty, false));
+        self.loop_frames.push(LoopFrame {
+            label: label.map(|l| l.name.clone()),
+            break_ty: Some(break_ty),
+            value_break: false,
+            exited: false,
+        });
         self.check_discarded_expr(body);
         self.report_discarded_result(body, None);
-        let (break_ty, used) = self.loop_break_tys.pop().expect("loop stack");
-        if used {
+        let frame = self.loop_frames.pop().expect("loop stack");
+        if frame.value_break {
             self.infer.resolve(self.tcx, break_ty)
+        } else if frame.exited {
+            self.tcx.unit()
         } else {
             self.tcx.never()
+        }
+    }
+
+    /// Runs `check` inside the frame of a `while` or `for` loop, which a
+    /// `break` may leave but which carries no value.
+    fn in_loop_frame(&mut self, label: Option<&Label>, check: impl FnOnce(&mut Self) -> Ty) -> Ty {
+        self.loop_frames.push(LoopFrame {
+            label: label.map(|l| l.name.clone()),
+            break_ty: None,
+            value_break: false,
+            exited: false,
+        });
+        let ty = check(self);
+        self.loop_frames.pop();
+        ty
+    }
+
+    /// The frame a `break` or `continue` with `label` targets.
+    fn targeted_loop_frame(&mut self, label: Option<&Label>) -> Option<&mut LoopFrame> {
+        match label {
+            Some(label) => self
+                .loop_frames
+                .iter_mut()
+                .rev()
+                .find(|frame| frame.label.as_deref() == Some(label.name.as_str())),
+            None => self.loop_frames.last_mut(),
         }
     }
 
@@ -625,16 +662,21 @@ impl TypeChecker<'_> {
                 self.record_fn_item_coercion(value, ret);
                 self.unify(ret, got, value.span);
             }
-            // `break value` unifies its value with the enclosing loop's
+            // `break value` unifies its value with the targeted loop's
             // break-type var and marks the loop as value-yielding.
-            if matches!(expr.kind, ExprKind::Break { .. }) {
-                let break_ty = self.loop_break_tys.last_mut().map(|last| {
-                    last.1 = true;
-                    last.0
+            if let ExprKind::Break { label, .. } = &expr.kind {
+                let break_ty = self.targeted_loop_frame(label.as_ref()).and_then(|frame| {
+                    frame.exited = true;
+                    frame.value_break = frame.break_ty.is_some();
+                    frame.break_ty
                 });
                 if let Some(break_ty) = break_ty {
                     self.unify(break_ty, got, value.span);
                 }
+            }
+        } else if let ExprKind::Break { label, .. } = &expr.kind {
+            if let Some(frame) = self.targeted_loop_frame(label.as_ref()) {
+                frame.exited = true;
             }
         } else if matches!(expr.kind, ExprKind::Return(_))
             && let Some(ret) = self.current_fn_ret
@@ -764,23 +806,27 @@ impl TypeChecker<'_> {
                 else_branch,
             } => self.check_if(condition, then_branch, else_branch.as_deref(), expected),
             ExprKind::Match { scrutinee, arms } => self.check_match(scrutinee, arms, expected),
-            ExprKind::Loop { body, .. } => self.check_loop(body),
+            ExprKind::Loop { label, body } => self.check_loop(label.as_ref(), body),
             ExprKind::While {
-                condition, body, ..
+                label,
+                condition,
+                body,
             } => {
                 let bool_ty = self.tcx.bool_ty();
                 let cond_ty = self.check_expr(condition);
                 self.unify(bool_ty, cond_ty, condition.span);
-                self.check_discarded_expr(body);
-                self.report_discarded_result(body, None);
-                self.tcx.unit()
+                self.in_loop_frame(label.as_ref(), |this| {
+                    this.check_discarded_expr(body);
+                    this.report_discarded_result(body, None);
+                    this.tcx.unit()
+                })
             }
             ExprKind::For {
+                label,
                 pattern,
                 iter,
                 body,
-                ..
-            } => self.check_for(pattern, iter, body),
+            } => self.in_loop_frame(label.as_ref(), |this| this.check_for(pattern, iter, body)),
             ExprKind::Block(block) => self.check_block(block, expected),
             ExprKind::Unsafe(block) => {
                 self.unsafe_depth += 1;
@@ -1465,6 +1511,12 @@ impl TypeChecker<'_> {
                     return value;
                 }
                 TyKind::Simd { elem, .. } if !range_index => return elem,
+                TyKind::Array { elem, len } if !range_index => {
+                    if let Some(len) = len.concrete() {
+                        self.check_const_index(index, len);
+                    }
+                    return elem;
+                }
                 TyKind::Array { elem, .. } | TyKind::Slice(elem) | TyKind::Vec(elem) => {
                     if range_index {
                         return self.tcx.intern(TyKind::Vec(elem));

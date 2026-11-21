@@ -1,0 +1,53 @@
+// A `return` at the end of a line returns nothing and ends the statement, so
+// the next line is a statement of its own. A `loop` that a plain `break`
+// leaves completes with `()`, and code after it runs; code after a statement
+// that never completes is GT0135.
+
+fn check(n: i64) {
+    if n > 100 {
+        println("big")
+        return
+    }
+    println(f"ok {n}")
+}
+
+fn first_negative(xs: Vec<i64>) -> i64 {
+    let mut i = 0
+    loop {
+        if i == xs.len() { break }
+        if xs[i] < 0 { return i }
+        i += 1
+    }
+    -1
+}
+
+fn sum_until_none(xs: Vec<Option<i64>>) -> i64 {
+    let mut it = xs.iter()
+    let mut total = 0
+    while let Some(item) = it.next() {
+        match item {
+            Some(v) => total += v
+            None => return total
+        }
+    }
+    total
+}
+
+fn labelled() -> i64 {
+    let mut steps = 0
+    'outer: loop {
+        loop {
+            steps += 1
+            if steps > 3 { break 'outer }
+        }
+    }
+    steps
+}
+
+fn main() {
+    check(1)
+    check(500)
+    println(f"{first_negative(#[3, 1, -4, 1])} {first_negative(#[1, 2])}")
+    println(f"{sum_until_none(#[Some(1), Some(2), None, Some(9)])} {sum_until_none(#[Some(5)])}")
+    println(f"{labelled()}")
+}

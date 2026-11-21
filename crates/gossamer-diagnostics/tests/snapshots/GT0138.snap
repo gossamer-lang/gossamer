@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0138]: A `Map` key or `Set` element type is, or holds, a type with a - here
+--- framed ---
+error[GT0138]: A `Map` key or `Set` element type is, or holds, a type with a
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

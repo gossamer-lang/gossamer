@@ -334,9 +334,9 @@ fn static_mut_assignment_does_not_error_at_runtime() {
 static mut N: i64 = 7
 
 fn main() {
-    println("start = {}", N)
-    N = 42
-    println("after = {}", N)
+    unsafe { println("start = {}", N) }
+    unsafe { N = 42 }
+    unsafe { println("after = {}", N) }
 }
 "#;
     let dir = fresh_dir("static_mut_assign");
@@ -1867,11 +1867,11 @@ mod catalog {
     static mut CURRENT: Catalog = Catalog { table: {} }
 
     pub fn install(c: Catalog) {
-        CURRENT = c
+        unsafe { CURRENT = c }
     }
 
     pub fn tr(source: String) -> String {
-        match CURRENT.table.get(source) {
+        match unsafe { CURRENT }.table.get(source) {
             Some(t) => t
             None => source
         }
@@ -1892,18 +1892,18 @@ fn labels(n: i64) -> i64 {
 fn scaled(n: i64) -> i64 {
     let mut acc = 0
     for i in 0..n {
-        acc += i % LIMIT
-        STEP += 0.5
+        unsafe { acc += i % LIMIT }
+        unsafe { STEP += 0.5 }
     }
     acc
 }
 
 fn main() {
-    LIMIT = 7
+    unsafe { LIMIT = 7 }
     catalog::install(catalog::Catalog { table: {"Open": "Ouvrir"} })
     println(labels(1000))
     println(scaled(100000))
-    println(f"{STEP} {LIMIT}")
+    unsafe { println(f"{STEP} {LIMIT}") }
 }
 "#;
     let expected = "505500

@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GP0070]: The source text holds a Unicode bidirectional control character - here
+--- framed ---
+error[GP0070]: The source text holds a Unicode bidirectional control character
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

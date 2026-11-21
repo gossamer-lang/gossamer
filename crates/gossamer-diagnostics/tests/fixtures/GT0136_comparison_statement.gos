@@ -1,0 +1,8 @@
+// ERROR: GT0136
+
+fn main() {
+    let mut count = 0
+    count = 5
+    count == 5
+    println(f"{count}")
+}

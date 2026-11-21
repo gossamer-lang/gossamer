@@ -1,0 +1,15 @@
+// A comparison's answer is used: bound, tested, asserted, or returned. A
+// comparison written as a statement drops its answer and is GT0136.
+
+fn same_parity(a: i64, b: i64) -> bool {
+    a % 2 == b % 2
+}
+
+fn main() {
+    let mut count = 0
+    count = 5
+    let five = count == 5
+    assert(count >= 5)
+    if count != 4 { println("not four") }
+    println(f"{five} {same_parity(3, 7)} {same_parity(2, 7)} {count < 10}")
+}

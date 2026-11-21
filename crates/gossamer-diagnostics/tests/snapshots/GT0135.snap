@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0135]: A statement follows one that never completes: `return`, `break`, - here
+--- framed ---
+error[GT0135]: A statement follows one that never completes: `return`, `break`,
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

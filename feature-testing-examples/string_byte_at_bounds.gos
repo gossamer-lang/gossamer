@@ -1,0 +1,13 @@
+// `s.byte_at(i)` answers the byte at offset `i` of the string's UTF-8 bytes,
+// and an offset outside them panics, as `s[i]` does, on every tier.
+
+fn read(s: String, i: i64) -> i64 { s.byte_at(i) }
+
+fn main() {
+    let word = "héllo"
+    let mut sum = 0
+    for i in 0..word.byte_len() { sum += word.byte_at(i) }
+    println(f"{word.byte_len()} {word.byte_at(0)} {word.byte_at(1)} {sum}")
+    println(f"{read(word, 5)}")
+    println(f"{read("", 0)}")
+}

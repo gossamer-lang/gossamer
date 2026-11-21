@@ -1,0 +1,27 @@
+// Goroutines share a counter through a synchronized `static`, which needs no
+// `unsafe`: every `fetch_add` lands, so the total is exact on every tier. A
+// `static mut` is reached only inside `unsafe { }` (GT0132), where the access
+// site vouches that nothing else touches it at the same time.
+
+use std::sync
+
+static HITS: sync::AtomicI64 = sync::AtomicI64::new(0)
+static mut SETUP_RUNS: i64 = 0
+
+fn setup() {
+    unsafe { SETUP_RUNS += 1 }
+}
+
+fn work(rounds: i64) -> i64 {
+    for _ in 0..rounds { HITS.fetch_add(1) }
+    rounds
+}
+
+fn main() {
+    setup()
+    let mut handles = #[]
+    for _ in 0..8 { handles.push(spawn(|| work(10000))) }
+    let mut joined = 0
+    for h in handles { joined += h.join().unwrap_or(0) }
+    println(f"joined {joined} hits {HITS.load()} setup {unsafe { SETUP_RUNS }}")
+}

@@ -1230,8 +1230,8 @@ enum Node {
 static mut SEED: i64 = 1
 
 fn rand() -> i64 {
-    SEED = SEED * 6364136223846793005 + 1442695040888963407
-    SEED
+    unsafe { SEED = SEED * 6364136223846793005 + 1442695040888963407 }
+    unsafe { SEED }
 }
 
 fn build(depth: i64) -> Node {
@@ -1281,8 +1281,8 @@ enum Node {
 static mut SEED: i64 = 1
 
 fn rand() -> i64 {
-    SEED = SEED *% 6364136223846793005 +% 1442695040888963407
-    SEED
+    unsafe { SEED = SEED *% 6364136223846793005 +% 1442695040888963407 }
+    unsafe { SEED }
 }
 
 fn build(depth: i64) -> Node {
@@ -1613,7 +1613,7 @@ static mut HOLD: String = ""
 fn make() -> String { "x" }
 
 fn stash(s: String) {
-    HOLD = s
+    unsafe { HOLD = s }
 }
 
 fn main() {
@@ -3369,16 +3369,16 @@ struct Face { tables: Map<i64, i64> }
 impl Face {
     fn has(&self, k: i64) -> bool { self.tables.contains_key(k) }
     fn wipe(&self) -> i64 {
-        FACES.clear()
+        unsafe { FACES.clear() }
         self.tables.len()
     }
 }
 
 static mut FACES: Vec<Face> = #[]
 
-fn probe(i: i64) -> bool { FACES[0].has(i) }
+fn probe(i: i64) -> bool { unsafe { FACES[0].has(i) } }
 
-fn reach() -> i64 { FACES[0].wipe() }
+fn reach() -> i64 { unsafe { FACES[0].wipe() } }
 ";
     let (bodies, _) = build(source);
     let probe = bodies.iter().find(|b| b.name == "probe").expect("probe");

@@ -9,16 +9,16 @@ static mut ITEMS: Vec<i64> = #[]
 fn reader(rounds: i64) -> i64 {
     let mut total = 0
     for _ in 0..rounds {
-        let s = NAME
-        let v = ITEMS
+        let s = unsafe { NAME }
+        let v = unsafe { ITEMS }
         total += s.byte_len() + v.len()
     }
     total
 }
 
 fn main() {
-    NAME = format("shared-{}", 42)
-    ITEMS = #[1, 2, 3]
+    unsafe { NAME = format("shared-{}", 42) }
+    unsafe { ITEMS = #[1, 2, 3] }
     let r = cohort(isolation: Isolation::Thread) {
         let a = spawn(|| reader(20000))
         let b = spawn(|| reader(20000))
@@ -26,5 +26,5 @@ fn main() {
         let d = spawn(|| reader(20000))
         println("{}", a.join().unwrap_or(0) + b.join().unwrap_or(0) + c.join().unwrap_or(0) + d.join().unwrap_or(0))
     }
-    match r { Ok(_) => println("ok {} {}", NAME, ITEMS.len()), Err(e) => println("err {}", e) }
+    match r { Ok(_) => println("ok {} {}", unsafe { NAME }, unsafe { ITEMS }.len()), Err(e) => println("err {}", e) }
 }

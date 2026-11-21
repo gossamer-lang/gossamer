@@ -1,5 +1,6 @@
 //! Patterns, iteration, and parameter shapes.
 
+use gossamer_ast::BinaryOp;
 use gossamer_resolve::DefKind;
 
 use super::{
@@ -434,11 +435,26 @@ impl TypeChecker<'_> {
     pub(super) fn check_block(&mut self, block: &Block, expected: Expectation) -> Ty {
         self.push_scope();
         let mut diverged = false;
+        let mut never_completes = false;
+        let mut unreachable_reported = false;
         for stmt in &block.stmts {
+            if never_completes && !unreachable_reported && !matches!(stmt.kind, StmtKind::Item(_)) {
+                self.emit(TypeError::UnreachableCode, stmt.span);
+                unreachable_reported = true;
+            }
             self.check_stmt(stmt);
             if !diverged && stmt_diverges(stmt) {
                 diverged = true;
             }
+            if !never_completes && (diverged || self.stmt_typed_never(stmt)) {
+                never_completes = true;
+            }
+        }
+        if never_completes
+            && !unreachable_reported
+            && let Some(tail) = &block.tail
+        {
+            self.emit(TypeError::UnreachableCode, tail.span);
         }
         let ty = if let Some(tail) = &block.tail {
             self.check_expr_expecting(tail, expected)
@@ -457,12 +473,53 @@ impl TypeChecker<'_> {
         ty
     }
 
+    /// Whether `stmt` is an expression statement the checker typed `!`: a
+    /// call that never returns, or a branch whose every arm diverges.
+    fn stmt_typed_never(&mut self, stmt: &Stmt) -> bool {
+        let StmtKind::Expr { expr, .. } = &stmt.kind else {
+            return false;
+        };
+        if self.is_prelude_divergent_call(expr) {
+            return true;
+        }
+        let Some(ty) = self.table.get(expr.id) else {
+            return false;
+        };
+        let ty = self.infer.resolve(self.tcx, ty);
+        matches!(self.tcx.kind(ty), Some(TyKind::Never))
+    }
+
+    /// A call of the prelude's `panic`, `todo`, `unimplemented`, or
+    /// `unreachable`, which never returns and takes whatever type its
+    /// position needs.
+    fn is_prelude_divergent_call(&self, expr: &Expr) -> bool {
+        let ExprKind::Call { callee, .. } = &expr.kind else {
+            return false;
+        };
+        let ExprKind::Path(path) = &callee.kind else {
+            return false;
+        };
+        matches!(
+            path.segments.as_slice(),
+            [segment] if matches!(
+                segment.name.name.as_str(),
+                "panic" | "todo" | "unimplemented" | "unreachable"
+            )
+        ) && self.resolutions.get(callee.id)
+            == Some(Resolution::Import {
+                use_id: NodeId::DUMMY,
+            })
+    }
+
     pub(super) fn check_stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
             StmtKind::Let { pattern, ty, init } => {
                 self.check_let_stmt(pattern, ty.as_ref(), init.as_deref());
             }
             StmtKind::Expr { expr, .. } => {
+                if is_comparison_chain(expr) {
+                    self.emit(TypeError::ComparisonStatement, expr.span);
+                }
                 let expr_ty = self.check_discarded_expr(expr);
                 // SPEC §9: a `Result<T, E>` value used as a statement (value
                 // discarded) is a compile error. The explicit discard form
@@ -540,6 +597,14 @@ impl TypeChecker<'_> {
             }
             self.check_local_reference_storage(pattern, binding_ty, init);
             self.check_reference_pattern(pattern, init_ty);
+            if let PatternKind::Ident {
+                mutability: gossamer_ast::Mutability::Immutable,
+                subpattern: None,
+                ..
+            } = &pattern.kind
+            {
+                self.note_local_constant(pattern.id, init);
+            }
         }
         if let Some(problem) = self.let_pattern_problem(pattern, Some(binding_ty)) {
             let error = match problem {
@@ -1110,7 +1175,10 @@ impl TypeChecker<'_> {
         // the closure was written in, so the body is checked against the
         // closure's own output type.
         let prev_ret = self.current_fn_ret.replace(output);
+        // A `break` inside a closure leaves no loop around the closure.
+        let outer_loops = std::mem::take(&mut self.loop_frames);
         let body_ty = self.check_expr_expecting(body, body_expected);
+        self.loop_frames = outer_loops;
         self.current_fn_ret = prev_ret;
         self.unify(output, body_ty, body.span);
         if expr_mentions_any_name(body, &outer_references) {
@@ -1255,6 +1323,13 @@ impl TypeChecker<'_> {
     }
 
     pub(super) fn check_map_literal(&mut self, entries: &[Expr], expected: Expectation) -> Ty {
+        self.check_duplicate_literal_keys(
+            entries.iter().filter_map(|entry| match &entry.kind {
+                ExprKind::Tuple(parts) => parts.first(),
+                _ => None,
+            }),
+            "map",
+        );
         // A brace literal builds whichever map the call site expects, the way
         // `#{..}` builds a `Set` or the `BTreeSet` an expectation names.
         let expected_map =
@@ -1330,6 +1405,7 @@ impl TypeChecker<'_> {
     }
 
     pub(super) fn check_set_literal(&mut self, entries: &[Expr], expected: Expectation) -> Ty {
+        self.check_duplicate_literal_keys(entries, "set");
         let expected_elem =
             self.expectation_target(expected)
                 .and_then(|target| match self.tcx.kind(target) {
@@ -2158,5 +2234,23 @@ impl TypeChecker<'_> {
             PrimitiveTy::Never => self.tcx.never(),
             PrimitiveTy::Unit => self.tcx.unit(),
         }
+    }
+}
+
+/// A comparison, or comparisons joined by `&&` / `||`: an expression whose
+/// only work is the answer it computes.
+fn is_comparison_chain(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Binary {
+            op:
+                BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge,
+            ..
+        } => true,
+        ExprKind::Binary {
+            op: BinaryOp::And | BinaryOp::Or,
+            lhs,
+            rhs,
+        } => is_comparison_chain(lhs) && is_comparison_chain(rhs),
+        _ => false,
     }
 }

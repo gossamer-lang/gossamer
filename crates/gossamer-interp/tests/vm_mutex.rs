@@ -39,13 +39,13 @@ static mut COUNTER: i64 = 0
 fn bump(m: Mutex) {
     for _ in 0..1000 {
         m.lock()
-        COUNTER += 1
+        unsafe { COUNTER += 1 }
         m.unlock()
     }
 }
 
 fn tick() {
-    COUNTER = 0
+    unsafe { COUNTER = 0 }
     let m = Mutex::new()
     let _ = cohort {
         let h1 = spawn(|| bump(m))
@@ -53,7 +53,7 @@ fn tick() {
         let _ = h1.join()
         let _ = h2.join()
     }
-    println("{}", COUNTER)
+    println("{}", unsafe { COUNTER })
 }
 "#;
 

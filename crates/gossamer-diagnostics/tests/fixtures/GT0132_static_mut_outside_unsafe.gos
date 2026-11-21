@@ -1,0 +1,11 @@
+// ERROR: GT0132
+
+static mut PLAIN: i64 = 0
+
+fn bump() {
+    PLAIN += 1
+}
+
+fn main() {
+    bump()
+}

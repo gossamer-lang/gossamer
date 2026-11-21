@@ -296,8 +296,10 @@ mod tests {
         let source = r"
 static mut STATE: i64 = 1
 fn next() -> i64 {
-    STATE = STATE * 3 + 1
-    STATE >> 1
+    unsafe {
+        STATE = STATE * 3 + 1
+        STATE >> 1
+    }
 }
 ";
         let mut map = SourceMap::new();

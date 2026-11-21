@@ -125,14 +125,7 @@ impl<'src> Parser<'src> {
         let diagnostics = tokens
             .take_lex_errors()
             .into_iter()
-            .map(|err| {
-                ParseDiagnostic::new(
-                    ParseError::Lex {
-                        message: err.to_string(),
-                    },
-                    err.span(),
-                )
-            })
+            .map(|err| ParseDiagnostic::new(ParseError::from_lex(&err), err.span()))
             .collect();
         Self {
             source,

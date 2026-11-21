@@ -5,11 +5,11 @@
 static mut COUNTER: i64 = 0
 
 fn bump() {
-    COUNTER += 1
+    unsafe { COUNTER += 1 }
 }
 
 fn read() -> i64 {
-    COUNTER
+    unsafe { COUNTER }
 }
 
 fn main() {
@@ -18,6 +18,6 @@ fn main() {
     bump()
     bump()
     println("after 3 bumps = {}", read())
-    COUNTER = 100
+    unsafe { COUNTER = 100 }
     println("after assign 100 = {}", read())
 }

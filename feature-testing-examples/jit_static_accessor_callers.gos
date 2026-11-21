@@ -7,11 +7,11 @@ mod catalog {
     static mut CURRENT: Catalog = Catalog { locale: "en", messages: #[], table: {} }
 
     pub fn install(c: Catalog) {
-        CURRENT = c
+        unsafe { CURRENT = c }
     }
 
     pub fn tr(source: String) -> String {
-        match CURRENT.table.get(source) {
+        match unsafe { CURRENT }.table.get(source) {
             Some(t) => t
             None => source
         }

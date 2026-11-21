@@ -365,6 +365,13 @@ pub enum ParseError {
         /// Rendered lexer diagnostic.
         message: String,
     },
+    /// A bidirectional control character in the source text: it reorders
+    /// how the code displays without changing how it compiles.
+    #[error("bidirectional control character U+{codepoint:04X} in source text")]
+    BidiControl {
+        /// The character's scalar value.
+        codepoint: u32,
+    },
     /// A bare statement appeared inside a `mod { }` body, where only items
     /// are allowed. Top-level statements belong only to the entry file's
     /// implicit `fn main`.
@@ -565,6 +572,19 @@ impl ParseDiagnostic {
 }
 
 impl ParseError {
+    /// The parse diagnostic a lexer error becomes.
+    #[must_use]
+    pub fn from_lex(err: &gossamer_lex::LexError) -> Self {
+        match err {
+            gossamer_lex::LexError::BidiControl { codepoint, .. } => Self::BidiControl {
+                codepoint: *codepoint,
+            },
+            other => Self::Lex {
+                message: other.to_string(),
+            },
+        }
+    }
+
     /// The label and replacement text of the mechanical rewrite that
     /// resolves this error over its span, when it has one.
     fn rewrite(&self) -> Option<(String, String)> {
@@ -786,6 +806,15 @@ impl ParseError {
                 Some("split the expression into smaller helpers".to_string()),
             ),
             ParseError::Lex { message } => ("GP0018", message.clone(), None),
+            ParseError::BidiControl { codepoint } => (
+                "GP0070",
+                format!("bidirectional control character U+{codepoint:04X} in source text"),
+                Some(format!(
+                    "the character reorders how the line displays, so the code a reader \
+                     sees is not the code that compiles; write it as the escape \
+                     `\\u{{{codepoint:X}}}` inside a string or char literal"
+                )),
+            ),
             other => other.code_title_help_malformed(),
         }
     }

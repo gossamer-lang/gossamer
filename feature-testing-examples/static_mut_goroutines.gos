@@ -11,10 +11,10 @@ static mut COUNTER: i64 = 0
 fn bump_n(n: i64) -> i64 {
     let mut i = 0
     while i < n {
-        COUNTER += 1
+        unsafe { COUNTER += 1 }
         i += 1
     }
-    COUNTER
+    unsafe { COUNTER }
 }
 
 fn main() {
@@ -26,5 +26,5 @@ fn main() {
         Ok(v) => println("mid = {}", v)
         Err(e) => println("err = {}", e)
     }
-    println("counter = {}", COUNTER)
+    unsafe { println("counter = {}", COUNTER) }
 }

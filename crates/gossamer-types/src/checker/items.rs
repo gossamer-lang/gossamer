@@ -302,6 +302,9 @@ impl TypeChecker<'_> {
         };
         let resolved = self.type_from_ast(ty);
         self.const_tys.insert(def, resolved);
+        if let TyKind::Int(int) = self.tcx.kind_of(resolved).clone() {
+            self.const_int_exprs.insert(def, (value.clone(), int));
+        }
         if let Some(literal) = evaluate_const_int_from_expr(value) {
             self.const_int_values.insert(def, literal);
         }
@@ -1679,6 +1682,9 @@ impl TypeChecker<'_> {
                 }
                 let init = self.check_expr_expecting(&decl.value, Expectation::HasType(annotated));
                 self.unify(annotated, init, decl.value.span);
+                if let TyKind::Int(int) = self.tcx.kind_of(annotated).clone() {
+                    self.check_const_initializer(&decl.value, int);
+                }
             }
             ItemKind::Static(decl) => {
                 let annotated = self.type_from_ast(&decl.ty);
@@ -1698,6 +1704,9 @@ impl TypeChecker<'_> {
                 }
                 let init = self.check_expr_expecting(&decl.value, Expectation::HasType(annotated));
                 self.unify(annotated, init, decl.value.span);
+                if let TyKind::Int(int) = self.tcx.kind_of(annotated).clone() {
+                    self.check_const_initializer(&decl.value, int);
+                }
                 if item.attrs.has_word(gossamer_ast::FOREIGN_STATIC_ATTR) {
                     self.check_foreign_static_decl(item, &decl.name.name, annotated, decl.ty.span);
                 }

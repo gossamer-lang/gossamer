@@ -1,0 +1,8 @@
+// ERROR: GT0134
+
+const DAY: i64 = 1_000_000_000 * 60 * 60 * 24
+const SPAN: i64 = DAY * 365 * 300
+
+fn main() {
+    println(f"{DAY} {SPAN}")
+}

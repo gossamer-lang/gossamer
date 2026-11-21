@@ -24,11 +24,11 @@ const LIBRARY: &str = r#"pub mod shapes {
     static mut BUILT: i64 = 0
 
     pub fn make(w: i64, h: i64) -> Rect {
-        BUILT += 1
+        unsafe { BUILT += 1 }
         Rect { w: w, h: h }
     }
 
-    pub fn built() -> i64 { BUILT }
+    pub fn built() -> i64 { unsafe { BUILT } }
 
     pub fn area(r: Rect) -> i64 { r.w * r.h }
 

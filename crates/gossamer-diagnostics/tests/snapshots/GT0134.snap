@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0134]: Integer arithmetic the compiler can evaluate has no value in its - here
+--- framed ---
+error[GT0134]: Integer arithmetic the compiler can evaluate has no value in its
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

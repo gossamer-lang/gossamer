@@ -1441,8 +1441,9 @@ const __gos_term_STDIN: i64 = 0
 const __gos_term_STDOUT: i64 = 1
 const __gos_term_STDERR: i64 = 2
 
-static mut __gos_term_LAST_COLS: i64 = -1
-static mut __gos_term_LAST_ROWS: i64 = -1
+// The size `resized` last saw, packed as `cols << 32 | rows`; -1 before the
+// first call. One word, so every goroutine swaps it whole.
+static __gos_term_LAST_SIZE: sync::AtomicI64 = sync::AtomicI64::new(-1)
 
 fn __gos_term_os_error(operation: String) -> errors::Error {
     errors::new(f"term::{operation}: os error {ffi::last_os_error()}")
@@ -1489,10 +1490,14 @@ fn __gos_term_resized<D: __gos_fd_Descriptor>(fd: D = __gos_term_STDOUT) -> bool
         return false
     }
     let cols, rows = size
-    let changed = __gos_term_LAST_COLS >= 0 && (cols != __gos_term_LAST_COLS || rows != __gos_term_LAST_ROWS)
-    __gos_term_LAST_COLS = cols
-    __gos_term_LAST_ROWS = rows
-    changed
+    let packed = (cols << 32) | (rows & 0xFFFFFFFF)
+    let previous = loop {
+        let seen = __gos_term_LAST_SIZE.load()
+        if __gos_term_LAST_SIZE.compare_exchange(seen, packed) {
+            break seen
+        }
+    }
+    previous >= 0 && previous != packed
 }
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -2500,7 +2505,7 @@ fn __gos_sql_copy_vals(xs: [__gos_sql_Value]) -> Vec<__gos_sql_Value> {
     out
 }
 fn __gos_sql_is_simple_ident(s: String) -> bool {
-    let n = s.len()
+    let n = s.byte_len()
     if n == 0 { return false }
     let mut i = 0
     let mut dots = 0

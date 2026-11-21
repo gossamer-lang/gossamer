@@ -197,7 +197,7 @@ fn a_warm_check_reports_the_warnings_a_cold_one_did() {
     let project = Project::new("warnings");
     project.write(
         "main.gos",
-        "fn main() {\n    let x: u8 = 5\n    match x { 0..=255 => println(\"all\"), _ => println(\"never\") }\n}\n",
+        "fn add(a: i64, b: i64) {\n    a + b\n}\nfn main() {\n    add(1, 2)\n}\n",
     );
     let warnings = |out: &Output| -> Vec<String> {
         String::from_utf8_lossy(&out.stderr)
@@ -216,7 +216,7 @@ fn a_warm_check_reports_the_warnings_a_cold_one_did() {
         "the second check must restore the front end"
     );
     assert!(
-        warnings(&cold).iter().any(|line| line.contains("GM0002")),
+        warnings(&cold).iter().any(|line| line.contains("GL0055")),
         "{}",
         String::from_utf8_lossy(&cold.stderr)
     );

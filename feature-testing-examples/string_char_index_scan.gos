@@ -31,7 +31,7 @@ fn main() {
     println("{} {}", s.len(), s.byte_len())
     println("{} {} {}", s[0], s[1], s[2])
     println("{} {}", s[2] as i64, s.substring(1, 3))
-    println("{} {} {}", s.byte_at(1), s.byte_at(2), s.byte_at(99))
+    println("{} {} {}", s.byte_at(1), s.byte_at(2), s.byte_at(s.byte_len() - 1))
     println("{} {}", s.byte_at(3) as char, s.as_bytes()[3] == b'9')
     println("{} {}", count_digit_chars(s), digit_sum_bytes(s))
 }

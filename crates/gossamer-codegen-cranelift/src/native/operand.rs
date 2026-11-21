@@ -157,6 +157,8 @@ pub(super) fn operand_locals(rvalue: &Rvalue) -> Vec<Local> {
 
 pub(super) enum PrintKind {
     StrPtr,
+    /// The unit value, which renders as `()` whatever its slot holds.
+    Unit,
     Int,
     /// Unsigned integer (any width). Routed through
     /// `gos_rt_print_u64` so values >= 2^63 print without a
@@ -718,7 +720,8 @@ pub(super) fn operand_print_kind(body: &Body, tcx: &TyCtxt, operand: &Operand) -
                 }
                 // `time::Duration` / `time::Instant` are transparent
                 // `i64`s; print the millisecond count they carry.
-                TyKind::Unit | TyKind::Never | TyKind::Duration | TyKind::Instant => PrintKind::Int,
+                TyKind::Unit | TyKind::Never => PrintKind::Unit,
+                TyKind::Duration | TyKind::Instant => PrintKind::Int,
                 // A format site names an `f32` directly only through a type
                 // parameter; its single-precision digits come from the
                 // renderer the other tiers call, so such a body runs on the VM.

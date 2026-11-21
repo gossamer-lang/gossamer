@@ -2111,7 +2111,7 @@ impl<'a> Lowerer<'a> {
     ///
     /// The whole operation is a guarded byte load, and the shim is called once
     /// per input byte by any scanner, so the call itself is the cost. An index
-    /// outside the content answers zero, as the shim does.
+    /// outside the content takes the shim, which raises the bounds panic.
     pub(crate) fn lower_str_byte_at_inline(
         &mut self,
         args: &[Operand],
@@ -2123,10 +2123,9 @@ impl<'a> Lowerer<'a> {
         let i = self.widen_to_i64(&args[1], &i_raw);
         let id = self.next_ssa;
         self.next_ssa += 1;
-        let (typed_b, read_b, zero_b, slow_b, cont_b) = (
+        let (typed_b, read_b, slow_b, cont_b) = (
             format!("sba_t_{id}"),
             format!("sba_r_{id}"),
-            format!("sba_z_{id}"),
             format!("sba_s_{id}"),
             format!("sba_c_{id}"),
         );
@@ -2139,7 +2138,7 @@ impl<'a> Lowerer<'a> {
         writeln!(self.out, "  {neg} = icmp slt i64 {i}, 0").unwrap();
         writeln!(self.out, "  {past} = icmp sge i64 {i}, {len}").unwrap();
         writeln!(self.out, "  {oob} = or i1 {neg}, {past}").unwrap();
-        writeln!(self.out, "  br i1 {oob}, label %{zero_b}, label %{read_b}").unwrap();
+        writeln!(self.out, "  br i1 {oob}, label %{slow_b}, label %{read_b}").unwrap();
         writeln!(self.out, "{read_b}:").unwrap();
         let byte_ptr = self.fresh();
         let byte = self.fresh();
@@ -2151,8 +2150,6 @@ impl<'a> Lowerer<'a> {
         .unwrap();
         writeln!(self.out, "  {byte} = load i8, ptr {byte_ptr}{TBAA_DATA}").unwrap();
         writeln!(self.out, "  {byte_z} = zext i8 {byte} to i64").unwrap();
-        writeln!(self.out, "  br label %{cont_b}").unwrap();
-        writeln!(self.out, "{zero_b}:").unwrap();
         writeln!(self.out, "  br label %{cont_b}").unwrap();
         writeln!(self.out, "{slow_b}:").unwrap();
         declare_rt(&mut self.runtime_refs, "gos_rt_str_byte_at");
@@ -2167,7 +2164,7 @@ impl<'a> Lowerer<'a> {
         let out = self.fresh();
         writeln!(
             self.out,
-            "  {out} = phi i64 [ {byte_z}, %{read_b} ], [ 0, %{zero_b} ], [ {slow}, %{slow_b} ]"
+            "  {out} = phi i64 [ {byte_z}, %{read_b} ], [ {slow}, %{slow_b} ]"
         )
         .unwrap();
         self.store_inline_i64_result(&out, destination);

@@ -175,7 +175,6 @@ fn main() {
         Err(e) => {
             eprintln(f"consumer_check: reading scripts/consumers.txt: {e}")
             process::exit(2)
-            return
         }
     }
     let consumers = match read_consumers(text) {
@@ -183,7 +182,6 @@ fn main() {
         Err(e) => {
             eprintln(f"consumer_check: scripts/consumers.txt: {e}")
             process::exit(2)
-            return
         }
     }
     let scratch = match fs::temp_dir("gos-consumers-") {
@@ -191,7 +189,6 @@ fn main() {
         Err(e) => {
             eprintln(f"consumer_check: creating a scratch directory: {e}")
             process::exit(2)
-            return
         }
     }
     let mut failures = #[]

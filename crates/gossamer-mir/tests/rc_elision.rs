@@ -182,7 +182,7 @@ fn a_carrier_of_a_vector_is_no_blob_holder_when_the_vector_type_has_a_copy_meta(
         fn parse(text: String) -> Result<StringList, errors::Error> {\n\
          if text.is_empty() { Err(errors::new(\"empty\")) } else { Ok(StringList { items: #[text] }) }\n}\n\
         fn list(text: String) -> Vec<String> {\n parse(text).map(|v| v.items).unwrap_or(#[])\n}\n\
-        fn main() {\n NAMES = #[\"a\"]\n println(f\"{list(\"\").len()}\")\n}\n";
+        fn main() {\n unsafe { NAMES = #[\"a\"] }\n println(f\"{list(\"\").len()}\")\n}\n";
     let (bodies, tcx) = lower(source);
     let list = body(&bodies, "list");
     let slot_releases: Vec<String> = list

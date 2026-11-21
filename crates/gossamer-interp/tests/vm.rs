@@ -75,11 +75,11 @@ fn main() {
         checksum = checksum +% text.byte_at(i)
         i += 1
     }
-    println("{} {} {}", text.byte_at(-1), checksum, text.byte_at(text.len()))
+    println("{} {}", checksum, text.byte_at(0))
 }
 "#,
     );
-    assert_eq!(output, "0 833 0\n");
+    assert_eq!(output, "833 71\n");
 }
 
 #[test]

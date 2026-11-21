@@ -16,6 +16,87 @@ pub struct TypeDiagnostic {
     pub span: Span,
 }
 
+/// The help and notes of the rules that refuse a construct whose meaning the
+/// source misstates: unreachable code, dropped comparisons, constant faults,
+/// repeated keys, unsynchronized statics, and key types whose `eq` a
+/// container never calls.
+fn source_rule_help(
+    error: &TypeError,
+    mut out: gossamer_diagnostics::Diagnostic,
+) -> gossamer_diagnostics::Diagnostic {
+    match error {
+        TypeError::ConstIndexOutOfBounds { len, .. } => {
+            out = out.with_help(if *len == 0 {
+                "the array is empty, so no index reaches an element".to_string()
+            } else {
+                format!("an index of this array is in 0..{len}")
+            });
+        }
+        TypeError::HashKeyCustomEq { owner, ordered, .. } => {
+            out = if *ordered {
+                out.with_help(format!(
+                    "write `impl Ord for {owner}` with a `cmp` that answers 0 exactly when \
+                     `eq` is true, or key on what `eq` compares (a tuple of those fields)"
+                ))
+                .with_note(
+                    "a `BTreeMap` / `BTreeSet` seats keys by `cmp`, which is structural, \
+                     field by field, unless the type writes its own",
+                )
+            } else {
+                out.with_help(format!(
+                    "key on exactly what `{owner}`'s `eq` compares (a tuple of those \
+                     fields), or give `{owner}` an `impl Ord` that agrees with `eq` and \
+                     use a `BTreeMap` / `BTreeSet`"
+                ))
+                .with_note(
+                    "a `Map` or `Set` hashes and compares its keys structurally, field by \
+                     field, so it never calls a hand-written `eq`",
+                )
+            };
+        }
+        TypeError::DuplicateLiteralKey { collection, .. } => {
+            out = out.with_help(if *collection == "map" {
+                "a map holds one value per key, so the later entry would replace the \
+                 earlier one: keep one entry for the key"
+            } else {
+                "a set holds each element once: drop the repeated element"
+            });
+        }
+        TypeError::UnreachableCode => {
+            out = out.with_help(
+                "delete the code, or move it before the statement that leaves the block",
+            );
+        }
+        TypeError::ComparisonStatement => {
+            out = out.with_help(
+                "write `=` to assign, `assert(..)` to check, or use the comparison as a \
+                 condition (`if a == b { .. }`)",
+            );
+        }
+        TypeError::ConstArithmetic { .. } => {
+            out = out.with_help(
+                "a constant's value must fit its declared type at every step: widen the \
+                 type, change the operands, or use a wrapping operator (`+%`, `*%`) where \
+                 wrapping is meant",
+            );
+        }
+        TypeError::StaticMutOutsideUnsafe { name } => {
+            out = out
+                .with_help(format!(
+                    "wrap the access in `unsafe {{ }}` where nothing else can reach \
+                     `{name}` at the same time, or keep shared state in a synchronized \
+                     `static`: `sync::AtomicI64`, `sync::Shared`"
+                ))
+                .with_note(
+                    "every goroutine reaches a `static mut` with no lock, so concurrent \
+                     writes are lost or tear the value",
+                );
+        }
+        _ => {}
+    }
+    out
+}
+
 impl TypeDiagnostic {
     /// Whether this finding is advisory rather than fatal: a lint the
     /// checker is the only pass with enough type information to make, so it
@@ -1099,6 +1180,61 @@ pub enum TypeError {
         /// The indexed value, as written.
         target: String,
     },
+    /// A constant index names no element of a fixed array.
+    #[error("index {index} is out of bounds for an array of {len} element(s)")]
+    ConstIndexOutOfBounds {
+        /// The index's value.
+        index: String,
+        /// The array's length.
+        len: usize,
+    },
+    /// A `const` or `static` integer initializer has no value in its type:
+    /// an operation overflows, divides by zero, or shifts out of range.
+    #[error("constant arithmetic fails: {detail}")]
+    ConstArithmetic {
+        /// The failing operation and why.
+        detail: String,
+    },
+    /// A statement follows one that never completes (`return`, `break`,
+    /// `continue`, or an expression of type `!`), so it can never run.
+    #[error("unreachable code: the statement before this one never completes")]
+    UnreachableCode,
+    /// A comparison is a statement: its answer is computed and dropped, where
+    /// an assignment (`=`) or a condition was almost always meant.
+    #[error("a comparison is used as a statement and its answer is dropped")]
+    ComparisonStatement,
+    /// A map or set literal spells the same constant key twice.
+    #[error("the key {key} appears more than once in this {collection} literal")]
+    DuplicateLiteralKey {
+        /// The repeated key, as source.
+        key: String,
+        /// `map` or `set`.
+        collection: &'static str,
+    },
+    /// A `Map` key or `Set` element type is or holds a type with a
+    /// hand-written `PartialEq` the container never calls: a hashed one
+    /// hashes and compares structurally, and an ordered one seats keys by a
+    /// `cmp` the type did not write. Two keys `eq` calls equal stay apart.
+    #[error(
+        "`{key}` keys {}, but `{owner}` compares by a hand-written `eq` the container never calls",
+        if *.ordered { "an ordered container" } else { "a hashed container" }
+    )]
+    HashKeyCustomEq {
+        /// The key type, as rendered.
+        key: String,
+        /// The type whose `PartialEq` is hand-written.
+        owner: String,
+        /// Whether the container is a `BTreeMap` / `BTreeSet`.
+        ordered: bool,
+    },
+    /// A `static mut` is read or written outside an `unsafe { }` block.
+    /// Every goroutine reaches the one cell with no lock, so the access site
+    /// vouches that nothing else touches it at the same time.
+    #[error("the `static mut` `{name}` is used outside an `unsafe` block")]
+    StaticMutOutsideUnsafe {
+        /// The static's name, as written.
+        name: String,
+    },
     /// An assignment targets a place reached through a shared `&T`
     /// reference. The reference binding's own `mut` qualifier cannot make
     /// its referent writable.
@@ -1362,6 +1498,13 @@ impl TypeError {
             Self::InvalidAssignTarget { .. } => "invalid-assign-target",
             Self::StringIndexWrite { .. } => "string-index-write",
             Self::UserIndexWrite { .. } => "user-index-write",
+            Self::StaticMutOutsideUnsafe { .. } => "static-mut-outside-unsafe",
+            Self::ConstIndexOutOfBounds { .. } => "const-index-out-of-bounds",
+            Self::ConstArithmetic { .. } => "const-arithmetic",
+            Self::UnreachableCode => "unreachable-code",
+            Self::DuplicateLiteralKey { .. } => "duplicate-literal-key",
+            Self::HashKeyCustomEq { .. } => "hash-key-custom-eq",
+            Self::ComparisonStatement => "comparison-statement",
             Self::MutableReferenceToImmutable { .. } => "mutable-reference-to-immutable",
             Self::MutableReferenceConflict { .. } => "mutable-reference-conflict",
             Self::ReferenceEscapeUnsupported { .. } => "reference-escape-unsupported",
@@ -1512,6 +1655,13 @@ impl TypeError {
             Self::FnItemTypeArgsUninferred { .. } => "GT0128",
             Self::StringIndexWrite { .. } => "GT0130",
             Self::UserIndexWrite { .. } => "GT0131",
+            Self::StaticMutOutsideUnsafe { .. } => "GT0132",
+            Self::ConstIndexOutOfBounds { .. } => "GT0133",
+            Self::ConstArithmetic { .. } => "GT0134",
+            Self::UnreachableCode => "GT0135",
+            Self::DuplicateLiteralKey { .. } => "GT0137",
+            Self::HashKeyCustomEq { .. } => "GT0138",
+            Self::ComparisonStatement => "GT0136",
         }
     }
 }
@@ -2538,6 +2688,15 @@ impl TypeDiagnostic {
                     "write the field `index` reads from (`{target}.items[i] = v`), or give \
                      `{ty}` a method that sets an element: `fn set(&mut self, i: i64, v: T)`"
                 ));
+            }
+            TypeError::ConstIndexOutOfBounds { .. }
+            | TypeError::HashKeyCustomEq { .. }
+            | TypeError::DuplicateLiteralKey { .. }
+            | TypeError::UnreachableCode
+            | TypeError::ComparisonStatement
+            | TypeError::ConstArithmetic { .. }
+            | TypeError::StaticMutOutsideUnsafe { .. } => {
+                out = source_rule_help(&self.error, out);
             }
             TypeError::StringIndexWrite { target } => {
                 out = out.with_help(format!(

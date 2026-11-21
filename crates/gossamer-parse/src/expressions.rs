@@ -1354,7 +1354,7 @@ impl Parser<'_> {
         }
         if self.at_keyword(Keyword::Return) {
             self.bump();
-            if !is_expression_start(self) || at_block_end(self) {
+            if self.newline_before_peek() || !is_expression_start(self) || at_block_end(self) {
                 return ExprKind::Return(None);
             }
             let value = self.parse_expr_no_assign();
@@ -2944,13 +2944,11 @@ impl Parser<'_> {
         let mut stream =
             crate::stream::TokenStream::range(self.source, self.tokens.file(), start, end);
         for err in stream.take_lex_errors() {
-            let span = err.span();
-            self.record(
-                ParseError::Lex {
-                    message: err.to_string(),
-                },
-                span,
-            );
+            // The enclosing literal's own token already reported it.
+            if matches!(err, gossamer_lex::LexError::BidiControl { .. }) {
+                continue;
+            }
+            self.record(ParseError::from_lex(&err), err.span());
         }
         let saved_tokens = std::mem::replace(&mut self.tokens, stream);
         let saved_separator = self.newline_separator_at.take();

@@ -513,6 +513,43 @@ impl TypeChecker<'_> {
         }
     }
 
+    /// GT0132 for a Gossamer `static mut` named outside an `unsafe { }`
+    /// block. A static's generated initializer body is its one exempt writer.
+    fn check_static_mut_use(&mut self, expr: &Expr) {
+        if self.unsafe_depth > 0 {
+            return;
+        }
+        let Some(Resolution::Def {
+            def,
+            kind: gossamer_resolve::DefKind::Static,
+        }) = self.resolutions.get(expr.id)
+        else {
+            return;
+        };
+        // A C global is named only by `ffi::addr_of`, and its memory is read
+        // and written through `ffi::read` / `ffi::write`, which need `unsafe`.
+        if self.static_mutability.get(&def) != Some(&true)
+            || self.foreign_statics.contains_key(&def)
+        {
+            return;
+        }
+        let in_static_init = self
+            .current_fn_name
+            .as_deref()
+            .is_some_and(|n| n.starts_with(gossamer_ast::STATIC_INIT_FN));
+        if in_static_init {
+            return;
+        }
+        let ExprKind::Path(path) = &expr.kind else {
+            return;
+        };
+        let name = path
+            .segments
+            .last()
+            .map_or_else(String::new, |seg| seg.name.name.clone());
+        self.emit(TypeError::StaticMutOutsideUnsafe { name }, expr.span);
+    }
+
     /// GT0111 for a foreign static named outside `ffi::addr_of`.
     fn check_foreign_static_use(&mut self, expr: &Expr) {
         if self.addr_of_args.contains(&expr.id) {
@@ -1041,6 +1078,7 @@ impl TypeChecker<'_> {
                     self.check_ffi_construction(ty, expr.span);
                 }
                 self.check_foreign_static_use(expr);
+                self.check_static_mut_use(expr);
             }
             ExprKind::MethodCall { .. } => self.note_union_method(expr, ty),
             ExprKind::Block(block) if block.is_comptime() => {

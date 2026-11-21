@@ -1,0 +1,16 @@
+// ERROR: GT0138
+
+struct Point {
+    x: i64
+    y: i64
+    label: String
+}
+
+impl PartialEq for Point {
+    fn eq(&self, other: Point) -> bool { self.x == other.x && self.y == other.y }
+}
+
+fn main() {
+    let s = #{Point { x: 1, y: 2, label: "a" }, Point { x: 1, y: 2, label: "b" }}
+    println(f"{s.len()}")
+}

@@ -33,8 +33,8 @@ pub fn byte_len(text: &str) -> usize {
 
 /// Returns the byte at `index`, or `0` when out of bounds.
 #[must_use]
-pub fn byte_at(text: &str, index: usize) -> u8 {
-    text.as_bytes().get(index).copied().unwrap_or(0)
+pub fn byte_at(text: &str, index: usize) -> Option<u8> {
+    text.as_bytes().get(index).copied()
 }
 
 /// Returns a UTF-8 substring using byte offsets.
