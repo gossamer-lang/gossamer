@@ -2,6 +2,10 @@
 //! the CLI build script that builds the toolchain's archive and the driver's
 //! frame-pointer build of it.
 
+/// Starts every function on a 64-byte fetch line, so a hot loop's layout does
+/// not depend on how much code links ahead of it.
+pub const FUNCTION_ALIGNMENT_RUSTFLAG: &str = "-C llvm-args=-align-all-functions=6";
+
 /// The flags of the runtime archive a compiled program links, for a target of
 /// architecture `arch`, `musl` when the target is a static-musl one, and
 /// optimised when `release`.
@@ -16,7 +20,7 @@ pub fn program_archive_rustflags(release: bool, arch: &str, musl: bool) -> Vec<&
     // function on a line keeps its loops' layout the same in every program, as
     // the compiled program's own functions are.
     if release && arch == "x86_64" {
-        flags.push("-C llvm-args=-align-all-functions=6");
+        flags.push(FUNCTION_ALIGNMENT_RUSTFLAG);
     }
     // A musl archive only links into static executables, where code built for
     // a fixed address reaches its thread-locals at a constant offset from the

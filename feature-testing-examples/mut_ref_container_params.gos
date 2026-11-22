@@ -166,7 +166,7 @@ fn tail_call_duration(d: &mut time::Duration) -> i64 {
 
 fn main() {
     let mut map = { "a": 1, "b": 2 }
-    println("map get: {}", map_read(&mut map, "a"))
+    println("map get: {:?}", map_read(&mut map, "a"))
     println("map write: {} {}", map_write(&mut map), map)
 
     let mut int_map = { 1: 10, 2: 20 }

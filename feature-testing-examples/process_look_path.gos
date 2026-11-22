@@ -31,6 +31,6 @@ fn main() {
         None => println("found: none")
     }
     println(f"found in rounds: {found_rounds(PROGRAM, 20)}")
-    println(f"missing: {process::look_path("gos-no-such-program-0787")}")
-    println(f"empty: {process::look_path("")}")
+    println(f"missing: {process::look_path("gos-no-such-program-0787"):?}")
+    println(f"empty: {process::look_path(""):?}")
 }

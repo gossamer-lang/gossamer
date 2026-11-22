@@ -19,21 +19,21 @@ fn main() {
     """).unwrap()
     show("root", doc)
     println(json::encode_pretty(json::get(doc, "nested").unwrap()).unwrap())
-    println(f"b = {json::as_i64(json::get(doc, "b").unwrap())}")
-    println(f"kAy = {json::as_str(json::get(doc, "kAy").unwrap())}")
+    println(f"b = {json::as_i64(json::get(doc, "b").unwrap()):?}")
+    println(f"kAy = {json::as_str(json::get(doc, "kAy").unwrap()):?}")
     println(f"missing = {json::get(doc, "c").is_some()}")
     println(f"keys = {json::keys(doc).unwrap()}")
 
     let nums = json::as_array(json::get(doc, "nums").unwrap()).unwrap()
     for n in nums {
-        println(f"{json::encode(n).unwrap()} i64 {json::as_i64(n)} u64 {json::as_u64(n)} f64 {json::as_f64(n)}")
+        println(f"{json::encode(n).unwrap()} i64 {json::as_i64(n):?} u64 {json::as_u64(n):?} f64 {json::as_f64(n):?}")
     }
 
     let a = json::as_array(json::get(doc, "a").unwrap()).unwrap()
-    println(f"a: {a.len()} {json::as_bool(a[0])} {json::as_bool(a[2])} {json::as_str(a[3])} {a[2]}")
+    println(f"a: {a.len()} {json::as_bool(a[0]):?} {json::as_bool(a[2]):?} {json::as_str(a[3]):?} {a[2]}")
     let deep = json::get(json::get(doc, "nested").unwrap(), "deep").unwrap()
     let inner = json::as_array(deep).unwrap()
-    println(f"deep: {inner.len()} {inner[1]} {json::as_f64(json::get(inner[1], "z").unwrap())}")
+    println(f"deep: {inner.len()} {inner[1]} {json::as_f64(json::get(inner[1], "z").unwrap()):?}")
 
     let mut wide = "{"
     for i in 0..20 {
@@ -41,7 +41,7 @@ fn main() {
     }
     wide += "\"k3\": 99, \"last\": \"<&>\"}"
     let w = json::parse(wide).unwrap()
-    println(f"wide: {json::keys(w).unwrap().len()} k3 {json::as_i64(json::get(w, "k3").unwrap())} k19 {json::as_i64(json::get(w, "k19").unwrap())} none {json::get(w, "k20").is_some()}")
+    println(f"wide: {json::keys(w).unwrap().len()} k3 {json::as_i64(json::get(w, "k3").unwrap()):?} k19 {json::as_i64(json::get(w, "k19").unwrap()):?} none {json::get(w, "k20").is_some()}")
     show("wide", w)
 
     let built = json::Value::Array(#[json::get(doc, "nested").unwrap(), json::get(w, "last").unwrap()])

@@ -10,7 +10,7 @@ fn main() {
     for text in texts {
         let scalar = strings::find(text, "b")
         let byte = strings::byte_find(text, "b")
-        println(f"{text:?}: find {scalar} byte_find {byte} last {strings::byte_rfind(text, "a")}")
+        println(f"{text:?}: find {scalar:?} byte_find {byte:?} last {strings::byte_rfind(text, "a"):?}")
         match byte {
             Some(at) => println(f"  substring from byte_find: {strings::substring(text, at, at + 1):?}")
             None => println("  no match")
@@ -18,14 +18,14 @@ fn main() {
         match scalar {
             Some(i) => {
                 let converted = strings::byte_offset(text, i)
-                println(f"  byte_offset(find) = {converted}, round trip = {strings::char_index(text, converted.unwrap())}")
+                println(f"  byte_offset(find) = {converted:?}, round trip = {strings::char_index(text, converted.unwrap()):?}")
             }
-            None => println(f"  byte_offset(len) = {strings::byte_offset(text, text.len())}")
+            None => println(f"  byte_offset(len) = {strings::byte_offset(text, text.len()):?}")
         }
     }
     let emoji = "x\u{1F600}y"
-    println(f"inside a scalar: {strings::char_index(emoji, 2)}")
-    println(f"past the end: {strings::byte_offset(emoji, 9)} {strings::char_index(emoji, 99)}")
-    println(f"negative: {strings::byte_offset(emoji, -1)} {strings::char_index(emoji, -1)}")
-    println(f"char needle: {strings::byte_find(emoji, 'y')}")
+    println(f"inside a scalar: {strings::char_index(emoji, 2):?}")
+    println(f"past the end: {strings::byte_offset(emoji, 9):?} {strings::char_index(emoji, 99):?}")
+    println(f"negative: {strings::byte_offset(emoji, -1):?} {strings::char_index(emoji, -1):?}")
+    println(f"char needle: {strings::byte_find(emoji, 'y'):?}")
 }

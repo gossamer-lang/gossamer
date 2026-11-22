@@ -91,7 +91,7 @@ fn main() {
     match json::parse("{\"a\":1,\"b\":[true,null,3.5],\"s\":\"x\\ty\"}") {
         Ok(v) => {
             println("json render = {}", json::encode(v).unwrap())
-            println("json len = {}", json::len(v))
+            println("json len = {:?}", json::len(v))
         }
         Err(e) => println("json parse err {}", e)
     }

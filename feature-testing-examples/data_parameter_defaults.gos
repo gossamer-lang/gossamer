@@ -31,7 +31,7 @@ mod gfx {
             Profile::Compat => "compat"
             Profile::Es => "es"
         }
-        f"{title} {p} {size.w}x{size.h} at {at.w},{at.h} {parent} {samples} {tags.len()} {pair} {f(21)} {limit}"
+        f"{title} {p} {size.w}x{size.h} at {at.w},{at.h} {parent:?} {samples:?} {tags.len()} {pair} {f(21)} {limit}"
     }
 }
 

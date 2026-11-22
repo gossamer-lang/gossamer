@@ -103,7 +103,10 @@ impl TypeDiagnostic {
     /// reports at warning severity and never moves the exit code.
     #[must_use]
     pub const fn is_advisory(&self) -> bool {
-        matches!(self.error, TypeError::UndeclaredReturnValue { .. })
+        matches!(
+            self.error,
+            TypeError::UndeclaredReturnValue { .. } | TypeError::OptionRendered { .. }
+        )
     }
 
     /// Constructs a diagnostic from its error and span.
@@ -1227,6 +1230,15 @@ pub enum TypeError {
         /// Whether the container is a `BTreeMap` / `BTreeSet`.
         ordered: bool,
     },
+    /// An `Option` is rendered through `{}` among other text, where a missing
+    /// value reads as the word `None` in the middle of it.
+    #[error(
+        "an `Option<{inner}>` is rendered with `{{}}` among other text, so a missing value reads as `None`"
+    )]
+    OptionRendered {
+        /// The payload type, as rendered.
+        inner: String,
+    },
     /// A `static mut` is read or written outside an `unsafe { }` block.
     /// Every goroutine reaches the one cell with no lock, so the access site
     /// vouches that nothing else touches it at the same time.
@@ -1457,6 +1469,7 @@ impl TypeError {
             Self::DuplicateMethod { .. } => "duplicate-method",
             Self::Foreign(foreign) => foreign.tag(),
             Self::UndeclaredReturnValue { .. } => "undeclared-return-value",
+            Self::OptionRendered { .. } => "option-rendered",
             Self::RangeBorrow { .. } => "range-borrow",
             Self::UnknownAssocItem { .. } => "unknown-assoc-item",
             Self::AmbiguousAssocItem { .. } => "ambiguous-assoc-item",
@@ -1618,6 +1631,7 @@ impl TypeError {
             Self::ImplItemNotInTrait { .. } => "GT0072",
             Self::ConflictingTraitImpl { .. } => "GT0073",
             Self::UndeclaredReturnValue { .. } => "GL0055",
+            Self::OptionRendered { .. } => "GL0067",
             Self::RangeBorrow { .. } => "GT0075",
             Self::UnknownAssocItem { .. } => "GT0060",
             Self::AmbiguousAssocItem { .. } => "GT0061",
@@ -2282,6 +2296,15 @@ impl TypeDiagnostic {
                         "pass the copy `{base}[{range}]` to read it, or `&mut {base}[{range}]` \
                          to a `&mut [T]` parameter to write through it"
                     ));
+            }
+            TypeError::OptionRendered { .. } => {
+                out = out
+                    .with_help(
+                        "say what a missing value reads as: `v.unwrap_or(..)`, an `if let \
+                         Some(x) = v`, or a `match`; write `{v:?}` where `Some(..)` / `None` is \
+                         the text meant",
+                    )
+                    .with_note("lint: option_rendered");
             }
             TypeError::UndeclaredReturnValue { name, found } => {
                 out = out

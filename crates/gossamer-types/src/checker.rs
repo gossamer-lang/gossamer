@@ -136,6 +136,7 @@ impl TypeChecker<'_> {
         self.check_deferred_conversion_targets();
         self.check_deferred_hash_keys();
         self.check_deferred_const_exprs();
+        self.check_deferred_rendered_options();
         self.check_deferred_into_conversions();
         self.check_deferred_try_into_conversions();
         self.check_deferred_try_conversions();
@@ -1052,6 +1053,9 @@ struct TypeChecker<'a> {
     /// Values of immutable bindings a constant initializes, keyed by the
     /// binding's node.
     local_int_consts: HashMap<NodeId, i128>,
+    /// Values `{}` placeholders render, with the placeholder's span, checked
+    /// for an `Option` once inference settles (GL0067).
+    deferred_rendered_options: Vec<(NodeId, Span)>,
     /// Types whose `impl` writes their own `eq`, by definition.
     custom_eq_defs: HashSet<DefId>,
     /// Types whose `impl` writes their own `cmp`, by definition.
@@ -1463,6 +1467,7 @@ impl<'a> TypeChecker<'a> {
             deferred_hash_keys: Vec::new(),
             local_int_consts: HashMap::new(),
             custom_eq_defs: HashSet::new(),
+            deferred_rendered_options: Vec::new(),
             custom_cmp_defs: HashSet::new(),
             deferred_const_exprs: Vec::new(),
             reported_const_faults: HashSet::new(),
@@ -5435,6 +5440,7 @@ mod items;
 mod methods;
 mod operators;
 mod patterns;
+mod rendered_options;
 mod stdlib;
 mod types;
 

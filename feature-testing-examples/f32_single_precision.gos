@@ -58,7 +58,7 @@ fn containers() {
     println("{:?} {:?}", (a, 2, "s"), #[(0.1f32, 1)])
     let o: Option<f32> = Some(0.3)
     let r: Result<f32, String> = Ok(0.6)
-    println("{:?} {} {:?} {:?}", o, o, r, #[Some(0.1f32)])
+    println("{:?} {:?} {:?} {:?}", o, o, r, #[Some(0.1f32)])
     let mut m = { "k": 0.1f32 }
     m.insert("j", 2.5)
     let mut im: Map<i64, f32> = Map::new()

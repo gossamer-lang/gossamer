@@ -17,5 +17,5 @@ fn main() {
     let xs = (0..n).par_map(|i| value(i))
     let parity = xs.par_map(|v| if v % 2 == 0 { (1, 0) } else { (0, 1) })
         .par_reduce((0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
-    println("{} {} {} {} {}", xs.par_sum(), xs.par_min(), xs.par_max(), parity.0, parity.1)
+    println("{:?} {:?} {:?} {} {}", xs.par_sum(), xs.par_min(), xs.par_max(), parity.0, parity.1)
 }

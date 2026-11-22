@@ -63,7 +63,7 @@ fn main() {
     println(level(Low))
     println(l == Level::None)
     let missing: Option<i64> = Option::None
-    println(f"{missing} {Some(3)}")
+    println(f"{missing:?} {Some(3):?}")
     println(reply(Reply::None))
     println(reply(Reply::Some(4)))
     println(reply(Reply::Ok))

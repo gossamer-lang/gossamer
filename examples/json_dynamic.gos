@@ -23,12 +23,12 @@ let doc = json::parse("""
 }
 """)?
 
-println(f"service: {json::get(doc, "service").and_then(json::as_str)}")
-println(f"second port: {json::at(json::get(doc, "ports").unwrap(), 1)}")
-println(f"cpu: {json::pointer(doc, "/limits/cpu").and_then(json::as_f64)}")
-println(f"absent: {json::pointer(doc, "/limits/disk")}")
+println(f"service: {json::get(doc, "service").and_then(json::as_str):?}")
+println(f"second port: {json::at(json::get(doc, "ports").unwrap(), 1):?}")
+println(f"cpu: {json::pointer(doc, "/limits/cpu").and_then(json::as_f64):?}")
+println(f"absent: {json::pointer(doc, "/limits/disk"):?}")
 println(f"owner is null: {json::get(doc, "owner").is_some_and(json::is_null)}")
-println(f"members: {json::len(doc)}, replicas has none: {json::len(json::get(doc, "replicas").unwrap())}")
+println(f"members: {json::len(doc):?}, replicas has none: {json::len(json::get(doc, "replicas").unwrap()):?}")
 
 let limits = json::get(doc, "limits").unwrap()
 for (key, value) in json::entries(limits).unwrap_or(#[]) {
@@ -49,7 +49,7 @@ struct Probe {
     every: i64
 }
 let probe = json::to_value(Probe { path: "/health", every: 10 })?
-println(f"probe every: {probe.get("every")}")
+println(f"probe every: {probe.get("every"):?}")
 
 println(f"valid: {json::is_valid("[1, 2]")} {json::is_valid("[1, 2")}")
 println(json::encode(doc)?)

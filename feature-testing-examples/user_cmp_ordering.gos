@@ -31,26 +31,26 @@ fn main() {
     written.sort()
     println("sort {}", written)
     println("stable {}", sort::sort_stable(ranked()))
-    println("min {}", ranked().min())
-    println("max {}", ranked().max())
-    println("iter min {}", ranked().iter().min())
-    println("iter max {}", ranked().iter().max())
+    println("min {:?}", ranked().min())
+    println("max {:?}", ranked().max())
+    println("iter min {:?}", ranked().iter().min())
+    println("iter max {:?}", ranked().iter().max())
 
     // Already descending, so a search reads the same order it was built in.
-    println("search {}", sort::binary_search(written, Ranked { x: 2 }))
+    println("search {:?}", sort::binary_search(written, Ranked { x: 2 }))
     println("point {}", sort::partition_point(written, Ranked { x: 2 }))
 
     let mut structural = plain()
     structural.sort()
     println("plain sort {}", structural)
     println("plain stable {}", sort::sort_stable(plain()))
-    println("plain min {}", plain().min())
+    println("plain min {:?}", plain().min())
 
     let tuples = #[(2, "b"), (1, "a"), (3, "c")]
     println("tuple stable {}", sort::sort_stable(tuples))
     let sorted = sort::sort_stable(tuples)
-    println("tuple search {}", sort::binary_search(sorted, (2, "b")))
+    println("tuple search {:?}", sort::binary_search(sorted, (2, "b")))
     println("tuple point {}", sort::partition_point(sorted, (2, "b")))
 
-    println("scalars {} {}", sort::sort_stable(#[3, 1, 2]), sort::binary_search(#[1, 3, 5], 3))
+    println("scalars {} {:?}", sort::sort_stable(#[3, 1, 2]), sort::binary_search(#[1, 3, 5], 3))
 }

@@ -209,7 +209,10 @@ extend(&mut items)     // items is now #[1, 2, 1]
   strings and stray whitespace, it keeps a top-level whole float's `.0`,
   and it shows the structure of a type whose `Display` is overridden. Write `{}` unless you need one of those.
   `impl Display for T { fn fmt(&self) -> String }` overrides `{}` and
-  `to_string()`; `impl Debug for T { fn fmt }` overrides `{:?}`.
+  `to_string()`; `impl Debug for T { fn fmt }` overrides `{:?}`. An
+  `Option` rendered with `{}` among other text is GL0067 (`f"hi, {name}"`
+  reads `hi, None`): unwrap it (`name.unwrap_or("guest")`), or write
+  `{name:?}` where `Some(..)` / `None` is the text meant.
 - `"""` strings dedent to their closing delimiter; `f"""..."""` interpolates.
 - Two index spaces: `s.len()`, `s[i]` (a `char`), and `for c in s` count
   Unicode scalars; `s.byte_len()`, `s.byte_at(i)` (an `i64`), `s.bytes()`,

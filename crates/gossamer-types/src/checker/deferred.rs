@@ -1561,6 +1561,17 @@ impl TypeChecker<'_> {
     }
 
     pub(super) fn check_call(&mut self, callee: &Expr, args: &[Expr], expected: Expectation) -> Ty {
+        // A value that is the whole output reads as itself; one rendered among
+        // other text reads as part of a sentence.
+        if let ExprKind::Path(path) = &callee.kind
+            && let [segment] = path.segments.as_slice()
+            && segment.name.name == "__concat"
+            && args.len() > 1
+        {
+            for arg in args {
+                self.note_rendered_option(arg.id, arg.span);
+            }
+        }
         if let (ExprKind::Path(path), [source]) = (&callee.kind, args)
             && path.segments.len() == 1
             && path.segments[0].name.name == "__gos_codegen"

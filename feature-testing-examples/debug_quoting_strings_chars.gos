@@ -25,7 +25,7 @@ fn char_collections() {
     println("{:?} {:?} {:?}", cs, bs, m)
     println("{} {} {}", cs, bs, m)
     println("{:?} {}", ('x', 1), ('x', 1))
-    println("{:?} {}", Some('\t'), Some('y'))
+    println("{:?} {:?}", Some('\t'), Some('y'))
     let r: Result<char, String> = Ok('!')
     println("{:?}", r)
     println("{}", 'p')

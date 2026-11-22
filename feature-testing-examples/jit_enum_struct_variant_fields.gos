@@ -36,7 +36,7 @@ fn main() {
                 println(f"{e:?}")
                 match e {
                     Ev::Key { mods, code } => println(f"key {mods.shift} {code}")
-                    Ev::Menu { source, item } => println(f"menu {source} {item}")
+                    Ev::Menu { source, item } => println(f"menu {source:?} {item}")
                     Ev::Files { names } => println(f"files {names.len()}")
                     _ => ()
                 }

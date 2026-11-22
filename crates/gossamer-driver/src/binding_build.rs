@@ -399,16 +399,7 @@ strip = false
         } else {
             &["--lib"]
         };
-        // The CPU and heap samplers follow the frame-pointer chain through the
-        // runtime's frames, which a program built with `--frame-pointers` keeps.
-        let rustflags: Vec<&str> = if self.runtime && self.frame_pointers {
-            crate::archive_flags::FRAME_POINTER_RUSTFLAGS
-                .iter()
-                .flat_map(|flag| flag.split_whitespace())
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let rustflags = self.rustflags();
         let output = run_cargo_build(
             &CargoBuild {
                 manifest_path: &cargo_toml,
@@ -454,15 +445,45 @@ strip = false
         })
     }
 
+    /// The flags the archive's crates compile with. A runtime inside the
+    /// archive takes the toolchain runtime archive's own flags, so a program
+    /// with bindings links the runtime a program without them does: its
+    /// functions start on 64-byte fetch lines, and it registers the cycle
+    /// collector only for a program whose types need one. The bindings'
+    /// functions start on fetch lines too, so their hot loops keep one layout
+    /// however much runtime code links ahead of them.
+    fn rustflags(&self) -> Vec<&'static str> {
+        let target = self.cargo_target.as_deref();
+        let arch = target
+            .and_then(|t| t.split('-').next())
+            .unwrap_or(std::env::consts::ARCH);
+        let musl = target.is_some_and(|t| t.ends_with("-linux-musl"));
+        let release = matches!(self.profile, Profile::Release);
+        let mut flags = if self.runtime {
+            crate::archive_flags::program_archive_rustflags(release, arch, musl)
+        } else if release && arch == "x86_64" {
+            vec![crate::archive_flags::FUNCTION_ALIGNMENT_RUSTFLAG]
+        } else {
+            Vec::new()
+        };
+        // The CPU and heap samplers follow the frame-pointer chain through the
+        // runtime's frames, which a program built with `--frame-pointers` keeps.
+        if self.runtime && self.frame_pointers {
+            flags.extend(crate::archive_flags::FRAME_POINTER_RUSTFLAGS);
+        }
+        flags.into_iter().flat_map(str::split_whitespace).collect()
+    }
+
     fn stamp_kind(&self) -> String {
         let kind = match (self.runtime, self.frame_pointers) {
             (true, true) => "staticlib+runtime+frame-pointers",
             (true, false) => "staticlib+runtime",
             (false, _) => "staticlib",
         };
+        let kind = format!("{kind}[{}]", self.rustflags().join(" "));
         match &self.cargo_target {
             Some(t) => format!("{kind}:{t}"),
-            None => kind.to_string(),
+            None => kind,
         }
     }
 
@@ -2435,6 +2456,36 @@ mod tests {
                 .unwrap()
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_release_archive_links_the_runtime_the_toolchain_archive_does() {
+        let lib = |runtime: bool, profile: Profile, target: &str| StaticBindingsLib {
+            fingerprint_hex: "0a844ac8dc0c".to_string(),
+            workdir: std::env::temp_dir(),
+            bindings: Vec::new(),
+            profile,
+            cargo_target: Some(target.to_string()),
+            project_id: "app".to_string(),
+            runtime,
+            frame_pointers: false,
+            runtime_features: Vec::new(),
+        };
+        let toolchain: Vec<&str> =
+            crate::archive_flags::program_archive_rustflags(true, "x86_64", false)
+                .into_iter()
+                .flat_map(str::split_whitespace)
+                .collect();
+        let gnu = "x86_64-unknown-linux-gnu";
+        assert_eq!(lib(true, Profile::Release, gnu).rustflags(), toolchain);
+        let bindings_only = lib(false, Profile::Release, gnu).rustflags();
+        assert_eq!(bindings_only, ["-C", "llvm-args=-align-all-functions=6"]);
+        assert!(lib(false, Profile::Debug, gnu).rustflags().is_empty());
+        assert!(
+            lib(false, Profile::Release, "aarch64-unknown-linux-gnu")
+                .rustflags()
+                .is_empty()
+        );
     }
 
     #[test]

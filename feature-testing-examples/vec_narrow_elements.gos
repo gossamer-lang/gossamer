@@ -93,9 +93,9 @@ fn reads_and_writes() {
     let mut v: Vec<i16> = #[10, -20, 30, -40, 50]
     v[1] = -32_768
     v[4] = v[4] - 51
-    println(f"set: {v} first {v.first()} last {v.last()} get {v.get(2)} miss {v.get(9)}")
+    println(f"set: {v} first {v.first():?} last {v.last():?} get {v.get(2):?} miss {v.get(9):?}")
     let popped = v.pop()
-    println(f"pop: {popped} rest {v}")
+    println(f"pop: {popped:?} rest {v}")
     if v.insert(0, -1).is_err() {
         println("insert failed")
     }
@@ -127,8 +127,8 @@ fn reads_and_writes() {
 fn search_and_order() {
     let mut v: Vec<i32> = #[5, -3, 2_147_483_647, -2_147_483_648, 0, -3]
     println(f"contains: {v.contains(-3)} {v.contains(4)} {v.contains(-2_147_483_648)}")
-    println(f"index_of: {v.index_of(-3)} {v.index_of(9)}")
-    println(f"min/max: {v.min()} {v.max()} sum {v.map(|x| x as i64).sum()}")
+    println(f"index_of: {v.index_of(-3):?} {v.index_of(9):?}")
+    println(f"min/max: {v.min():?} {v.max():?} sum {v.map(|x| x as i64).sum()}")
     v.sort()
     println(f"sorted: {v}")
     println(f"binary_search: {v.binary_search(0)} {v.binary_search(1)}")
@@ -140,7 +140,7 @@ fn search_and_order() {
     println(f"sort_by_key: {v}")
     let mut u: Vec<u32> = #[3_000_000_000, 5, 4_294_967_295, 0]
     u.sort()
-    println(f"unsigned sort: {u} max {u.max()} min {u.min()}")
+    println(f"unsigned sort: {u} max {u.max():?} min {u.min():?}")
     let mut w: Vec<u16> = #[65_535, 1, 40_000]
     w.sort()
     println(f"u16 sort: {w} contains {w.contains(40_000)}")
@@ -152,10 +152,10 @@ fn search_and_order() {
     println(f"char sort: {cs} contains {cs.contains('é')}")
     let bytes: Vec<u8> = #[1, 3, 5, 7]
     let shuffled: Vec<u8> = #[3, 1, 2]
-    println(f"bytes: {bytes.binary_search(5)} {sort::binary_search(bytes, 5)} {sort::sort_stable(shuffled)} {sort::partition_point(bytes, 4)}")
+    println(f"bytes: {bytes.binary_search(5)} {sort::binary_search(bytes, 5):?} {sort::sort_stable(shuffled)} {sort::partition_point(bytes, 4)}")
     let joined = v.map(|x| f"<{x}>").join(",")
     println(f"joined: {joined}")
-    println(f"any/all: {v.any(|x| x < 0)} {v.all(|x| x < 0)} position {v.position(|x| x == 0)}")
+    println(f"any/all: {v.any(|x| x < 0)} {v.all(|x| x < 0)} position {v.position(|x| x == 0):?}")
 }
 
 fn equality_and_keys() {
@@ -199,7 +199,7 @@ fn runtime_built() {
     let s: Set<i16> = #{ -300, 7 }
     let mut members = s.to_vec()
     members.sort()
-    println(f"members: {members} max {members.max()}")
+    println(f"members: {members} max {members.max():?}")
     let v: Vec<i16> = #[-4, -3, -2, -1, 0, 1, 2]
     let chunks = v.chunks(3)
     let windows = v.windows(2)
@@ -209,7 +209,7 @@ fn runtime_built() {
     println(f"flatten: {nested.flatten()}")
     let mut rev = v.iter().rev().collect::<Vec<i16>>()
     rev.sort()
-    println(f"rev sorted: {rev} index {rev.index_of(-4)}")
+    println(f"rev sorted: {rev} index {rev.index_of(-4):?}")
 }
 
 fn scaled(xs: [f32], k: f32) -> Vec<f32> {
@@ -226,7 +226,7 @@ fn floats() {
     println(f"f32 literal: {v} {v[1] == a * 3.0} {v[2] as f64}")
     v[0] = v[0] + 0.2
     v.push(2.5)
-    println(f"f32 set/push: {v[0]} {v.last()} {v.len()} {v.pop()}")
+    println(f"f32 set/push: {v[0]} {v.last():?} {v.len()} {v.pop():?}")
     let mut total: f32 = 0.0
     for x in v {
         total += x
@@ -240,7 +240,7 @@ fn floats() {
     println(f"f32 map/filter: {doubled} {kept}")
     let mut sorted = v.clone()
     sorted.sort()
-    println(f"f32 sort: {sorted} contains {sorted.contains(0.5)} max {sorted.max()}")
+    println(f"f32 sort: {sorted} contains {sorted.contains(0.5)} max {sorted.max():?}")
     let s = scaled(#[1.5, -2.25], 2.0)
     println(f"f32 built in a loop: {s} {s[1]}")
     let repeated: Vec<f32> = #[0.1; 3]

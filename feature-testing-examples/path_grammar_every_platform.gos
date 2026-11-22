@@ -6,8 +6,8 @@ fn main() {
         println(f"{p} absolute {path::is_absolute(p)}")
         println(f"  join {path::join(p, "packaging.toml")}")
         println(f"  normalize {path::normalize(p)}")
-        println(f"  parent {path::parent(p)}")
-        println(f"  file_name {path::file_name(p)}")
+        println(f"  parent {path::parent(p):?}")
+        println(f"  file_name {path::file_name(p):?}")
         println(f"  components {path::components(p)}")
     }
     println(f"replace {path::join("examples", "C:\\x")}")

@@ -28,7 +28,7 @@ fn main() {
         move_to(n)
         show()
     }
-    unsafe { println(f"last {LAST}") }
+    unsafe { println(f"last {LAST:?}") }
     unsafe { ACTIVE = None }
     show()
     start(9)

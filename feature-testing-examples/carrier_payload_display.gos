@@ -11,10 +11,10 @@ fn check(i: i64) -> Result<(), errors::Error> {
 }
 
 fn show(doc: json::Value, i: i64) {
-    println("{} {:?} {}", json::at(doc, i), json::at(doc, i), json::get(doc, "k"))
+    println("{:?} {:?} {:?}", json::at(doc, i), json::at(doc, i), json::get(doc, "k"))
     println("{} {:?}", check(i), check(i))
     let unit: Option<()> = if i == 0 { Some(()) } else { None }
-    println("{} {:?}", unit, json::len(doc))
+    println("{:?} {:?}", unit, json::len(doc))
 }
 
 fn main() {

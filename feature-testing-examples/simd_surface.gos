@@ -13,7 +13,7 @@ fn main() {
     let t: Simd<u8, 16> = Simd::splat(20)
     println(f"usat- {u.saturating_sub(t)} usat+ {u.saturating_add(t)}")
     let m = u.lanes_gt(t)
-    println(f"mask {m.to_bitmask()} any {m.any()} all {m.all()} first {m.first_set()}")
+    println(f"mask {m.to_bitmask()} any {m.any()} all {m.all()} first {m.first_set():?}")
     let back: Mask<16> = Mask::from_bitmask(m.to_bitmask())
     println(f"round {back.to_bitmask() == m.to_bitmask()}")
     let rev = u.swizzle([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0])

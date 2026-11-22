@@ -15,5 +15,5 @@ fn main() {
     let _ = { local }.pop()
     let mut copy = unsafe { STACK }
     copy.push(99)
-    println(f"{popped} {unsafe { STACK }} {unsafe { TALLY.len() }} {local} {copy.len()}")
+    println(f"{popped:?} {unsafe { STACK }} {unsafe { TALLY.len() }} {local} {copy.len()}")
 }

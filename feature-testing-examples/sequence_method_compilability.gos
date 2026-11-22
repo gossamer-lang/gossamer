@@ -17,7 +17,7 @@ fn main() {
 
     println("{} {} {:?}", xs.len(), xs.is_empty(), xs.first())
     println("{:?} {:?} {}", xs.last(), xs.get(0), xs.contains(1))
-    println("{} {}", xs.index_of(1), xs.count_of(1))
+    println("{:?} {}", xs.index_of(1), xs.count_of(1))
     println("{:?}", xs.slice(0, 2))
     println("{}", xs.sum())
     println("{:?}", xs.map(|v| v * 2))

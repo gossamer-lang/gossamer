@@ -57,7 +57,7 @@ fn main() {
     println("split_parts={}", literal.split(nul()).len())
     println("split_lens={} {}", literal.split(nul())[0].len(), literal.split(nul())[2].len())
     println("join={}", hex::encode(#["a", "b"].join(nul()).as_bytes()))
-    println("find={}", literal.find("three"))
+    println("find={:?}", literal.find("three"))
     println("substring={}", hex::encode(literal.substring(0, 5).as_bytes()))
     println("slice={}", hex::encode(literal.slice(4, 9).unwrap_or("").as_bytes()))
     println("truncate={}", { let mut t = literal; t.truncate(7); hex::encode(t.as_bytes()) })
