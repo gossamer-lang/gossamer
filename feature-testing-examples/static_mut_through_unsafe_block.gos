@@ -1,5 +1,6 @@
-// A block that only names a place is that place: a method called on
-// `unsafe { XS }` or on `{ v }` writes `XS` or `v`, and binding the block
+// `unsafe` makes no value of its own, so a method called on `unsafe { XS }`
+// writes `XS`; a plain block answers a value of its own, so a method called
+// on `{ v }` works on a copy and leaves `v` as it was. Binding either block
 // copies the value, as binding the place does. Identical on every tier.
 
 static mut STACK: Vec<i64> = #[1, 2, 3]

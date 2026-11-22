@@ -1969,6 +1969,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/map_literal_distinct_keys.gos"),
     spec("feature-testing-examples/bidi_escapes_in_literals.gos"),
     spec("feature-testing-examples/custom_eq_ordered_keys.gos"),
+    spec("feature-testing-examples/hash_keys_by_definition.gos"),
     spec("feature-testing-examples/closure_goroutine.gos"),
     spec("feature-testing-examples/go_stdlib_spawn.gos"),
     spec("feature-testing-examples/spawn_operand_order.gos"),

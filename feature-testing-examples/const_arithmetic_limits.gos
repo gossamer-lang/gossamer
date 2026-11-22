@@ -13,11 +13,12 @@ const SCALED: u32 = 70_000 *% 70_000
 const UNSIGNED_TOP: u64 = 18_446_744_073_709_551_615
 const SHIFTED: i64 = 1 << 62
 const REMAINDER: i64 = -7 % 3
+const WRAPPED_CAST: u8 = (BYTE_MAX +% 10) as u8
 static LIMIT: i64 = YEAR_NS / DAY_NS - 1
 
 fn main() {
     println(f"{DAY_NS} {YEAR_NS} {CENTURIES}")
     println(f"{TOP} {BOTTOM}")
     println(f"{BYTE_MAX} {WRAPPED} {SCALED} {UNSIGNED_TOP}")
-    println(f"{SHIFTED} {REMAINDER} {LIMIT}")
+    println(f"{SHIFTED} {REMAINDER} {LIMIT} {WRAPPED_CAST}")
 }

@@ -133,10 +133,11 @@ documentation; a run of `//` comments at the very top of a file is the
 module's documentation. Tooling reads these by position. This keeps one
 comment form instead of three (`//`, `///`, `//!`).
 
-A Unicode bidirectional control character (U+202A to U+202E, U+2066 to
-U+2069, U+200E, U+200F) anywhere in the source text, a comment or a literal
+A Unicode bidirectional embedding, override, or isolate control (U+202A to
+U+202E, U+2066 to U+2069) anywhere in the source text, a comment or a literal
 included, is `GP0070`: it reorders how the line displays without changing
-what compiles. A literal spells one as an escape, `"\u{202E}"`.
+what compiles. A literal spells one as an escape, `"\u{202E}"`. The
+directional marks U+200E, U+200F, and U+061C reorder nothing and are allowed.
 
 ### 2.2 Tokens
 
