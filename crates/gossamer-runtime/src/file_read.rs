@@ -37,9 +37,16 @@ pub fn read_to_string(path: &Path) -> io::Result<String> {
 }
 
 /// Opens `path` for reading with close-on-exec set.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(miri)))]
 pub(crate) fn open_for_read(path: &Path) -> io::Result<File> {
     Ok(File::from(open_cloexec(path, libc::O_RDONLY)?))
+}
+
+// Miri models `File::open` but does not interpret the raw `openat` syscall
+// used by the Linux close-on-exec fast path.
+#[cfg(all(target_os = "linux", miri))]
+pub(crate) fn open_for_read(path: &Path) -> io::Result<File> {
+    File::open(path)
 }
 
 /// Opens `path` with `flags` and close-on-exec set.
@@ -47,7 +54,7 @@ pub(crate) fn open_for_read(path: &Path) -> io::Result<File> {
 /// musl's `open` follows an `O_CLOEXEC` open with an `fcntl(F_SETFD)` for
 /// kernels older than 2.6.23, which ignored the flag; every kernel this runtime
 /// supports honors it, so the descriptor comes from the system call directly.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(miri)))]
 pub(crate) fn open_cloexec(path: &Path, flags: libc::c_int) -> io::Result<std::os::fd::OwnedFd> {
     use std::os::fd::FromRawFd;
     use std::os::unix::ffi::OsStrExt;

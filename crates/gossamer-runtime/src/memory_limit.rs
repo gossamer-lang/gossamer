@@ -30,7 +30,7 @@ pub fn out_of_memory_message(bytes: u128) -> String {
 }
 
 // Linux reports physical memory and swap in units of `mem_unit` bytes.
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(all(any(target_os = "linux", target_os = "android"), not(miri)))]
 fn read_commit_limit() -> Option<u64> {
     // SAFETY: `sysinfo` fills the zeroed struct it is handed and reads nothing else.
     let mut info: libc::sysinfo = unsafe { std::mem::zeroed() };
@@ -62,7 +62,7 @@ fn read_commit_limit() -> Option<u64> {
 
 // Other platforms grow swap on demand or report no total; only the
 // allocator's refusal bounds a buffer there.
-#[cfg(not(any(target_os = "linux", target_os = "android", windows)))]
+#[cfg(any(miri, not(any(target_os = "linux", target_os = "android", windows))))]
 fn read_commit_limit() -> Option<u64> {
     None
 }
