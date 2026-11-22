@@ -230,7 +230,12 @@ fn has_typed_body_shape(s: *const c_char) -> bool {
 #[cfg(miri)]
 #[inline]
 fn typed_body_is_known(s: *const c_char) -> bool {
-    body_is_probeable(s) || crate::c_abi::rc::in_region_arena(s.cast())
+    body_is_probeable(s)
+        || crate::c_abi::rc::in_region_arena(s.cast())
+        || ASCII_STRINGS
+            .0
+            .iter()
+            .any(|blob| blob[STATIC_BODY_AT..].as_ptr().cast::<c_char>() == s)
 }
 
 // Compiled code's static literals are bodies the runtime cannot enumerate, so
@@ -4253,7 +4258,12 @@ fn ascii_string(byte: u8) -> Option<*mut c_char> {
     let blob = ASCII_STRINGS.0.get(usize::from(byte))?;
     // A static body is never written: every path that grows or releases a
     // string copies or skips one, as it does a literal.
-    Some(blob[STATIC_BODY_AT..].as_ptr().cast::<c_char>().cast_mut())
+    Some(
+        blob.as_ptr()
+            .wrapping_add(STATIC_BODY_AT)
+            .cast::<c_char>()
+            .cast_mut(),
+    )
 }
 
 /// Bytes of one single-character literal blob.

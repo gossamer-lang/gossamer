@@ -2400,7 +2400,7 @@ mod tests {
     /// taken below is ours only once it waits; a missed signal would leave it
     /// to time out.
     #[test]
-    #[cfg_attr(miri, ignore)] // the watchdog pause is not built under Miri
+    #[cfg(not(miri))] // the watchdog pause is not built under Miri
     fn shutdown_signals_a_pausing_watchdog() {
         let sched = MultiScheduler::new(1);
         let shared = Arc::clone(&sched.inner);
@@ -2431,7 +2431,7 @@ mod tests {
 
     /// A pause that starts after shutdown began returns at once.
     #[test]
-    #[cfg_attr(miri, ignore)] // the watchdog pause is not built under Miri
+    #[cfg(not(miri))] // the watchdog pause is not built under Miri
     fn the_watchdog_pause_ends_once_stopping() {
         let sched = MultiScheduler::new(1);
         sched.shutdown();
@@ -2591,7 +2591,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)] // starts worker threads that sigaltstack; Miri has no signals
+    #[cfg(not(miri))] // `nothing_to_watch` is not built under Miri
     fn a_parked_pool_leaves_the_watchdog_nothing_to_watch() {
         let sched = MultiScheduler::new(2);
         sched.start();
@@ -2620,7 +2620,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)]
+    #[cfg(not(miri))] // `rest_bound` is not built under Miri
     fn a_running_worker_keeps_the_allocator_purge_on_a_window() {
         let sched = MultiScheduler::new(1);
         sched.start();

@@ -1,6 +1,10 @@
 # Changelog
 
-## 0.84.1 - Bindings link the runtime the toolchain archive does, and an `Option` in text is flagged
+## 0.84.2 - Miri fixes
+
+- The Miri runtime shard runs cleanly: memory-limit probing and Linux file opening use Miri-compatible paths, static ASCII string headers retain readable provenance, and tests for native-only watchdog helpers are excluded when those helpers are not built.
+
+## 0.84.1 - Bindings link the same runtime the toolchain archive does, and an `Option` in text is flagged
 
 - A release program with `[rust-bindings]` links a runtime built with the toolchain runtime archive's flags: its functions and the bindings' start on 64-byte fetch lines, so a hot loop keeps one layout however much code links ahead of it, and the runtime buffers cycle-collector candidates only for a program whose types need the collector. Event handling in such a program no longer slowed when the runtime grew.
 - An `Option` rendered with `{}` among other text, in an f-string or a `println` / `format` template, is the warning `GL0067`, which points at the value: `f"hello, {name}"` with `name: None` printed `hello, None` with no diagnostic. An `Option` that is the whole output (`println(opt)`) is not flagged.
