@@ -32,6 +32,6 @@ fn main() {
 
     let docs = yaml::parse_all("b: 1\na: [x, 2.5]\n---\nc: 18446744073709551615\n").unwrap()
     for d in docs {
-        println(f"keys={json::keys(d)} len={json::len(d)} c={json::get(d, "c").map(json::as_u64)}")
+        println(f"keys={json::keys(d):?} len={json::len(d):?} c={json::get(d, "c").map(json::as_u64):?}")
     }
 }

@@ -17,5 +17,5 @@ fn main() {
     let parity = xs.map(|v| if v % 2 == 0 { (1, 0) } else { (0, 1) })
         .iter()
         .fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
-    println("{} {} {} {} {}", xs.iter().sum(), xs.min(), xs.max(), parity.0, parity.1)
+    println("{:?} {:?} {:?} {} {}", xs.iter().sum(), xs.min(), xs.max(), parity.0, parity.1)
 }

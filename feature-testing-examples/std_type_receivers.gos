@@ -69,6 +69,6 @@ fn main() {
 
     let tx, rx = channel_unbounded::<i64>()
     if tx.try_send(4) {
-        println(f"taken {rx.try_recv()}")
+        println(f"taken {rx.try_recv():?}")
     }
 }

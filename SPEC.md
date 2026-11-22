@@ -284,6 +284,13 @@ renders them. A placeholder with no expression (`{}`, `{:.2}`) is
 is `GP0065`. `f"x is: {x}"` is the value `format("x is: {x}")` answers, on
 every tier.
 
+An `Option` rendered with `{}` among other text, in an interpolated string or
+a template, is the warning `GL0067`: `f"hello, {name}"` with `name: None` reads
+`hello, None`. Say what a missing value reads as (`name.unwrap_or("guest")`,
+an `if let`, a `match`), or write `{name:?}` where the `Some(..)` / `None`
+spelling is the text meant. An `Option` that is the whole output
+(`println(opt)`, `f"{opt}"`) reads as itself and is not flagged.
+
 Literal suffixes disambiguate type:
 
 - `42i32`, `42u64`, `42usize` - typed integer literals.

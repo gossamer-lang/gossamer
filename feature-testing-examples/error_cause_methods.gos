@@ -30,7 +30,7 @@ fn main() {
     for i in 0..1000 {
         junk.push(errors::new(f"junk {i}"))
     }
-    println(f"{kept} {junk.len()}")
+    println(f"{kept:?} {junk.len()}")
 
     let mut total = 0
     for _ in 0..2000 {

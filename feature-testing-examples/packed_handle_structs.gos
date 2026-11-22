@@ -146,7 +146,7 @@ fn main() {
 
     let h = Holder { small: 65000, inner: make(6), tail: 255, opt: Some("x") }
     let h2 = Holder { small: h.small, inner: bump(h.inner), tail: h.tail, opt: None }
-    println(f"{h.small} {h.inner} {h.tail} {h.opt} {h2.inner} {h2.opt}")
+    println(f"{h.small} {h.inner} {h.tail} {h.opt:?} {h2.inner} {h2.opt:?}")
 
     let shapes = #[Shape::Dot(make(9)), Shape::Pair(3, "p", true), Shape::Empty]
     for sh in shapes {

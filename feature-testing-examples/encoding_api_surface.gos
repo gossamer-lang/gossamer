@@ -50,9 +50,9 @@ fn main() -> Result<(), errors::Error> {
     println(f"{toml::encode::<Vec<i64>>(#[1])}")
 
     let v = json::to_value(s)?
-    println(f"{json::pointer(v, "/limits/max")} {json::to_value(#[1, 2])?}")
+    println(f"{json::pointer(v, "/limits/max"):?} {json::to_value(#[1, 2])?}")
     let arr = json::parse("[10, 20]")?
-    println(f"{json::at(arr, 1)} {json::at(arr, 2)} {json::len(arr)} {json::len(json::at(arr, 0).unwrap())}")
+    println(f"{json::at(arr, 1):?} {json::at(arr, 2):?} {json::len(arr):?} {json::len(json::at(arr, 0).unwrap()):?}")
     println(f"{json::is_valid("[1")} {json::is_valid("[1]")} {xml::is_valid("<a>")} {xml::is_valid("<a/>")}")
 
     let tree = xml::parse("<a x=\"1\"><b>t</b></a>")?
@@ -76,9 +76,9 @@ fn main() -> Result<(), errors::Error> {
     print(yaml::encode(owners[0], sort: true)?)
     println(json::encode(owners[0])?)
     let back: Vec<Owner> = json::decode("[{\"name\":\"cy\",\"email\":null}]")?
-    println(f"{back[0].name} {back[0].email}")
+    println(f"{back[0].name} {back[0].email:?}")
     let dynamic: json::Value = json::decode("[1]")?
-    println(f"{json::len(dynamic)} {dynamic.len()} {dynamic.at(0)} {dynamic.at(5)}")
+    println(f"{json::len(dynamic):?} {dynamic.len():?} {dynamic.at(0):?} {dynamic.at(5):?}")
 
     yaml::set_max_depth(1)
     println(f"{yaml::parse("a: {b: 1}").is_err()}")

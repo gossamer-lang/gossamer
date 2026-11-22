@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GL0067]: An `Option` is rendered with `{}` among other text, in an f-string - here
+--- framed ---
+error[GL0067]: An `Option` is rendered with `{}` among other text, in an f-string
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

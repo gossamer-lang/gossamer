@@ -22,8 +22,8 @@ fn main() {
     println(f"{json::pointer(doc, "/current/temperature").and_then(json::as_f64)}")
     println(f"{json::pointer(doc, "/current/weather_descriptions/0").and_then(json::as_str)}")
     println(f"{doc.pointer("/a~1b/~0k")}")
-    println(f"{json::pointer(doc, "/list/1")} {json::pointer(doc, "/list/01")} {json::pointer(doc, "/list/-")} {json::pointer(doc, "/list/5")}")
-    println(f"{json::pointer(doc, "current")} {json::pointer(doc, "/missing/x")}")
+    println(f"{json::pointer(doc, "/list/1"):?} {json::pointer(doc, "/list/01"):?} {json::pointer(doc, "/list/-"):?} {json::pointer(doc, "/list/5"):?}")
+    println(f"{json::pointer(doc, "current"):?} {json::pointer(doc, "/missing/x"):?}")
     for (key, value) in json::entries(doc).unwrap() {
         println(f"{key} = {value}")
     }

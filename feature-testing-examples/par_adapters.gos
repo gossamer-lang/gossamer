@@ -16,7 +16,7 @@ fn main() {
     println("{}", evens.len())
     println("{}", xs.par_sum())
     println("{}", xs.par_reduce(0, |a, b| a + b))
-    println("{} {}", xs.par_min(), xs.par_max())
+    println("{:?} {:?}", xs.par_min(), xs.par_max())
 
     let names = xs.par_map(label)
     println("{} {} {:?} {:?}", names[0], names[49999], names.par_min(), names.par_max())

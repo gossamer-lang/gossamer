@@ -18,7 +18,7 @@ fn main() {
         v = rx.recv() => v
         default => Some(-1)
     }
-    println("open empty = {}", open)
+    println("open empty = {:?}", open)
 
     // 2. After close, the same channel's recv arm is ready with `None`,
     //    chosen over the default.
@@ -27,7 +27,7 @@ fn main() {
         v = rx.recv() => v
         default => Some(-1)
     }
-    println("closed = {}", closed)
+    println("closed = {:?}", closed)
 
     // 3. A closed channel still drains its buffered values in order,
     //    then answers `None` once empty.

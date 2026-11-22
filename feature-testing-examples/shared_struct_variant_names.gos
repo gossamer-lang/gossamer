@@ -25,7 +25,7 @@ fn describe_expr(e: Expr) -> String {
         Expr::Lit(v) => f"lit {v}"
         Expr::Unary { op, operand } => f"unary {op}{operand}"
         Expr::Struct { path, fields, base, braced } => {
-            f"struct {path} {fields} {base} braced={braced}"
+            f"struct {path} {fields} {base:?} braced={braced}"
         }
     }
 }

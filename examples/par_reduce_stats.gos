@@ -12,8 +12,8 @@ fn main() {
     let xs = (0..5000000).par_map(value)
 
     println(f"sum: {xs.par_sum()}")
-    println(f"min: {xs.par_min()}")
-    println(f"max: {xs.par_max()}")
+    println(f"min: {xs.par_min():?}")
+    println(f"max: {xs.par_max():?}")
 
     // A custom associative combine: carry (count of evens, count of odds).
     let parity = xs.par_map(|v| if v % 2 == 0 { (1, 0) } else { (0, 1) })

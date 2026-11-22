@@ -25,7 +25,7 @@ fn round(i: i64) {
     println(f"{wire_probe::flags(#[true, false]):?}")
     println(f"{wire_probe::words(#["a", "bc"]):?}")
     println(f"{wire_probe::grid(3):?}")
-    println(f"{wire_probe::maybe_int(i)} {wire_probe::maybe_int(0)}")
+    println(f"{wire_probe::maybe_int(i):?} {wire_probe::maybe_int(0):?}")
     println(f"{wire_probe::maybe_text(i):?} {wire_probe::maybe_text(0):?}")
     println(f"{wire_probe::maybe_float(i)}")
     println(f"{wire_probe::maybe_words(2):?}")

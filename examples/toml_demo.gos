@@ -37,7 +37,7 @@ pool = 16
 """
 
 let config = toml::decode::<Config>(text)?
-println(f"{config.name} on {config.port}, pool {config.database.pool}, owner {config.owner}")
+println(f"{config.name} on {config.port}, pool {config.database.pool}, owner {config.owner:?}")
 
 print(toml::encode(config)?)
 println("---")
@@ -45,7 +45,7 @@ print(toml::encode(config, sort: true)?)
 println("---")
 
 let doc = toml::parse(text)?
-println(f"database.url: {json::pointer(doc, "/database/url")}")
+println(f"database.url: {json::pointer(doc, "/database/url"):?}")
 println(toml::to_json_text("b = 1\na = [true, false]\n")?)
 print(toml::from_json_text("{\"z\": 1, \"a\": {\"x\": \"y\"}}")?)
 println(f"valid: {toml::is_valid(text)} {toml::is_valid("port == 8080")}")

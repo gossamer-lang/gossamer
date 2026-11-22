@@ -52,7 +52,7 @@ fn main() {
         let built_get = m.get(key)
         let built_has = m.contains_key(key)
         let built_or = m.get_or(key, -1)
-        println(f"[{a},{b}) {fused_get} {fused_has} {fused_or} {trimmed} | {built_get} {built_has} {built_or} {key:?}")
+        println(f"[{a},{b}) {fused_get:?} {fused_has} {fused_or} {trimmed} | {built_get:?} {built_has} {built_or} {key:?}")
     }
 
     let mut counts: Map<String, i64> = Map::new()

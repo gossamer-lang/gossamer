@@ -23,6 +23,6 @@ fn main() {
         tx.send(1)
     })
     let got = rx.recv()
-    println("peer ran: {}", got)
+    println("peer ran: {:?}", got)
     process::exit(0)
 }

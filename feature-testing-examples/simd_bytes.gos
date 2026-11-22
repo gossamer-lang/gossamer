@@ -168,8 +168,8 @@ fn main() {
     for text in inputs {
         let ours = base64_decode(text)
         let theirs = base64::decode(text)
-        println(f"base64 {ours} {theirs.is_ok()} {ours == theirs.ok()}")
+        println(f"base64 {ours:?} {theirs.is_ok()} {ours == theirs.ok()}")
     }
     let hay = "the needle is near the end of this haystack: X".bytes()
-    println(f"find {find_byte(hay, 88)} {scalar_find(hay, 88)} {find_byte(hay, 63)} {scalar_find(hay, 116)}")
+    println(f"find {find_byte(hay, 88):?} {scalar_find(hay, 88):?} {find_byte(hay, 63):?} {scalar_find(hay, 116):?}")
 }

@@ -21,7 +21,7 @@ fn main() {
     println(m.insert("a", 10))
     println(m.entries())
     println(m.remove("c"))
-    println(f"{m.keys()} {m.get("b")} {m.get("z")} {m.len()} {m.contains_key("a")}")
+    println(f"{m.keys()} {m.get("b"):?} {m.get("z"):?} {m.len()} {m.contains_key("a")}")
     println(tally(#["z", "y", "z", "x", "y", "z"]).entries())
 
     let mut bits = BitSet::new()

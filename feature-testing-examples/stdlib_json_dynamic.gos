@@ -7,7 +7,7 @@ use std::encoding::json
 
 fn run() -> Result<(), String> {
     let v = json::parse("{\"n\": 42, \"f\": 3.5, \"s\": \"hi\", \"b\": true, \"z\": null, \"xs\": [10, 20, 30]}")?
-    println("len={}", json::len(v))
+    println("len={:?}", json::len(v))
 
     match json::as_i64(json::get(v, "n").unwrap()) {
         Some(n) => println("n={}", n)
@@ -28,7 +28,7 @@ fn run() -> Result<(), String> {
     println("z_null={}", json::is_null(json::get(v, "z").unwrap()))
 
     let xs = json::get(v, "xs").unwrap()
-    println("xs_len={}", json::len(xs))
+    println("xs_len={:?}", json::len(xs))
     let mut total = 0
     for i in 0..3 {
         match json::at(xs, i).and_then(json::as_i64) {

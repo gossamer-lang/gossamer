@@ -35,7 +35,7 @@ fn main() {
             Err(e) => println(f"collect failed: {e}")
         }
         match index(skip, bad) {
-            Ok(m) => println(f"index {m.len()} {m.get("n")}")
+            Ok(m) => println(f"index {m.len()} {m.get("n"):?}")
             Err(e) => println(f"index failed: {e}")
         }
     }

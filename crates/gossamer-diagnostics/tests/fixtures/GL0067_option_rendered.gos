@@ -1,0 +1,6 @@
+// ERROR: GL0067
+
+fn main() {
+    let name: Option<String> = None
+    println(f"hello, {name}")
+}

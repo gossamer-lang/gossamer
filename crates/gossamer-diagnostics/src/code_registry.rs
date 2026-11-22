@@ -378,6 +378,17 @@ pub const REGISTRY: &[(&str, &str)] = &[
             lost. `counter.update(|n| n + 1)` holds the lock across both.",
     ),
     (
+        "GL0067",
+        "An `Option` is rendered with `{}` among other text, in an f-string\n\
+            or a `println` / `format` template, so a value that is absent reads\n\
+            as the word `None` in the middle of the sentence, and one that is\n\
+            present as `Some(..)`. An `Option` that is the whole output, as in\n\
+            `println(opt)`, reads as itself and is not flagged. Say what a missing value reads\n\
+            as: `name.unwrap_or(\"guest\")`, an `if let Some(n) = name`, or a\n\
+            `match`. Write `{name:?}` where the `Some(..)` / `None` spelling is\n\
+            the text meant.",
+    ),
+    (
         "GM0001",
         "Generic monomorphization received a type substitution that the\n\
                      compiler does not yet support - typically a generic parameter\n\

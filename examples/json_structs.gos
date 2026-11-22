@@ -60,7 +60,7 @@ println(f"pretty:\n{json::encode_pretty(original.address)?}")
 let back = json::decode::<User>(
     "{\"userName\":\"bob\",\"age\":41,\"active\":false,\"tags\":[],\"address\":{\"city\":\"x\",\"zip\":\"0\"}}"
 )?
-println(f"{back.user_name} {back.age} {back.nickname} {back.retries}")
+println(f"{back.user_name} {back.age} {back.nickname:?} {back.retries}")
 
 // Errors name the member that failed.
 match json::decode::<User>("{\"userName\":\"bob\",\"age\":\"oops\"}") {

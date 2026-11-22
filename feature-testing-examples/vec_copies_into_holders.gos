@@ -73,7 +73,7 @@ fn main() {
         let mut q = parser()
         q.stack = p.stack
         p.stack.pop()
-        println(f"some {o} node {n} push {held} assign {q.stack}")
+        println(f"some {o:?} node {n} push {held} assign {q.stack}")
 
         let mut p = parser()
         let from_ref = decl_of(&mut p)
@@ -100,7 +100,7 @@ fn main() {
         holder.module = a
         a.pop()
         holder.module.push("z")
-        println(f"binding {some_a} {holder.module} {a}")
+        println(f"binding {some_a:?} {holder.module} {a}")
 
         let mut o = outer()
         let s = Some(o.inner)
@@ -110,6 +110,6 @@ fn main() {
         let mut q = outer()
         q.inner = o.inner
         o.inner.items.push(2)
-        println(f"aggregate {s} {inners} {got} {q.inner} {o.inner}")
+        println(f"aggregate {s:?} {inners} {got} {q.inner} {o.inner}")
     }
 }

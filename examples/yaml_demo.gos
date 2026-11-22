@@ -42,6 +42,6 @@ print(yaml::encode(job, sort: true)?)
 println("---")
 
 let docs = yaml::parse_all("kind: a\n---\nkind: b\n")?
-println(f"{docs.len()} documents, second {json::get(docs[1], "kind")}")
+println(f"{docs.len()} documents, second {json::get(docs[1], "kind"):?}")
 print(yaml::encode_all(docs)?)
 println(yaml::to_json_text("b: 1\na: [x, y]\n")?)

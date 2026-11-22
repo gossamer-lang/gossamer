@@ -43,7 +43,7 @@ fn main() {
     levels.insert(Level::Mid(-4), "m-4")
     levels.insert(Level::Low, "l")
     levels.insert(Level::Mid(300), "again")
-    println(f"levels {levels.len()} {levels.first_key_value()} {levels.last_key_value()}")
+    println(f"levels {levels.len()} {levels.first_key_value():?} {levels.last_key_value():?}")
     let middle: Vec<(Level, String)> = levels.range(Level::Mid(0)..Level::High).collect()
     println(f"middle {middle}")
 
@@ -64,13 +64,13 @@ fn main() {
     seen.insert(Shape::Poly(#[2]))
     seen.insert(Shape::Rect { w: 1, tags: #[] })
     seen.insert(Shape::Poly(#[2]))
-    println(f"seen {seen.len()} {seen.first()} {seen.last()}")
+    println(f"seen {seen.len()} {seen.first():?} {seen.last():?}")
 
     let mut trees: BTreeMap<Tree, String> = BTreeMap::new()
     trees.insert(Tree::Leaf(0), "zero")
     trees.insert(Tree::Node(#[Tree::Leaf(1), Tree::Node(#[Tree::Leaf(2)])]), "deep")
     trees.insert(Tree::Node(#[Tree::Leaf(1), Tree::Node(#[Tree::Leaf(2)])]), "deep again")
-    println(f"trees {trees.len()} {trees.last_key_value()}")
+    println(f"trees {trees.len()} {trees.last_key_value():?}")
     let mut forest: BTreeSet<Tree> = BTreeSet::new()
     for t in #[Tree::Leaf(1), Tree::Node(#[]), Tree::Node(#[]), Tree::Leaf(1)] {
         forest.insert(t)

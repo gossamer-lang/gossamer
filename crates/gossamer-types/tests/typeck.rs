@@ -381,7 +381,7 @@ fn char_from_u32_answers_an_option() {
     let d = diagnostics_for(
         "fn name(n: u32) -> Option<String> { Some(char::from_u32(n)?.to_string()) }\n\
          fn main() { let c: Option<char> = char::from_u32(65)\n\
-         println(f\"{name(116)} {c}\") }\n",
+         println(f\"{name(116):?} {c:?}\") }\n",
     );
     assert!(d.is_empty(), "{d:?}");
     let d = diagnostics_for("fn main() { let c: char = char::from_u32(65) }\n");
@@ -3392,7 +3392,7 @@ fn phase1_runtime_collection_shapes_accept_i64_paths() {
          mixed_sorted.insert(1, \"one\")\n\
          let mut string_sorted: BTreeMap<String, String> = BTreeMap::new()\n\
          string_sorted.insert(\"a\", \"b\")\n\
-         println(\"{} {} {} {} {} {} {}\", front, top, low, sorted.len(), int_sorted.len(), mixed_sorted.len(), string_sorted.len())\n\
+         println(\"{:?} {:?} {:?} {} {} {} {}\", front, top, low, sorted.len(), int_sorted.len(), mixed_sorted.len(), string_sorted.len())\n\
          }\n",
     );
     assert!(diagnostics.is_empty(), "{diagnostics:?}");

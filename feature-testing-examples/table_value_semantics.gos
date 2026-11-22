@@ -94,7 +94,7 @@ fn main() {
     }
     println(f"total: {total}")
     println(f"state: {st.s} {st.d} {st.h.len()} {st.m}")
-    println(f"held: {seed} {vs} {ms} {od} {om}")
+    println(f"held: {seed} {vs} {ms} {od:?} {om:?}")
 
     let copy = od
     if let Some(mut d) = copy {
@@ -114,7 +114,7 @@ fn main() {
         Shape::Holds(s) => s.len()
         Shape::Empty => 0
     }
-    println(f"carriers: {od} {grown} {grown_variant} {after}")
+    println(f"carriers: {od:?} {grown} {grown_variant} {after}")
 
     let opts = #[Some(#{ 1 }), None]
     if let Some(mut z) = opts[0] {
