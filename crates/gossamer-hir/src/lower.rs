@@ -1304,11 +1304,11 @@ impl Lowerer<'_> {
 
     fn lower_expr_plain(&mut self, expr: &AstExpr) -> HirExpr {
         use gossamer_types::TyKind;
-        // A block that only names a place is that place, so a method call or
-        // a write through `unsafe { XS }` reaches `XS`.
-        if let AstExprKind::Block(block) | AstExprKind::Unsafe(block) = &expr.kind
+        // `unsafe` grants a permission and makes no value of its own, so an
+        // `unsafe` block that only names a place is that place: a method call
+        // or a write through `unsafe { XS }` reaches `XS`.
+        if let AstExprKind::Unsafe(block) = &expr.kind
             && block.stmts.is_empty()
-            && block.kind == gossamer_ast::BlockKind::Plain
             && let Some(tail) = block.tail.as_deref()
             && is_place_expr(tail)
         {
@@ -3111,6 +3111,27 @@ impl Lowerer<'_> {
     /// Lowers a method receiver. A mutating method on `seq[a..b]` acts on the
     /// window the range names, so the receiver becomes `&mut seq[a..b]`.
     fn lower_method_receiver(&mut self, receiver: &AstExpr, method: &str) -> HirExpr {
+        // A plain block answers a value of its own, so a method called on
+        // `{ v }` works on a copy of `v` and never writes `v` itself.
+        if let AstExprKind::Block(block) = &receiver.kind
+            && block.stmts.is_empty()
+            && block.kind == gossamer_ast::BlockKind::Plain
+            && let Some(tail) = block.tail.as_deref()
+            && is_place_expr(tail)
+        {
+            let value = self.lower_expr(tail);
+            return HirExpr {
+                id: self.fresh(),
+                span: receiver.span,
+                ty: value.ty,
+                kind: HirExprKind::MethodCall {
+                    receiver: Box::new(value),
+                    name: gossamer_ast::Ident::new("clone"),
+                    args: Vec::new(),
+                    owner: None,
+                },
+            };
+        }
         let lowered = self.lower_expr(receiver);
         if !gossamer_types::is_mutating_method_name(method) {
             return lowered;

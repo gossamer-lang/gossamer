@@ -221,7 +221,18 @@ impl TypeChecker<'_> {
             ExprKind::Cast {
                 value, wrapping, ..
             } => {
-                let Some(v) = self.const_int_eval_at(value, IntTy::I128, depth)? else {
+                // The operand is evaluated in its own type, as it runs: a
+                // `+%` there wraps at that width before the cast reads it.
+                let source = self
+                    .table
+                    .get(value.id)
+                    .map(|ty| self.infer.resolve(self.tcx, ty))
+                    .and_then(|ty| match self.tcx.kind(ty) {
+                        Some(TyKind::Int(source)) => Some(*source),
+                        _ => None,
+                    })
+                    .unwrap_or(IntTy::I128);
+                let Some(v) = self.const_int_eval_at(value, source, depth)? else {
                     return Ok(None);
                 };
                 if *wrapping {

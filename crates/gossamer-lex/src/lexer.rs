@@ -284,14 +284,12 @@ impl<'src> Lexer<'src> {
 }
 
 /// Returns `true` for the Unicode bidirectional embedding, override, and
-/// isolate controls (U+202A..=U+202E, U+2066..=U+2069) and the directional
-/// marks U+200E and U+200F.
+/// isolate controls (U+202A..=U+202E, U+2066..=U+2069), which reorder the
+/// text around them. The directional marks (U+200E, U+200F, U+061C) only
+/// mark a direction, and text in right-to-left scripts carries them.
 #[must_use]
 pub(crate) fn is_bidi_control(character: char) -> bool {
-    matches!(
-        character,
-        '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}'
-    )
+    matches!(character, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// Returns `true` when `character` is ASCII whitespace.

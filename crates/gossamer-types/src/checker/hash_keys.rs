@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use gossamer_lex::Span;
 
-use super::{BTREE_SET_DEF_LOCAL, HASH_SET_DEF_LOCAL, TypeChecker};
+use super::{BTREE_SET_DEF_LOCAL, DefId, HASH_SET_DEF_LOCAL, TypeChecker};
 use crate::{Ty, TyKind, TypeError};
 
 impl TypeChecker<'_> {
@@ -31,21 +31,16 @@ impl TypeChecker<'_> {
     /// keys that `eq` calls equal.
     pub(super) fn check_deferred_hash_keys(&mut self) {
         let deferred = std::mem::take(&mut self.deferred_hash_keys);
-        let claimed = |traits: &[&str]| -> HashSet<String> {
-            self.claimed_trait_impls
-                .keys()
-                .filter(|(trait_name, _)| traits.contains(&trait_name.as_str()))
-                .map(|(_, ty)| ty.clone())
-                .collect()
-        };
-        let custom_eq = claimed(&["PartialEq", "Eq"]);
-        if custom_eq.is_empty() {
+        if self.custom_eq_defs.is_empty() {
             return;
         }
+        let custom_eq = self.custom_eq_defs.clone();
         // An ordered container seats keys by `cmp`, so a type whose own `cmp`
         // is written beside its `eq` keys one consistently.
-        let custom_ord = claimed(&["Ord", "PartialOrd"]);
-        let eq_without_cmp: HashSet<String> = custom_eq.difference(&custom_ord).cloned().collect();
+        let eq_without_cmp: HashSet<DefId> = custom_eq
+            .difference(&self.custom_cmp_defs)
+            .copied()
+            .collect();
         let mut reported = HashSet::new();
         for (ty, span) in deferred {
             let ty = self.deep_resolve(ty);
@@ -80,7 +75,7 @@ impl TypeChecker<'_> {
     fn custom_eq_type_in(
         &mut self,
         ty: Ty,
-        custom_eq: &HashSet<String>,
+        custom_eq: &HashSet<DefId>,
         visited: &mut HashSet<Ty>,
     ) -> Option<String> {
         let ty = self.infer.resolve(self.tcx, ty);
@@ -90,13 +85,8 @@ impl TypeChecker<'_> {
         let parts: Vec<Ty> = match self.tcx.kind(ty).cloned()? {
             TyKind::Adt { def, substs } => {
                 let name = self.tcx.def_name(def).map(str::to_string);
-                if let Some(name) = &name
-                    && (custom_eq.contains(name)
-                        || custom_eq
-                            .iter()
-                            .any(|claimed| claimed.rsplit("::").next() == Some(name.as_str())))
-                {
-                    return Some(name.clone());
+                if custom_eq.contains(&def) {
+                    return Some(name.unwrap_or_default());
                 }
                 let mut parts = substs.types().clone();
                 if let Some(fields) = self.struct_fields.get(&def) {

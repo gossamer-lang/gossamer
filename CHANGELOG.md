@@ -11,10 +11,10 @@
 - A comparison written as a statement (`count == 5`, `a == 1 && b == 2`) is `GT0136`, where it was a lint warning.
 - A `match` arm an earlier arm already covers, a `_` after a catch-all or after ranges that tile the type included, is the error `GM0002`, where it was a warning.
 - A map literal that spells one constant key twice (`{"a": 1, "a": 2}`), or a set literal one element twice, is `GT0137`, where the later entry silently replaced the earlier one.
-- A Unicode bidirectional control character (U+202A to U+202E, U+2066 to U+2069, U+200E, U+200F) anywhere in the source text is `GP0070` (Trojan Source, CVE-2021-42574); a literal spells one as an escape.
+- A Unicode bidirectional control character (the embedding, override, and isolate controls U+202A to U+202E and U+2066 to U+2069) anywhere in the source text is `GP0070` (Trojan Source, CVE-2021-42574); a literal spells one as an escape.
 - A `Map` key or `Set` element type with a hand-written `PartialEq` is `GT0138` where the container never calls it, where a set kept two values `eq` called equal; an ordered container whose key type writes an `Ord` that agrees with `eq` is accepted.
 - A `BTreeMap` key or `BTreeSet` element wider than one word with its own `cmp` works natively, where the first comparison faulted.
-- A method called on a block that only names a place (`unsafe { XS }.pop()`, `{ v }.pop()`) writes that place on every tier, where the VM popped a copy of a static and native code popped the static.
+- A method called on `unsafe { XS }` writes the static `XS` on every tier, where the VM wrote a copy. A method called on a plain `{ v }` works on a value of its own and leaves `v` as it was, on every tier, where native code wrote `v` and the VM did for some methods.
 - `s.byte_at(i)` with an offset outside the string's bytes panics with `string byte index out of bounds` on every tier, where it answered 0.
 - Inserting into a `BTreeSet` an element its `cmp` calls equal to one already held keeps the held one on the VM, as compiled code does, where the VM replaced it.
 - The JIT prints `()` for a unit value, where it printed `0`; a `loop` left by a plain `break` prints `()` natively, where it printed an arbitrary number.

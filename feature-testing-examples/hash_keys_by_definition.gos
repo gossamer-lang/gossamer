@@ -1,0 +1,34 @@
+// A key type is judged by its own definition: a type in another module with
+// the same name and a hand-written `eq` leaves it alone, and a marker
+// `impl Eq for T {}` writes no `eq`, so both key a hashed `Set` by value on
+// every tier.
+
+mod geo {
+    pub struct Spot {
+        pub x: i64
+        pub y: i64
+    }
+
+    impl PartialEq for Spot {
+        fn eq(&self, other: Spot) -> bool { self.x == other.x }
+    }
+}
+
+struct Spot {
+    x: i64
+    y: i64
+}
+
+struct Marker {
+    id: i64
+}
+
+impl Eq for Marker {}
+
+fn main() {
+    let spots = #{ Spot { x: 1, y: 2 }, Spot { x: 1, y: 3 } }
+    let markers = #{ Marker { id: 1 }, Marker { id: 2 } }
+    let far = geo::Spot { x: 1, y: 9 }
+    let near = geo::Spot { x: 1, y: 0 }
+    println(f"{spots.len()} {markers.len()} {far == near}")
+}

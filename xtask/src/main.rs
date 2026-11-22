@@ -1141,7 +1141,7 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "GP0070",
         "Parser",
         "bidirectional control character in source text",
-        "The source text holds a Unicode bidirectional control character (U+202A to U+202E, U+2066 to U+2069, U+200E, or U+200F), inside a string, a character literal, a comment, or anywhere else. These characters reorder how an editor or a review tool displays the line without changing what compiles, so the code a reader sees is not the code that runs (the Trojan Source attack, CVE-2021-42574). Write the character as an escape inside the literal instead: `\"\\u{202E}\"`.",
+        "The source text holds a Unicode bidirectional control character (U+202A to U+202E or U+2066 to U+2069), inside a string, a character literal, a comment, or anywhere else. These characters reorder how an editor or a review tool displays the line without changing what compiles, so the code a reader sees is not the code that runs (the Trojan Source attack, CVE-2021-42574). Write the character as an escape inside the literal instead: `\"\\u{202E}\"`.",
     ),
     (
         "GT0079",

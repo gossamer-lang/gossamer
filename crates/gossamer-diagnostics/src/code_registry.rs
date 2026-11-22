@@ -845,7 +845,7 @@ pub const REGISTRY: &[(&str, &str)] = &[
     (
         "GP0070",
         "The source text holds a Unicode bidirectional control character\n\
-            (U+202A to U+202E, U+2066 to U+2069, U+200E, or U+200F), inside a\n\
+            (U+202A to U+202E or U+2066 to U+2069), inside a\n\
             string, a character literal, a comment, or anywhere else. These\n\
             characters reorder how an editor or a review tool displays the\n\
             line without changing what compiles, so the code a reader sees is\n\

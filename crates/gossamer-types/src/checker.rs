@@ -1052,6 +1052,10 @@ struct TypeChecker<'a> {
     /// Values of immutable bindings a constant initializes, keyed by the
     /// binding's node.
     local_int_consts: HashMap<NodeId, i128>,
+    /// Types whose `impl` writes their own `eq`, by definition.
+    custom_eq_defs: HashSet<DefId>,
+    /// Types whose `impl` writes their own `cmp`, by definition.
+    custom_cmp_defs: HashSet<DefId>,
     /// Body expressions whose constant operands are evaluated once their
     /// type settles (GT0134).
     deferred_const_exprs: Vec<Expr>,
@@ -1458,6 +1462,8 @@ impl<'a> TypeChecker<'a> {
             const_int_exprs: HashMap::new(),
             deferred_hash_keys: Vec::new(),
             local_int_consts: HashMap::new(),
+            custom_eq_defs: HashSet::new(),
+            custom_cmp_defs: HashSet::new(),
             deferred_const_exprs: Vec::new(),
             reported_const_faults: HashSet::new(),
             noted_hashed_containers: HashSet::new(),
@@ -2393,6 +2399,7 @@ impl<'a> TypeChecker<'a> {
             self.emit(TypeError::BlanketImpl { trait_name, param }, span);
             return;
         }
+        self.note_comparison_impl(&trait_name, decl);
         // The key is the name a dispatch identifies the receiver by, so two
         // blocks it cannot separate collide here; the message names what the
         // block was written for, which is what the reader is looking at.
@@ -2433,6 +2440,33 @@ impl<'a> TypeChecker<'a> {
             );
         }
         self.claimed_trait_impls.insert(key, span);
+    }
+
+    /// Records the type an `impl` writes its own `eq` (`PartialEq` / `Eq`)
+    /// or `cmp` (`Ord` / `PartialOrd`) for, by definition, so two modules'
+    /// same-named types stay apart and a marker `impl Eq for T {}` counts as
+    /// no `eq` of its own.
+    fn note_comparison_impl(&mut self, trait_name: &str, decl: &ImplDecl) {
+        let method = match trait_name {
+            "PartialEq" | "Eq" => "eq",
+            "Ord" | "PartialOrd" => "cmp",
+            _ => return,
+        };
+        let writes_method = decl
+            .items
+            .iter()
+            .any(|item| matches!(item, ImplItem::Fn(f) if f.name.name == method));
+        if !writes_method {
+            return;
+        }
+        let Some(Resolution::Def { def, .. }) = self.resolutions.get(decl.self_ty.id) else {
+            return;
+        };
+        if method == "eq" {
+            self.custom_eq_defs.insert(def);
+        } else {
+            self.custom_cmp_defs.insert(def);
+        }
     }
 
     /// Reports each direct supertrait of the implemented trait that the

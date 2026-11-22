@@ -1,11 +1,13 @@
 // A bidirectional control character is written as an escape inside a
 // literal, so the source shows exactly what compiles; the raw character
-// anywhere in the source text is GP0070.
+// anywhere in the source text is GP0070. A directional mark reorders nothing
+// and may appear raw, as this left-to-right mark does: ‎.
 
 fn main() {
     let override = "\u{202E}"
     let isolate = '\u{2066}'
     let marked = f"[{override}admin]"
+    let rtl = "‏שלום"
     println(f"{override.len()} {override.byte_len()} {isolate as u32} {marked.len()}")
-    println(f"{marked.contains(override)} {override.starts_with("\u{202E}")}")
+    println(f"{marked.contains(override)} {override.starts_with("\u{202E}")} {rtl.len()}")
 }
