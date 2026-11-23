@@ -341,6 +341,7 @@ const BARE_PREFIX_CAPABILITIES: &[(&str, Capability)] = &[
     ("__gos_process_", Capability::Exec),
     ("__gos_ffi_", Capability::Foreign),
     ("__gos_fd_", Capability::Read),
+    ("__gos_bufio_", Capability::Write),
 ];
 
 /// Name-to-capability map over every registered builtin.
