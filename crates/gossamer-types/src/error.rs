@@ -1230,10 +1230,10 @@ pub enum TypeError {
         /// Whether the container is a `BTreeMap` / `BTreeSet`.
         ordered: bool,
     },
-    /// An `Option` is rendered through `{}` among other text, where a missing
-    /// value reads as the word `None` in the middle of it.
+    /// An `Option` is rendered through `{}` among other text, where absence
+    /// may be surprising in the resulting text.
     #[error(
-        "an `Option<{inner}>` is rendered with `{{}}` among other text, so a missing value reads as `None`"
+        "an `Option<{inner}>` is rendered with `{{}}` among other text; when it is `None`, the output contains `None`"
     )]
     OptionRendered {
         /// The payload type, as rendered.
@@ -2300,9 +2300,9 @@ impl TypeDiagnostic {
             TypeError::OptionRendered { .. } => {
                 out = out
                     .with_help(
-                        "say what a missing value reads as: `v.unwrap_or(..)`, an `if let \
-                         Some(x) = v`, or a `match`; write `{v:?}` where `Some(..)` / `None` is \
-                         the text meant",
+                        "choose the text to show when the value is missing: use `v.unwrap_or(..)`, \
+                         `if let Some(x) = v`, or `match v`; use `{v:?}` to print the explicit \
+                         `Some(...)` or `None` form",
                     )
                     .with_note("lint: option_rendered");
             }

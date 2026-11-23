@@ -189,6 +189,7 @@ pub const DAY_ONE_LINTS: &[&str] = &[
     "closure_self_cycle",
     "signed_remainder",
     "split_shared_update",
+    "unwrap_used",
 ];
 
 /// Lints whose findings need the checked program's types. The syntax-only
@@ -424,6 +425,7 @@ pub fn lint_code(id: &str) -> Code {
         "signed_remainder" => Code("GL0064"),
         "unjoined_task" => Code("GL0065"),
         "split_shared_update" => Code("GL0066"),
+        "unwrap_used" => Code("GL0068"),
         "non_camel_case_types" => Code("GL0057"),
         "non_snake_case" => Code("GL0058"),
         "non_upper_case_globals" => Code("GL0059"),

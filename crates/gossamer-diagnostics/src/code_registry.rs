@@ -379,14 +379,20 @@ pub const REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "GL0067",
-        "An `Option` is rendered with `{}` among other text, in an f-string\n\
-            or a `println` / `format` template, so a value that is absent reads\n\
-            as the word `None` in the middle of the sentence, and one that is\n\
-            present as `Some(..)`. An `Option` that is the whole output, as in\n\
-            `println(opt)`, reads as itself and is not flagged. Say what a missing value reads\n\
-            as: `name.unwrap_or(\"guest\")`, an `if let Some(n) = name`, or a\n\
-            `match`. Write `{name:?}` where the `Some(..)` / `None` spelling is\n\
-            the text meant.",
+        "An `Option` is rendered with `{}` alongside other text, in an f-string\n\
+            or a `println` / `format` template. When the value is `None`, the\n\
+            output contains the word `None`; when it is present, it contains\n\
+            `Some(..)`. An `Option` printed by itself, as in `println(opt)`, is\n\
+            not flagged. Choose a user-facing value with `name.unwrap_or(\"guest\")`,\n\
+            `if let Some(n) = name`, or `match name`. Use `{name:?}` to show the\n\
+            explicit `Some(...)` or `None` form.",
+    ),
+    (
+        "GL0068",
+        "Calling `.unwrap()` can panic when the value is `None` or `Err`. Handle\n\
+            the missing value or error with `match`, `if let`, or `?`; use\n\
+            `.unwrap_or(..)` when a fallback is appropriate. If a panic is\n\
+            intentional, `.expect(\"reason\")` gives it a useful message.",
     ),
     (
         "GM0001",

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.84.3 - Safer Option handling diagnostics & warning text update
+
+- `.unwrap()` calls are flagged by `GL0068` because they can panic on `None` or `Err`; the lint points to explicit handling, a fallback, or a descriptive `.expect(..)`.
+- `GL0067` now explains the `None` and `Some(..)` text in plain terms, and compiler-synthesized formatting no longer produces the warning.
+
 ## 0.84.2 - Miri fixes
 
 - The Miri runtime shard runs cleanly: memory-limit probing and Linux file opening use Miri-compatible paths, static ASCII string headers retain readable provenance, and tests for native-only watchdog helpers are excluded when those helpers are not built.

@@ -321,6 +321,12 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
             without a binding, `spawn(..)`; inside a `cohort { }` the cohort\n\
             joins every task when it ends."
         }
+        "unwrap_used" => {
+            "Calling `.unwrap()` can panic when the value is `None` or `Err`. Handle\n\
+            the missing value or error with `match`, `if let`, or `?`; use\n\
+            `.unwrap_or(..)` when a fallback is appropriate. If a panic is\n\
+            intentional, `.expect(\"reason\")` gives it a useful message."
+        }
         "non_upper_case_globals" => {
             "A const or static whose name is not `SCREAMING_SNAKE_CASE`, as Rust\n\
             spells them. A single name in a pattern matches the const it names,\n\

@@ -8,13 +8,14 @@ use crate::{TyKind, TypeError};
 
 impl TypeChecker<'_> {
     /// Notes a value a `{}` placeholder renders, so an `Option` among them is
-    /// reported once inference settles its type. Code the compiler writes
-    /// renders an `Option` on purpose and is left out.
+    /// reported once inference settles its type. Compiler-synthesized bodies
+    /// render fields intentionally and have no user-authored call site to fix.
     pub(super) fn note_rendered_option(&mut self, value: NodeId, span: Span) {
-        if self
-            .current_fn_name
-            .as_deref()
-            .is_some_and(|name| name.starts_with("__"))
+        if self.synthesized_depth > 0
+            || self
+                .current_fn_name
+                .as_deref()
+                .is_some_and(|name| name.starts_with("__"))
         {
             return;
         }
