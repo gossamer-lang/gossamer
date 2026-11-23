@@ -307,6 +307,8 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/std_type_receivers.gos"),
     spec("feature-testing-examples/big_int_operators.gos"),
     spec("feature-testing-examples/collections_index_map_bit_set.gos"),
+    spec("feature-testing-examples/bufio_writer_reader.gos"),
+    spec("feature-testing-examples/time_add_date.gos"),
     spec("feature-testing-examples/float_try_into.gos"),
     spec("feature-testing-examples/float_total_cmp.gos"),
     spec("feature-testing-examples/runtime_backtrace.gos"),

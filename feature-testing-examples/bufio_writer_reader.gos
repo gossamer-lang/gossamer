@@ -1,0 +1,80 @@
+// Buffered file writes and line reads
+// `bufio::Writer` holds writes until `flush`, until another call on the
+// file, or until the file's last handle goes; `bufio::Reader` answers a
+// file line by line, without the line ending. Each file is opened inside a
+// function, so every handle is gone before the files are removed.
+
+use std::{bufio, env, errors, fs, path}
+
+fn scratch(name: String) -> String {
+    path::join(env::temp_dir(), f"gossamer_bufio_{name}")
+}
+
+fn write_flushed(target: String) -> Result<(), errors::Error> {
+    let mut out = bufio::Writer::with_capacity(fs::create(target)?, 64)
+    out.write("first\r\n")?
+    out.write_bytes(#[115, 101, 99, 111, 110, 100, 10])?
+    println(f"buffered: {fs::read_to_string(target)?.len()} bytes on disk")
+    out.flush()?
+    println(f"flushed: {fs::read_to_string(target)?.len()} bytes on disk")
+    out.write("third, no newline")?
+    out.flush()
+}
+
+fn print_lines(target: String) -> Result<(), errors::Error> {
+    let mut reader = bufio::Reader::new(fs::open(target)?)
+    while let Some(line) = reader.read_line()? {
+        println(f"line [{line}]")
+    }
+    Ok(())
+}
+
+fn write_report(target: String) -> Result<(), errors::Error> {
+    let mut out = bufio::Writer::new(fs::create(target)?)
+    for n in 1..4 {
+        out.write(f"row {n}\n")?
+    }
+    // No flush: the writer's file goes with this call, and its bytes with it.
+    Ok(())
+}
+
+fn read_lines(target: String) -> Result<Vec<String>, errors::Error> {
+    bufio::Reader::new(fs::open(target)?).lines()
+}
+
+fn head_and_rest(target: String) -> Result<(String, i64), errors::Error> {
+    let mut rest = bufio::Reader::new(fs::open(target)?)
+    let head = rest.read_line()?.unwrap_or("")
+    Ok((head, rest.read_to_string()?.len()))
+}
+
+fn write_numbers(target: String) -> Result<(), errors::Error> {
+    let mut many = bufio::Writer::with_capacity(fs::create(target)?, 16)
+    for n in 0..200 {
+        many.write(f"{n}\n")?
+    }
+    many.flush()
+}
+
+fn main() -> Result<(), errors::Error> {
+    let target = scratch("writer.txt")
+    write_flushed(target)?
+    print_lines(target)?
+
+    let report = scratch("report.txt")
+    write_report(report)?
+    println(f"report rows: {read_lines(report)?}")
+    let head, rest = head_and_rest(report)?
+    println(f"head [{head}] then {rest} bytes")
+
+    let big = scratch("big.txt")
+    write_numbers(big)?
+    let numbers = read_lines(big)?
+    let total = numbers.map(|s| s.to_i64().unwrap_or(0)).iter().sum()
+    println(f"{numbers.len()} numbers summing to {total}")
+
+    fs::remove_file(target)?
+    fs::remove_file(report)?
+    fs::remove_file(big)?
+    Ok(())
+}

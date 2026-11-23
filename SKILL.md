@@ -436,7 +436,11 @@ Discover signatures with `hover` / `gos doc std::<module>`. Areas:
   `output`) answers a `Child` that reads, writes, and waits;
   `process::look_path(name)` answers the `PATH` match or `None`.
   `time::Instant`, `Duration`, `time::Time` (an instant with its UTC offset,
-  RFC 3339). `fs::read_dir` entries carry `is_file`, `size`, `path` -
+  RFC 3339; `t.add_date(0, 0, 1)?` is the next calendar day, while
+  `t + Duration` of whole days is GL0069). `bufio::Writer::new(file)`
+  buffers writes, flushed before any other call on the file, at its last
+  release, and at exit; `bufio::Reader::new(file)` answers `read_line` /
+  `lines`. `fs::read_dir` entries carry `is_file`, `size`, `path` -
   do not re-query. `fs::temp_dir(prefix, parent: Some(dir))` makes a fresh
   folder (in the system temp root without `parent`).
 - Text: `strings strconv utf8 unicode regex`.

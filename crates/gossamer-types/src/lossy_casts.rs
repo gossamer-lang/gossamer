@@ -69,7 +69,7 @@ fn int_range(ty: IntTy) -> Range {
 
 /// The value of an integer literal's text: digits in any radix, with
 /// underscores and a type suffix allowed.
-fn int_literal_value(text: &str) -> Option<i128> {
+pub(crate) fn int_literal_value(text: &str) -> Option<i128> {
     let digits: String = text.chars().filter(|c| *c != '_').collect();
     let (radix, body) = if let Some(rest) = digits.strip_prefix("0x") {
         (16, rest)

@@ -84,6 +84,14 @@ fn suggest_returns_closest_within_budget() {
 }
 
 #[test]
+fn suggest_settles_an_equal_distance_by_name_whatever_the_order() {
+    let forward = suggest("lint", ["print", "min"].iter().copied(), 2);
+    let backward = suggest("lint", ["min", "print"].iter().copied(), 2);
+    assert_eq!(forward, Some("min"));
+    assert_eq!(backward, Some("min"));
+}
+
+#[test]
 fn primary_and_secondary_labels_use_distinct_prefixes() {
     let mut map = SourceMap::new();
     let file = map.add_file("x.gos", "abc\n");

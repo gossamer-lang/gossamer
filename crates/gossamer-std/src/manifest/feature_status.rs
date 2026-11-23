@@ -9085,6 +9085,7 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
         &[
             "examples/grep.gos",
             "feature-testing-examples/bufio_scanner_next.gos",
+            "feature-testing-examples/bufio_writer_reader.gos",
             "feature-testing-examples/winb_sys_misc.gos",
         ],
     ),
@@ -10564,6 +10565,7 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
             "feature-testing-examples/stdlib_http_middleware_stack.gos",
             "feature-testing-examples/stdlib_time_free.gos",
             "feature-testing-examples/stdlib_time_methods.gos",
+            "feature-testing-examples/time_add_date.gos",
             "feature-testing-examples/time_civil.gos",
             "feature-testing-examples/time_duration_api.gos",
             "feature-testing-examples/time_instant_nanos.gos",

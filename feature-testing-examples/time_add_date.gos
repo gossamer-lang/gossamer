@@ -1,0 +1,27 @@
+// Calendar days on a wall-clock time
+// `t.add_date(years, months, days)` moves the calendar date and keeps the
+// time of day; `t + Duration` adds elapsed time, which across a
+// daylight-saving change lands an hour off.
+
+use std::{errors, time}
+
+// The day of elapsed time is the point of the comparison.
+#[lint(allow(day_duration))]
+fn elapsed_day(t: time::Time) -> time::Time { t + time::Duration::from_secs(86_400) }
+
+fn main() -> Result<(), errors::Error> {
+    let new_york = time::Location::lookup("America/New_York")?
+    // Noon on 2026-03-07, the day before clocks move forward.
+    let noon = time::Time::from_unix(1_772_902_800).in_location(new_york)
+    println(f"start         {noon}")
+    println(f"24 hours on   {elapsed_day(noon)}")
+    println(f"next day      {noon.add_date(0, 0, 1)?}")
+    println(f"a month on    {noon.add_date(0, 1, 0)?}")
+    println(f"a year back   {noon.add_date(-1, 0, 0)?}")
+    let precise = time::Time::from_unix_nanos(1_772_902_800_123_456_789).add_date(0, 0, 2)?
+    println(f"nanos kept    {precise.unix_nanos() % 1_000_000_000}")
+    // 02:30 on 2026-03-08 does not exist in New York.
+    let skipped = time::Time::from_unix(1_772_868_600).in_location(new_york).add_date(0, 0, 1)
+    println(f"skipped hour  {skipped.is_err()}")
+    Ok(())
+}

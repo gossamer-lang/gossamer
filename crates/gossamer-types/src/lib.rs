@@ -22,6 +22,7 @@ mod checker;
 mod closure_cycles;
 mod context;
 pub mod data_first;
+mod day_durations;
 mod definite_assignment;
 mod error;
 mod exhaustiveness;
@@ -88,6 +89,7 @@ pub use checker::{
 };
 pub use closure_cycles::{CLOSURE_SELF_CYCLE_LINT, ClosureSelfCycle, find_closure_self_cycles};
 pub use context::{FlatEnumLayout, PackedLayout, PlainLayout, TyCtxt, UNION_TYPE_NAME};
+pub use day_durations::{DAY_DURATION_LINT, DayDuration, find_day_durations};
 pub use definite_assignment::{UnassignedReadDiagnostic, check_definite_assignment};
 pub use error::{
     ForeignError, ForeignLibrary, IntegerCastFix, NotDisplayableClass, TypeDiagnostic, TypeError,

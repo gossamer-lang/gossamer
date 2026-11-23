@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GL0069]: A whole number of days, as a `Duration`, added to or taken from a - here
+--- framed ---
+error[GL0069]: A whole number of days, as a `Duration`, added to or taken from a
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

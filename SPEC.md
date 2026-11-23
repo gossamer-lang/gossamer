@@ -3352,6 +3352,16 @@ within that filesystem. `File::from_raw(raw)` takes ownership of an open
 descriptor (a handle on Windows) a foreign call answered as an integer:
 the file closes it.
 
+**`std::bufio`** - buffered files. `bufio::Writer::new(file)` (4096 bytes)
+or `Writer::with_capacity(file, n)` holds writes until `flush`; the
+buffered bytes reach the file before any other call on it, when the last
+handle to the file goes, and when the program ends, `process::exit` and an
+uncaught panic included, so no write is dropped unwritten. `write` and
+`write_bytes` answer the bytes taken. `bufio::Reader::new(file)` reads a
+chunk at a time: `read_line` answers `Ok(None)` at the end and leaves out
+the line's `\n` and a `\r` before it; `lines` and `read_to_string` read the
+rest. `bufio::Scanner::new(io::stdin())` splits standard input into lines.
+
 An entry from `read_dir` / `walk_dir` already carries `is_file`,
 `is_dir`, `is_symlink`, `size`, `path`, and `name`. Read those fields
 rather than re-querying the path: the second lookup is slower and can
@@ -3619,6 +3629,11 @@ outside its list is a type error (`GT0002`).
 - `Instant`, `Duration`.
 - `SystemTime`.
 - `time::now() -> SystemTime`.
+- `time::Time`, a wall-clock instant with the location it is read in.
+  `t + d` / `t - d` add elapsed time: across a daylight-saving change, a
+  `Duration` of whole days lands an hour off the time of day (`GL0069`).
+  `t.add_date(years, months, days)` moves the calendar date and keeps the
+  time of day, and refuses a time the change of date skips or repeats.
 
 ### 10.10 `std::net` and `std::http`
 

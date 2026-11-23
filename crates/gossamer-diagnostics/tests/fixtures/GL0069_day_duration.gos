@@ -1,0 +1,9 @@
+// ERROR: GL0069
+
+use std::time
+
+fn main() {
+    let start = time::Time::from_unix(1700000000)
+    let next = start + time::Duration::from_secs(24 * 60 * 60)
+    println(next)
+}

@@ -395,6 +395,14 @@ pub const REGISTRY: &[(&str, &str)] = &[
             intentional, `.expect(\"reason\")` gives it a useful message.",
     ),
     (
+        "GL0069",
+        "A whole number of days, as a `Duration`, added to or taken from a\n\
+            `time::Time`: `t + Duration::from_secs(86_400)`. A `Duration` is\n\
+            elapsed time, so across a daylight-saving change the wall clock\n\
+            lands an hour off the time of day. `t.add_date(0, 0, 1)?` moves the\n\
+            calendar date and keeps the time of day.",
+    ),
+    (
         "GM0001",
         "Generic monomorphization received a type substitution that the\n\
                      compiler does not yet support - typically a generic parameter\n\

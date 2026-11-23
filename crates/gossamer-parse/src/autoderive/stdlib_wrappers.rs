@@ -310,6 +310,16 @@ fn system_wrappers(
     {
         out.push_str(BIT_SET_WRAPPERS);
     }
+    if (mentions_path(source, "bufio::Writer") && from_std("bufio"))
+        || item_imported(BUFIO_WRITER_WRAPPERS)
+    {
+        out.push_str(BUFIO_WRITER_WRAPPERS);
+    }
+    if (mentions_path(source, "bufio::Reader") && from_std("bufio"))
+        || item_imported(BUFIO_READER_WRAPPERS)
+    {
+        out.push_str(BUFIO_READER_WRAPPERS);
+    }
     if (mentions_path(source, "math::Decimal") && from_std("math"))
         || item_imported(DECIMAL_WRAPPERS)
     {
@@ -517,6 +527,89 @@ impl<K, V> __gos_collections_IndexMap<K, V> {
             out.push((self.order[i], self.values[i]))
         }
         out
+    }
+}
+";
+
+/// `bufio::Writer`: writes to a file through a buffer of `capacity` bytes
+/// (4096 by default). The runtime keeps the buffer with the file, so the
+/// bytes reach it before any other call on the file, at `flush`, when the
+/// last handle to the file goes, and when the program ends.
+const BUFIO_WRITER_WRAPPERS: &str = r"
+struct __gos_bufio_Writer { file: fs::File }
+impl __gos_bufio_Writer {
+    fn new(file: fs::File) -> __gos_bufio_Writer { __gos_bufio_Writer::with_capacity(file, 4096) }
+    fn with_capacity(file: fs::File, capacity: i64) -> __gos_bufio_Writer {
+        // A closed file refuses the buffer, and every write then reports it.
+        let _ = __gos_bufio_buffer_writes_raw(file, capacity)
+        __gos_bufio_Writer { file: file }
+    }
+    fn write(&mut self, text: String) -> Result<i64, errors::Error> { self.file.write(text) }
+    fn write_bytes(&mut self, bytes: Vec<u8>) -> Result<i64, errors::Error> { self.file.write_bytes(bytes) }
+    fn flush(&mut self) -> Result<(), errors::Error> { self.file.flush() }
+}
+";
+
+/// `bufio::Reader`: reads a file a chunk at a time, answering it line by
+/// line. A line ends at `\n`, which the answer leaves out with a `\r`
+/// before it; the last line may end at the end of the file instead.
+const BUFIO_READER_WRAPPERS: &str = r"
+struct __gos_bufio_Reader { file: fs::File, buf: Vec<u8>, start: i64, at_end: bool }
+impl __gos_bufio_Reader {
+    fn new(file: fs::File) -> __gos_bufio_Reader { __gos_bufio_Reader { file: file, buf: #[], start: 0, at_end: false } }
+    fn fill(&mut self) -> Result<bool, errors::Error> {
+        if self.at_end { return Ok(false) }
+        let chunk = self.file.read(65536)?
+        if chunk.is_empty() {
+            self.at_end = true
+            return Ok(false)
+        }
+        if self.start > 0 {
+            self.buf = self.buf[self.start..self.buf.len()]
+            self.start = 0
+        }
+        for b in chunk { self.buf.push(b) }
+        Ok(true)
+    }
+    fn take(&mut self, end: i64, next: i64) -> Result<String, errors::Error> {
+        let mut stop = end
+        if stop > self.start && self.buf[stop - 1] == 13 { stop -= 1 }
+        let line = String::from_utf8(self.buf[self.start..stop])?
+        self.start = next
+        Ok(line)
+    }
+    fn read_line(&mut self) -> Result<Option<String>, errors::Error> {
+        let mut seen = 0
+        loop {
+            let len = self.buf.len()
+            let mut i = self.start + seen
+            while i < len {
+                if self.buf[i] == 10 { return Ok(Some(self.take(i, i + 1)?)) }
+                i += 1
+            }
+            seen = len - self.start
+            if !self.fill()? {
+                let len = self.buf.len()
+                if self.start >= len { return Ok(None) }
+                return Ok(Some(self.take(len, len)?))
+            }
+        }
+    }
+    fn lines(&mut self) -> Result<Vec<String>, errors::Error> {
+        let mut out = #[]
+        while let Some(line) = self.read_line()? { out.push(line) }
+        Ok(out)
+    }
+    fn read_to_string(&mut self) -> Result<String, errors::Error> {
+        let mut rest = self.buf[self.start..self.buf.len()]
+        self.buf = #[]
+        self.start = 0
+        while !self.at_end {
+            let chunk = self.file.read(65536)?
+            if chunk.is_empty() { self.at_end = true }
+            for b in chunk { rest.push(b) }
+        }
+        String::from_utf8(rest)
     }
 }
 ";
@@ -793,6 +886,11 @@ impl __gos_time_Time {
     }
     fn utc(&self) -> __gos_time_Time {
         __gos_time_Time { unix_ns: self.unix_ns, location: __gos_time_Location::utc() }
+    }
+    fn add_date(&self, years: i64, months: i64, days: i64) -> Result<__gos_time_Time, errors::Error> {
+        let ms = __gos_time_floor_div(self.unix_ns, 1000000)
+        let moved = __gos_time_add_date_raw(ms, self.location.spec, years, months, days)?
+        Ok(__gos_time_Time { unix_ns: moved * 1000000 + (self.unix_ns - ms * 1000000), location: self.location })
     }
     fn civil(&self) -> Result<__gos_time_CivilTime, errors::Error> {
         let mut c = self.location.civil(self.unix_ms())?

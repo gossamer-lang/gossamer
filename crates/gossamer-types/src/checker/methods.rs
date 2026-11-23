@@ -4527,7 +4527,7 @@ impl TypeChecker<'_> {
                 let entry = self.tuple_dir_entry_ty();
                 self.tcx.intern(TyKind::Vec(entry))
             }
-            "__gos_fs_walk_dir_raw" => self.tcx.unit(),
+            "__gos_fs_walk_dir_raw" | "__gos_bufio_buffer_writes_raw" => self.tcx.unit(),
             "__gos_process_run_raw"
             | "__gos_process_run_in_raw"
             | "__gos_process_pipeline_run_raw" => self.tuple_process_output_ty(),

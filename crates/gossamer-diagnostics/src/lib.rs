@@ -376,10 +376,10 @@ where
         if distance > budget {
             continue;
         }
-        match best {
-            None => best = Some((candidate, distance)),
-            Some((_, prev)) if distance < prev => best = Some((candidate, distance)),
-            _ => {}
+        // Candidates often come from a hash map, so an equal distance is
+        // settled by name: the same program gets the same suggestion.
+        if best.is_none_or(|(name, prev)| (distance, candidate) < (prev, name)) {
+            best = Some((candidate, distance));
         }
     }
     best.map(|(name, _)| name)

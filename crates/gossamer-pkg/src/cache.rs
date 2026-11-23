@@ -284,8 +284,36 @@ pub fn cached_source_dir(root: &Path, digest: &str) -> Option<PathBuf> {
     if !is_canonical_digest(digest) {
         return None;
     }
-    let dir = digest_dir(root, digest).join("source");
-    dir.is_dir().then_some(dir)
+    let entry = digest_dir(root, digest);
+    let dir = entry.join("source");
+    if !dir.is_dir() {
+        return None;
+    }
+    mark_used(&entry.join("id.txt"));
+    Some(dir)
+}
+
+/// A use refreshes an entry's recorded use time only once it is this old,
+/// which bounds the writes a busy cache makes.
+const USE_REFRESH: std::time::Duration = std::time::Duration::from_hours(1);
+
+/// Records a read of the cached package whose `id.txt` is `marker`: cache
+/// pruning reclaims the entries whose newest file is oldest, and an entry is
+/// written once, when it is fetched.
+fn mark_used(marker: &Path) {
+    let now = std::time::SystemTime::now();
+    let Ok(meta) = fs::metadata(marker) else {
+        return;
+    };
+    if meta
+        .modified()
+        .is_ok_and(|used| now.duration_since(used).is_ok_and(|age| age < USE_REFRESH))
+    {
+        return;
+    }
+    if let Ok(file) = fs::OpenOptions::new().write(true).open(marker) {
+        let _ = file.set_modified(now);
+    }
 }
 
 fn is_canonical_digest(digest: &str) -> bool {
@@ -628,6 +656,34 @@ pub struct Fetched {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn reading_a_cached_package_marks_it_used() {
+        let root = std::env::temp_dir().join(format!("gos-pkg-used-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let digest = "0".repeat(64);
+        let entry = root.join("pkg").join(&digest);
+        fs::create_dir_all(entry.join("source")).unwrap();
+        let marker = entry.join("id.txt");
+        fs::write(&marker, b"example.com/p").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_hours(40 * 24);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&marker)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert_eq!(
+            cached_source_dir(&root, &digest),
+            Some(entry.join("source"))
+        );
+        let used = fs::metadata(&marker).unwrap().modified().unwrap();
+        assert!(
+            used > old + USE_REFRESH,
+            "the read refreshes the entry's use time"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
     use super::*;
 
     #[test]

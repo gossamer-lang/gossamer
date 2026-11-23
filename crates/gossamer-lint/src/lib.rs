@@ -199,6 +199,7 @@ pub const DAY_ONE_LINTS: &[&str] = &[
     "closure_self_cycle",
     "signed_remainder",
     "split_shared_update",
+    "day_duration",
     "unwrap_used",
     // Type-aware findings the checker itself makes while inferring.
     "undeclared_return_value",
@@ -213,6 +214,7 @@ pub const TYPED_LINTS: &[&str] = &[
     "closure_self_cycle",
     "signed_remainder",
     "split_shared_update",
+    "day_duration",
     "undeclared_return_value",
     "option_rendered",
 ];
@@ -441,6 +443,7 @@ pub fn lint_code(id: &str) -> Code {
         "unjoined_task" => Code("GL0065"),
         "split_shared_update" => Code("GL0066"),
         "unwrap_used" => Code("GL0068"),
+        "day_duration" => Code("GL0069"),
         "undeclared_return_value" => Code("GL0055"),
         "option_rendered" => Code("GL0067"),
         "non_camel_case_types" => Code("GL0057"),

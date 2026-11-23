@@ -445,6 +445,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_btree_set_from_vec_i64", (Ptr) -> Ptr, Both, "Create a BTreeSet from a Vec of i64 elements."),
     rt!("gos_rt_btree_set_from_vec_str", (Ptr) -> Ptr, Both, "Create a BTreeSet from a Vec of String elements."),
     rt!("gos_rt_btree_set_new", () -> Ptr, Both, "Allocate an empty BTreeSet handle."),
+    rt!("gos_rt_bufio_buffer_writes_raw", (I64, I64) -> I128, Both, "bufio::Writer leaf (file, capacity) -> Result<(), Error>: buffers later writes to the file up to capacity bytes, written out before any other call on it, at its last release, and at exit."),
     rt!("gos_rt_bufio_read_lines_of", (Ptr) -> I128, Cranelift, "bufio::read_lines_of(path) -> Result<[String], Error>."),
     rt!("gos_rt_bufio_read_to_string", (Ptr) -> I128, Cranelift, "bufio::read_to_string(path) -> Result<String, Error>."),
     rt!("gos_rt_bufio_scanner_new", (Ptr) -> Ptr, Cranelift, "Wrap a stream in a buffered line scanner."),
