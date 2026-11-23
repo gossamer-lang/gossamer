@@ -7,6 +7,7 @@
 - `t.add_date(years, months, days)` on a `time::Time` moves the calendar date and keeps the time of day, refusing a time the change of date skips or repeats.
 - A `Duration` of whole days added to or taken from a `time::Time` is the warning `GL0069`: it is elapsed time, so across a daylight-saving change `t + Duration::from_secs(86_400)` lands an hour off the time of day.
 - Cache pruning reclaims a fetched package or git clone whole and by when a build last read it, instead of file by file, so a clone no longer loses its `HEAD` and `config` after 30 days; `gos fetch` replaces a clone an interrupted fetch or the old pruning left incomplete.
+- The Linux glibc archives and packages, x86_64 and aarch64, run on glibc 2.35 (Ubuntu 22.04, Debian 12) and later, where they needed 2.39 and `gos` failed to start on Ubuntu 22.04.
 - A misspelled name gets the same "did you mean" suggestion on every run, where two candidates the same distance away were picked in hash order.
 
 ## 0.84.3 - Safer Option handling diagnostics & warning text update

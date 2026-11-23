@@ -18,15 +18,16 @@ env:
   # RUSTUP_TOOLCHAIN suppresses the override-file read entirely,
   # making the shim a pure pass-through to the named toolchain.
   RUSTUP_TOOLCHAIN: 1.95.0
-  # The oldest glibc the Linux glibc builds run on (Ubuntu 24.04). A binary
-  # needs the glibc of the system it was linked on, so these builds run on
-  # ubuntu-24.04 rather than ubuntu-latest, and check what they produced.
-  GLIBC_FLOOR: "2.39"
+  # The oldest glibc the Linux glibc builds run on (Ubuntu 22.04, Debian 12
+  # and later). A binary needs the glibc of the system it was linked on, so
+  # these builds run on ubuntu-22.04 rather than ubuntu-latest, and check what
+  # they produced.
+  GLIBC_FLOOR: "2.35"
 
 jobs:
   build-linux-x86_64:
     name: Linux x86_64
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
 
@@ -141,7 +142,7 @@ jobs:
 
   build-linux-aarch64:
     name: Linux aarch64
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
 
