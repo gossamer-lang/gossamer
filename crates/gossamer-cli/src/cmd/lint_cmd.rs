@@ -164,7 +164,7 @@ fn typed_lint_diagnostics(
         .map(|id| gossamer_lint::lint_code(id).as_str())
         .collect();
     let mut out = Vec::new();
-    for diag in outcome.warnings {
+    for diag in outcome.diagnostics.into_iter().chain(outcome.warnings) {
         if !typed_codes.contains(&diag.code.as_str()) {
             continue;
         }

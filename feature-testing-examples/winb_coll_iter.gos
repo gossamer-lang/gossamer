@@ -18,7 +18,7 @@ fn main() {
     for x in xs |> |v| iter::map(v, |n: i64| n * 10) { ms += x }
     println("map sum {}", ms)
     let mut fs = 0
-    for x in xs |> |v| iter::filter(v, |n: i64| n % 2 == 1) { fs += x }
+    for x in xs |> |v| iter::filter(v, |n: i64| n % 2 != 0) { fs += x }
     println("filter odd sum {}", fs)
     let mut fms = 0
     for x in xs |> |v| iter::filter_map(v, |n: i64| if n > 2 { Some(n * 100) } else { None }) { fms += x }

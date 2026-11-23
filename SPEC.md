@@ -434,8 +434,10 @@ of the model:
   `-7 % 2 == -1`. `x.rem_euclid(k)` answers the remainder in `0..k` for
   every sign, and `x.div_euclid(k)` the matching quotient. A comparison of
   `x % k` with a positive number, where `x` is signed and may be negative,
-  is the lint `GL0064`: `n % 2 == 1` is false for every negative odd `n`,
-  and `n % 2 != 0` is the test that holds for every sign.
+  is the error `GL0064`: `n % 2 == 1` is false for every negative odd `n`,
+  and `n % 2 != 0` is the test that holds for every sign (`gos check --fix`
+  writes it). The lint `signed_remainder` is `deny` by default; an item's
+  `#[lint(warn(signed_remainder))]` or `#[lint(allow(..))]` relaxes it.
 - `u64`/`usize` values use the same 64-bit payload as signed integers,
   but arithmetic, comparison, shifts, division/remainder, and display are
   type-aware on every tier. `as%` reinterprets or truncates to the target
@@ -1588,7 +1590,11 @@ Irrefutable struct, nested-struct, variant, and or-pattern destructuring
 bind correct values on the bytecode VM, the Cranelift JIT, and the LLVM
 AOT tiers.
 
-Shadowing is permitted.
+Shadowing is permitted, with one exception. A `let` in an inner block that
+hides an outer `let mut` binding of the same name, where nothing assigns the
+outer binding, borrows it mutably, or calls a method on it, is rejected with
+`GT0139`: its `mut` says a write to the outer binding was meant, and the
+inner `let` declares a second binding instead.
 
 A `let` may leave out its value (`let mut x: i64`), and an assignment after
 it supplies one. Every read of such a binding must follow an assignment on

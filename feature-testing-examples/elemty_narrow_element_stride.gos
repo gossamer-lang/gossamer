@@ -3,7 +3,7 @@
 // keeps the source's stride and a `map` declares the mapped element's own.
 // Indexing, iteration, and rendering all read at that width.
 
-fn is_odd(n: i64) -> bool { n % 2 == 1 }
+fn is_odd(n: i64) -> bool { n % 2 != 0 }
 
 fn main() {
     let ns: Vec<i64> = #[0, 1, 2, 3, 4]

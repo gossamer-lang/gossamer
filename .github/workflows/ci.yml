@@ -531,17 +531,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
-          # `llvm.sh` is the LLVM project's own apt repository installer.
-          # Ubuntu's archive stops several majors short of the one this
-          # toolchain prefers, and the emitted IR's optimiser has to be
-          # the major `rustc` bundles for its bitcode to be readable at
-          # all - a mismatch there is a hard link error, not a slower
-          # build.
-          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
-          chmod +x /tmp/llvm.sh
-          sudo /tmp/llvm.sh 22
-          echo "/usr/lib/llvm-22/bin" >> "$GITHUB_PATH"
-
           rustup target add aarch64-unknown-linux-gnu aarch64-unknown-linux-musl
           # qemu-aarch64 needs the target's REAL runtime shared libraries to
           # execute the gnu leg's dynamically-linked binary - the

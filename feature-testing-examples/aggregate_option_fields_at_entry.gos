@@ -28,7 +28,7 @@ enum Kind {
 fn make(n: i64) -> Decl {
     let body = if n % 2 == 0 { Some(Expr::Add(Expr::Lit(n), Expr::Lit(1))) } else { None }
     let abi = if n % 3 == 0 { Some(f"abi{n}") } else { None }
-    let ret = if n % 4 == 1 { Some(Ty { id: n, name: "i64" }) } else { None }
+    let ret = if n.rem_euclid(4) == 1 { Some(Ty { id: n, name: "i64" }) } else { None }
     Decl { attrs: #[n], name: f"f{n}", ret: ret, body: body, abi: abi }
 }
 

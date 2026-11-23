@@ -389,9 +389,9 @@ pub const REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "GL0068",
-        "Calling `.unwrap()` can panic when the value is `None` or `Err`. Handle\n\
-            the missing value or error with `match`, `if let`, or `?`; use\n\
-            `.unwrap_or(..)` when a fallback is appropriate. If a panic is\n\
+        "Calling `.unwrap()` can panic when the value is `None` or `Err`.\n\
+            Handle the missing value or error with `match`, `if let`, or `?`;\n\
+            use `.unwrap_or(..)` when a fallback is appropriate. If a panic is\n\
             intentional, `.expect(\"reason\")` gives it a useful message.",
     ),
     (
@@ -2116,6 +2116,16 @@ pub const REGISTRY: &[(&str, &str)] = &[
             exactly what `eq` compares (a tuple of those fields), or give the\n\
             type an `impl Ord` whose `cmp` answers 0 exactly when `eq` is true\n\
             and use a `BTreeMap` / `BTreeSet`.",
+    ),
+    (
+        "GT0139",
+        "An inner `let` hides an outer `let mut` binding that nothing assigns.\n\
+            Nothing assigns the outer binding, borrows it mutably, or calls a\n\
+            method on it, and the inner `let` declares a second binding, so the\n\
+            outer one keeps its value and its `mut` is never used: `let mut status = \"pending\"`,\n\
+            then `if ok { let status = \"done\" }`, leaves `status` pending.\n\
+            Assign the outer binding (`status = \"done\"`), or drop its `mut`\n\
+            and give the inner binding a name of its own.",
     ),
     (
         "GX0001",

@@ -415,6 +415,88 @@ fn lint_warns_on_parenthesized_closure_parameter() {
     let _ = std::fs::remove_file(&fixture);
 }
 
+const OPTION_AMONG_TEXT: &str = "\
+fn find_name(id: i64) -> Option<String> { if id == 1 { Some(\"alice\") } else { None } }
+fn main() {
+    let name = find_name(2)
+    println(f\"hello, {name}\")
+}
+";
+
+#[test]
+fn lint_reports_an_option_rendered_among_text_at_its_attribute_level() {
+    let fixture = write_fixture("lintoptionrendered", OPTION_AMONG_TEXT);
+    let lint = |extra: &[&str]| {
+        Command::new(gos_bin())
+            .arg("lint")
+            .args(extra)
+            .arg(&fixture)
+            .output()
+            .expect("spawn lint")
+    };
+    let out = lint(&[]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "a warning does not fail lint: {stderr}");
+    assert!(stderr.contains("warning[GL0067]"), "lint reports GL0067: {stderr}");
+    let denied = lint(&["--deny-warnings"]);
+    assert!(
+        !denied.status.success(),
+        "--deny-warnings makes GL0067 an error: {}",
+        String::from_utf8_lossy(&denied.stderr)
+    );
+    let allowed = write_fixture(
+        "lintoptionallowed",
+        &format!("#![lint(allow(option_rendered))]\n{OPTION_AMONG_TEXT}"),
+    );
+    let out = Command::new(gos_bin())
+        .arg("lint")
+        .arg(&allowed)
+        .output()
+        .expect("spawn lint");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("GL0067"), "the allow attribute silences GL0067: {stderr}");
+    let _ = std::fs::remove_file(&fixture);
+    let _ = std::fs::remove_file(&allowed);
+}
+
+#[test]
+fn an_option_field_in_a_synthesized_display_is_not_reported() {
+    let fixture = write_fixture(
+        "lintoptionfield",
+        "struct User { name: Option<String> }\n\
+         fn main() {\n    let user = User { name: Some(\"a\") }\n    println(f\"{user.name.unwrap_or(\"\").len()}\")\n}\n",
+    );
+    for command in ["check", "lint"] {
+        let out = Command::new(gos_bin())
+            .arg(command)
+            .arg(&fixture)
+            .output()
+            .expect("spawn gos");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{command}: {stderr}");
+        assert!(!stderr.contains("GL0067"), "{command} reports no GL0067: {stderr}");
+    }
+    let _ = std::fs::remove_file(&fixture);
+}
+
+#[test]
+fn build_reports_front_end_warnings() {
+    let fixture = write_fixture("buildoptionrendered", OPTION_AMONG_TEXT);
+    let out_dir = fixture.with_extension("out");
+    let out = Command::new(gos_bin())
+        .arg("build")
+        .arg(&fixture)
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .output()
+        .expect("spawn build");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "a warning does not fail the build: {stderr}");
+    assert!(stderr.contains("warning[GL0067]"), "build reports GL0067: {stderr}");
+    let _ = std::fs::remove_file(&fixture);
+    let _ = std::fs::remove_dir_all(&out_dir);
+}
+
 #[test]
 fn doc_html_emits_search_bar_intra_links_and_per_item_anchors() {
     let source = "\
@@ -913,4 +995,34 @@ fn runs_on_main() {
         out.status.success() && stdout.contains("PASS"),
         "a test body must run where `gos run` runs `main`:\n{stdout}\n{stderr}"
     );
+}
+
+#[test]
+fn check_fix_rewrites_a_signed_remainder_the_build_refuses() {
+    let fixture = write_fixture(
+        "fixsignedremainder",
+        "fn is_odd(n: i64) -> bool {\n    n % 2 == 1\n}\nfn main() { println(is_odd(-3)) }\n",
+    );
+    let check = |fix: bool| {
+        let mut command = Command::new(gos_bin());
+        command.arg("check");
+        if fix {
+            command.arg("--fix");
+        }
+        command.arg(&fixture).output().expect("spawn check")
+    };
+    let refused = check(false);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "GL0064 refuses the program: {stderr}");
+    assert!(stderr.contains("error[GL0064]"), "{stderr}");
+    let _ = check(true);
+    let fixed = std::fs::read_to_string(&fixture).expect("read fixed");
+    assert!(fixed.contains("n % 2 != 0"), "--fix rewrites the test: {fixed}");
+    let rechecked = check(false);
+    assert!(
+        rechecked.status.success(),
+        "the rewritten program checks: {}",
+        String::from_utf8_lossy(&rechecked.stderr)
+    );
+    let _ = std::fs::remove_file(&fixture);
 }

@@ -48,7 +48,7 @@ fn descend(root: Branch, path: i64, depth: i64) -> i64 {
     let mut node = root
     let mut bits = path
     for _ in 0..depth {
-        node = if bits % 2 == 1 { node.right.unwrap() } else { node.left.unwrap() }
+        node = if bits % 2 != 0 { node.right.unwrap() } else { node.left.unwrap() }
         bits = bits / 2
     }
     node.value

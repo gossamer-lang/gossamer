@@ -4,7 +4,7 @@
 //! long as it works, and the pool's threads exit when the last holder lets
 //! go, so a program pays no idle compiler threads between compiles. The pool
 //! starts only when a pass has enough bodies to share out, with a thread per
-//! [`BODIES_PER_THREAD`] of them, so a small program compiles in line and
+//! `BODIES_PER_THREAD` of them, so a small program compiles in line and
 //! starts no thread at all. A target without threads compiles in line.
 
 #[cfg(not(target_arch = "wasm32"))]

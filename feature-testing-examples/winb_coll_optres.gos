@@ -21,7 +21,7 @@ fn main() {
     println("map-none {}", none |> |v| option::map(v, |n: i64| n + 1) |> |v| option::unwrap_or(v, -1))
     println("and_then {}"
         some |> |v| option::and_then(v, |n: i64| if n > 1 { Some(n * 10) } else { None }) |> |v| option::unwrap_or(v, 0))
-    println("filter-keep {}", some |> |v| option::filter(v, |n: i64| n % 2 == 1) |> |v| option::unwrap_or(v, 0))
+    println("filter-keep {}", some |> |v| option::filter(v, |n: i64| n % 2 != 0) |> |v| option::unwrap_or(v, 0))
     println("filter-drop {}", some |> |v| option::filter(v, |n: i64| n % 2 == 0) |> |v| option::unwrap_or(v, -1))
     println("or {}", none |> |v| option::or(v, Some(5)) |> |v| option::unwrap_or(v, 0))
     println("or_else {}", none |> |v| option::or_else(v, || Some(6)) |> |v| option::unwrap_or(v, 0))

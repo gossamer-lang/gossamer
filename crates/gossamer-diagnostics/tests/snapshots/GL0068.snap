@@ -3,10 +3,10 @@ source: crates/gossamer-diagnostics/tests/snapshots.rs
 expression: rendered
 ---
 --- plain ---
-error[GL0068]: Calling `.unwrap()` can panic when the value is `None` or `Err`. Handle
+error[GL0068]: Calling `.unwrap()` can panic when the value is `None` or `Err`. - here
 --- framed ---
-error[GL0068]: Calling `.unwrap()` can panic when the value is `None` or `Err`. Handle
+error[GL0068]: Calling `.unwrap()` can panic when the value is `None` or `Err`.
   --> snap.gos:2:5
      2 |     let x = 1
        |     ^^^^^
-       error: here
+     error: here

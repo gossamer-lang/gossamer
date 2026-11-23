@@ -1,6 +1,6 @@
 name: Rust test setup
 description: >
-  Install the LLVM 18 tools `gos build` drives (opt / llc), the pinned Rust
+  Install the LLVM 22 tools `gos build` drives (opt / llc), the pinned Rust
   toolchain, the build cache, and resolve the real cargo binary into
   $CARGO_BIN. Shared by every job that builds or runs the toolchain. The caller
   must run `actions/checkout` before this action so the action file is present.
@@ -22,12 +22,29 @@ inputs:
 runs:
   using: composite
   steps:
-    # `gos build` shells out to `opt` and `llc` from LLVM 18+. Ubuntu
-    # runners ship them at `/usr/lib/llvm-18/bin/` (auto-discovered);
-    # macOS and Windows need explicit discovery + env-var pointers. These
-    # run BEFORE `dtolnay/rust-toolchain` so its `$GITHUB_PATH` push of
+    # `gos build` shells out to `opt` and `llc`, and prefers LLVM 22, the
+    # major `rustc` bundles, so the optimiser reads the runtime archive's
+    # bitcode. Every OS installs it explicitly: a runner image's own LLVM
+    # changes major with the image. These run BEFORE
+    # `dtolnay/rust-toolchain` so its `$GITHUB_PATH` push of
     # `~/.cargo/bin` stays last on PATH (otherwise a brew-managed `cargo`
     # shim on the macOS image resolves ahead of the installed toolchain).
+    - name: Install LLVM (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # `llvm.sh` is the LLVM project's own apt repository installer;
+        # Ubuntu's archive does not carry LLVM 22.
+        wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+        chmod +x /tmp/llvm.sh
+        sudo /tmp/llvm.sh 22
+        bin=/usr/lib/llvm-22/bin
+        test -x "$bin/opt" || { echo "opt missing under $bin" >&2; exit 1; }
+        test -x "$bin/llc" || { echo "llc missing under $bin" >&2; exit 1; }
+        echo "$bin" >> "$GITHUB_PATH"
+        echo "GOS_LLVM_OPT=$bin/opt" >> "$GITHUB_ENV"
+        echo "GOS_LLC=$bin/llc"      >> "$GITHUB_ENV"
     - name: Install LLVM (macOS)
       if: runner.os == 'macOS'
       shell: bash
@@ -36,8 +53,8 @@ runs:
         HOMEBREW_NO_INSTALL_CLEANUP: "1"
       run: |
         set -euo pipefail
-        brew install llvm@18
-        prefix="$(brew --prefix llvm@18)"
+        brew install llvm@22
+        prefix="$(brew --prefix llvm@22)"
         test -x "$prefix/bin/opt" || { echo "opt missing under $prefix/bin" >&2; exit 1; }
         test -x "$prefix/bin/llc" || { echo "llc missing under $prefix/bin" >&2; exit 1; }
         echo "GOS_LLVM_OPT=$prefix/bin/opt" >> "$GITHUB_ENV"

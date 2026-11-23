@@ -1125,6 +1125,9 @@ fn validate_source(
     timings.exhaustiveness = outcome.timings.exhaustiveness;
     timings.arena_escape = outcome.timings.arena_escape;
     timings.parse_cache_hit = outcome.timings.parse_cache_hit;
+    for diag in &outcome.warnings {
+        eprintln!("{}", gossamer_diagnostics::render(diag, &map, render_opts));
+    }
     if !outcome.diagnostics.is_empty() {
         for diag in &outcome.diagnostics {
             eprintln!("{}", gossamer_diagnostics::render(diag, &map, render_opts));

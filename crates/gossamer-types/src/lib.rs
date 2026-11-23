@@ -34,6 +34,7 @@ mod lossy_casts;
 mod normalize;
 pub mod printer;
 pub mod purity;
+mod shadowed_mut;
 mod signed_remainders;
 mod split_shared_updates;
 pub mod std_fn_eta;
@@ -103,6 +104,7 @@ pub use lossy_casts::{
 };
 pub use normalize::normalize_caller_side_spellings;
 pub use printer::{public_type_name, render_public_ty, render_ty, stable_type_name};
+pub use shadowed_mut::{ShadowedMutDiagnostic, check_shadowed_mut};
 pub use signed_remainders::{SIGNED_REMAINDER_LINT, SignedRemainder, find_signed_remainders};
 pub use split_shared_updates::{
     SPLIT_SHARED_UPDATE_LINT, SplitSharedUpdate, find_split_shared_updates,

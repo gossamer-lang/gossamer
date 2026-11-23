@@ -46,7 +46,7 @@ fn collect_diagnostics(source: &str, file_name: &str) -> Vec<Diagnostic> {
 
     let mut tcx = TyCtxt::new();
     let (table, type_diags) = typecheck_source_file(&sf, &resolutions, &mut tcx);
-    for diag in &type_diags {
+    for diag in type_diags.iter().filter(|diag| !diag.is_advisory()) {
         out.push(diag.to_diagnostic());
     }
 
@@ -66,7 +66,11 @@ fn collect_diagnostics(source: &str, file_name: &str) -> Vec<Diagnostic> {
         out.push(diag.to_diagnostic());
     }
 
-    out.extend(typed_lints(&sf, &resolutions, &table, &tcx));
+    for diag in gossamer_types::check_shadowed_mut(&sf, &resolutions) {
+        out.push(diag.to_diagnostic());
+    }
+
+    out.extend(typed_lints(&sf, &resolutions, &table, &tcx, &type_diags));
 
     out
 }

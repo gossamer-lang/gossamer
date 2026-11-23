@@ -4,26 +4,4 @@
 # code path is not reachable from this workspace.
 
 [advisories]
-ignore = [
-    # bincode 1.x - development ceased; no CVE. Pulled in transitively
-    # via cranelift-codegen; drop when cranelift moves to bincode 2.x.
-    "RUSTSEC-2025-0141",
-    # rustls-pemfile 2.x - archived; functionality folded into
-    # rustls-pki-types. Drop when our transitive consumers migrate.
-    "RUSTSEC-2025-0134",
-    # rsa 0.9.x Marvin Attack timing side channel during PKCS#1 v1.5
-    # *decryption*. No fixed upgrade is available. We use the crate
-    # only for PKCS#1 v1.5 signing / verification through
-    # `gossamer-std::crypto::rsa`; the vulnerable decryption path is
-    # not reachable. Re-audit when a constant-time decryption fix
-    # ships upstream.
-    "RUSTSEC-2023-0071",
-    # memmap2 0.2.3 unsound (unchecked pointer offset). Pulled only
-    # transitively by cranelift-jit for JIT code-page mapping; even the
-    # latest cranelift-jit (0.133.1) still pins memmap2 0.2.3, and the
-    # 0.2.x line has no fixed release, so no upgrade removes it. Our own
-    # direct memmap2 (0.9) is unaffected, and the unsound offset API is
-    # not reached with untrusted input through cranelift's mapping. Drop
-    # when cranelift-jit moves to a patched memmap2.
-    "RUSTSEC-2026-0186",
-]
+ignore = []

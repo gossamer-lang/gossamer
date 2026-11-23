@@ -1169,6 +1169,7 @@ mod tests {
     /// that it did nothing rather than removing files out from under it.
     #[test]
     fn reclaiming_a_workdir_a_build_holds_removes_nothing() {
+        let _children = crate::test_children::releasing_locks();
         let root = scratch("binding-workdir-held");
         let _ = fs::remove_dir_all(&root);
         let workdir = root.join("feedface");
@@ -1192,6 +1193,7 @@ mod tests {
     /// source lock shared, and reclamation leaves the snapshot while any does.
     #[test]
     fn reclaiming_a_source_snapshot_a_build_reads_removes_nothing() {
+        let _children = crate::test_children::releasing_locks();
         let root = scratch("binding-source-read");
         let _ = fs::remove_dir_all(&root);
         let workdir = root.join("toolchain-src-0.0.0-0123456789abcdef");
@@ -1212,6 +1214,7 @@ mod tests {
 
     #[test]
     fn a_locked_binding_workdir_survives_the_prune() {
+        let _children = crate::test_children::releasing_locks();
         let root = scratch("binding-workdir-locked");
         let _ = fs::remove_dir_all(&root);
         let workdir = root.join("cafebabe");
@@ -1254,6 +1257,7 @@ mod tests {
 
     #[test]
     fn a_directory_another_process_holds_in_use_is_not_reclaimed() {
+        let _children = crate::test_children::releasing_locks();
         let root = scratch("in-use-other");
         let _ = fs::remove_dir_all(&root);
         let dir = root.join("cmake-shared-0123456789abcdef");
@@ -1301,6 +1305,7 @@ mod tests {
 
     #[test]
     fn run_directories_are_reclaimed_whole() {
+        let _children = crate::test_children::releasing_locks();
         let root = scratch("run-dirs");
         let _ = fs::remove_dir_all(&root);
         let shared = root.join("run");
@@ -1491,6 +1496,7 @@ mod tests {
 
     #[test]
     fn a_trim_another_process_is_running_is_left_to_it() {
+        let _children = crate::test_children::releasing_locks();
         let root = scratch("trim-busy");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
@@ -1528,6 +1534,7 @@ mod tests {
 
     #[test]
     fn a_native_build_tree_is_pruned_whole_and_kept_while_its_lock_is_held() {
+        let _children = crate::test_children::releasing_locks();
         let root = scratch("native-build-tree");
         let _ = fs::remove_dir_all(&root);
         let tree = root.join("cmake-static-0123456789abcdef");

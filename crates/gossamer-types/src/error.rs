@@ -103,10 +103,19 @@ impl TypeDiagnostic {
     /// reports at warning severity and never moves the exit code.
     #[must_use]
     pub const fn is_advisory(&self) -> bool {
-        matches!(
-            self.error,
-            TypeError::UndeclaredReturnValue { .. } | TypeError::OptionRendered { .. }
-        )
+        self.advisory_lint().is_some()
+    }
+
+    /// The lint an advisory finding reports under, which `#[lint(..)]`
+    /// attributes and `gos lint --deny-warnings` level; `None` for a fatal
+    /// error.
+    #[must_use]
+    pub const fn advisory_lint(&self) -> Option<&'static str> {
+        match self.error {
+            TypeError::UndeclaredReturnValue { .. } => Some("undeclared_return_value"),
+            TypeError::OptionRendered { .. } => Some("option_rendered"),
+            _ => None,
+        }
     }
 
     /// Constructs a diagnostic from its error and span.
@@ -2298,21 +2307,17 @@ impl TypeDiagnostic {
                     ));
             }
             TypeError::OptionRendered { .. } => {
-                out = out
-                    .with_help(
-                        "choose the text to show when the value is missing: use `v.unwrap_or(..)`, \
+                out = out.with_help(
+                    "choose the text to show when the value is missing: use `v.unwrap_or(..)`, \
                          `if let Some(x) = v`, or `match v`; use `{v:?}` to print the explicit \
                          `Some(...)` or `None` form",
-                    )
-                    .with_note("lint: option_rendered");
+                );
             }
             TypeError::UndeclaredReturnValue { name, found } => {
-                out = out
-                    .with_help(format!(
-                        "return it: `fn {name}(..) -> {found}`, or say the discard is \
+                out = out.with_help(format!(
+                    "return it: `fn {name}(..) -> {found}`, or say the discard is \
                          deliberate: `fn {name}(..) -> ()`"
-                    ))
-                    .with_note("lint: undeclared_return_value");
+                ));
             }
             TypeError::UnknownAssocItem {
                 base,
