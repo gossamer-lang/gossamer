@@ -13,8 +13,9 @@
 //! parameter fed the elements of such a range. A `let mut` counter that
 //! starts at zero or above and is only ever assigned, or grown by, values of
 //! zero or more stays there too: overflow panics rather than wrapping. A
-//! guard such as `i > 0` on an immutable binding shows it non-negative in
-//! the right operand of its `&&` and in the body of its `if` or `while`.
+//! guard such as `i > 0` shows a binding non-negative in the right operand of
+//! its `&&` and in the body of its `if` or `while`, up to the first write to
+//! the binding there.
 
 #![forbid(unsafe_code)]
 
@@ -163,8 +164,10 @@ struct Finder<'a> {
     table: &'a TypeTable,
     tcx: &'a TyCtxt,
     pass: Pass,
-    /// Bindings declared `mut`, which a guard says nothing about past itself.
+    /// Bindings declared `mut`: a guard on one holds until a write to it.
     mutable: &'a HashSet<NodeId>,
+    /// Mutable bindings a guard currently shows non-negative.
+    guarded_mutable: HashSet<NodeId>,
     /// Bindings whose every value is at least zero.
     non_negative: HashSet<NodeId>,
     /// `let mut` bindings that may count up from zero.
@@ -190,6 +193,7 @@ impl<'a> Finder<'a> {
             tcx,
             pass,
             mutable,
+            guarded_mutable: HashSet::new(),
             non_negative: HashSet::new(),
             candidates: HashSet::new(),
             writes: Vec::new(),
@@ -214,7 +218,7 @@ impl<'a> Finder<'a> {
             .collect()
     }
 
-    /// The immutable bindings `condition` shows to be at least zero where it
+    /// The bindings `condition` shows to be at least zero where it
     /// holds: `x > c` for `c >= -1`, `x >= c` for `c >= 0`, or a bound that
     /// is itself non-negative, joined by `&&`.
     fn guarded(&self, condition: &Expr, out: &mut Vec<NodeId>) {
@@ -235,10 +239,7 @@ impl<'a> Finder<'a> {
         };
         let least = if inclusive { 0 } else { -1 };
         let holds = literal_int(bound).is_some_and(|c| c >= least) || self.is_non_negative(bound);
-        if holds
-            && let Some(binding) = self.local(value)
-            && !self.mutable.contains(&binding)
-        {
+        if holds && let Some(binding) = self.local(value) {
             out.push(binding);
         }
     }
@@ -249,12 +250,74 @@ impl<'a> Finder<'a> {
         let mut guarded = Vec::new();
         self.guarded(condition, &mut guarded);
         guarded.retain(|binding| self.non_negative.insert(*binding));
+        for binding in &guarded {
+            if self.mutable.contains(binding) {
+                self.guarded_mutable.insert(*binding);
+            }
+        }
         guarded
     }
 
     fn forget(&mut self, assumed: Vec<NodeId>) {
         for binding in assumed {
             self.non_negative.remove(&binding);
+            self.guarded_mutable.remove(&binding);
+        }
+    }
+
+    /// A write to a mutable binding ends what a guard showed about it.
+    fn written(&mut self, place: &Expr) {
+        if let Some(binding) = self.local(place)
+            && self.guarded_mutable.remove(&binding)
+        {
+            self.non_negative.remove(&binding);
+        }
+    }
+
+    /// Ends the guards on every binding `body` writes: a loop runs its body
+    /// again after the writes the walk reaches last.
+    fn written_anywhere(&mut self, body: &Expr) {
+        struct Writes<'w, 'a> {
+            finder: &'w Finder<'a>,
+            out: Vec<NodeId>,
+        }
+        impl Visitor for Writes<'_, '_> {
+            fn visit_expr(&mut self, expr: &Expr) {
+                if let ExprKind::Assign { place, .. }
+                | ExprKind::Unary {
+                    op: UnaryOp::RefMut,
+                    operand: place,
+                } = &expr.kind
+                    && let Some(binding) = self.finder.local(place)
+                {
+                    self.out.push(binding);
+                }
+                walk_expr(self, expr);
+            }
+        }
+        let mut writes = Writes {
+            finder: self,
+            out: Vec::new(),
+        };
+        writes.visit_expr(body);
+        for binding in writes.out {
+            if self.guarded_mutable.remove(&binding) {
+                self.non_negative.remove(&binding);
+            }
+        }
+    }
+
+    /// Walks code that runs at another time than where it is written - a
+    /// closure body, a `defer` - with no guard on a mutable binding.
+    fn visit_deferred(&mut self, expr: &Expr) {
+        let suspended: Vec<NodeId> = self.guarded_mutable.drain().collect();
+        for binding in &suspended {
+            self.non_negative.remove(binding);
+        }
+        self.visit_expr(expr);
+        for binding in suspended {
+            self.non_negative.insert(binding);
+            self.guarded_mutable.insert(binding);
         }
     }
 
@@ -288,11 +351,29 @@ impl<'a> Finder<'a> {
             ExprKind::While {
                 condition, body, ..
             } => {
+                self.written_anywhere(body);
                 self.visit_expr(condition);
                 let assumed = self.assume(condition);
                 self.visit_expr(body);
                 self.forget(assumed);
             }
+            ExprKind::Loop { body, .. } => {
+                self.written_anywhere(body);
+                self.visit_expr(body);
+            }
+            ExprKind::For {
+                pattern,
+                iter,
+                body,
+                ..
+            } => {
+                self.visit_expr(iter);
+                self.written_anywhere(body);
+                self.mark_loop(pattern, iter);
+                self.visit_pattern(pattern);
+                self.visit_expr(body);
+            }
+            ExprKind::Closure { body, .. } => self.visit_deferred(body),
             _ => return false,
         }
         true
@@ -505,6 +586,10 @@ fn spelling(expr: &Expr) -> Option<String> {
 
 impl Visitor for Finder<'_> {
     fn visit_stmt(&mut self, stmt: &Stmt) {
+        if let StmtKind::Defer(expr) = &stmt.kind {
+            self.visit_deferred(expr);
+            return;
+        }
         if let StmtKind::Let {
             pattern,
             init: Some(init),
@@ -536,7 +621,14 @@ impl Visitor for Finder<'_> {
             return;
         }
         match &expr.kind {
-            ExprKind::For { pattern, iter, .. } => self.mark_loop(pattern, iter),
+            ExprKind::Assign { place, .. }
+            | ExprKind::Unary {
+                op: UnaryOp::RefMut,
+                operand: place,
+            } => self.written(place),
+            _ => {}
+        }
+        match &expr.kind {
             ExprKind::Binary {
                 op: op @ (BinaryOp::Eq | BinaryOp::Ne),
                 lhs,

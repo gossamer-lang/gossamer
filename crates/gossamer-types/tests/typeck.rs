@@ -5967,3 +5967,29 @@ fn shadowing_an_immutable_or_written_binding_is_legal() {
         checks.fatal
     );
 }
+
+#[test]
+fn a_guard_on_a_mut_binding_holds_until_the_binding_is_written() {
+    let source = "fn pow2(e: i64) -> i64 {\n    let mut acc = 1\n    let mut n = if e < 0 { -e } else { e }\n    \
+                  while n > 0 {\n        if n % 2 == 1 { acc *= 2 }\n        n /= 2\n    }\n    acc\n}\n\
+                  fn looped(start: i64) -> bool {\n    let mut n = start\n    let mut odd = false\n    \
+                  if n > 0 {\n        loop {\n            odd = n % 2 == 1\n            n -= 3\n            \
+                  if n < -10 { break }\n        }\n    }\n    odd\n}\n\
+                  fn captured(start: i64) -> bool {\n    let mut n = start\n    if n > 0 {\n        \
+                  let f = || n % 2 == 1\n        n -= 9\n        return f()\n    }\n    false\n}\n\
+                  fn written_first(start: i64) -> bool {\n    let mut n = start\n    if n > 0 {\n        \
+                  n -= 9\n        return n % 2 == 1\n    }\n    false\n}\n\
+                  fn main() { println(f\"{pow2(3)} {looped(4)} {captured(4)} {written_first(4)}\") }\n";
+    let checks = unit_checks(source);
+    let lines: Vec<usize> = checks
+        .fatal
+        .iter()
+        .filter(|diag| diag.code.as_str() == "GL0064")
+        .map(|diag| {
+            source[..diag.labels[0].location.span.start as usize]
+                .lines()
+                .count()
+        })
+        .collect();
+    assert_eq!(lines, vec![15, 25, 35], "{:?}", checks.fatal);
+}
