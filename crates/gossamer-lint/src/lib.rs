@@ -62,8 +62,13 @@ impl Level {
     }
 }
 
+/// Lints the default registry enables at `deny`: their findings are never
+/// what the code means, so a program that holds one is refused unless an
+/// item's `#[lint(allow(..))]` or `#[lint(warn(..))]` says otherwise.
+pub const DENY_BY_DEFAULT: &[&str] = &["signed_remainder"];
+
 /// Registry mapping lint IDs to levels. The default registry has
-/// every day-one lint enabled at `warn`.
+/// every day-one lint enabled at `warn`, and [`DENY_BY_DEFAULT`] at `deny`.
 #[derive(Debug, Clone)]
 pub struct Registry {
     levels: BTreeMap<&'static str, Level>,
@@ -83,7 +88,12 @@ impl Registry {
     pub fn with_defaults() -> Self {
         let mut levels = BTreeMap::new();
         for id in DAY_ONE_LINTS {
-            levels.insert(*id, Level::Warn);
+            let level = if DENY_BY_DEFAULT.contains(id) {
+                Level::Deny
+            } else {
+                Level::Warn
+            };
+            levels.insert(*id, level);
         }
         Self { levels }
     }
@@ -189,6 +199,10 @@ pub const DAY_ONE_LINTS: &[&str] = &[
     "closure_self_cycle",
     "signed_remainder",
     "split_shared_update",
+    "unwrap_used",
+    // Type-aware findings the checker itself makes while inferring.
+    "undeclared_return_value",
+    "option_rendered",
 ];
 
 /// Lints whose findings need the checked program's types. The syntax-only
@@ -199,6 +213,8 @@ pub const TYPED_LINTS: &[&str] = &[
     "closure_self_cycle",
     "signed_remainder",
     "split_shared_update",
+    "undeclared_return_value",
+    "option_rendered",
 ];
 
 /// Runs every enabled lint over `source_file` (parsed from `src`) and
@@ -424,6 +440,9 @@ pub fn lint_code(id: &str) -> Code {
         "signed_remainder" => Code("GL0064"),
         "unjoined_task" => Code("GL0065"),
         "split_shared_update" => Code("GL0066"),
+        "unwrap_used" => Code("GL0068"),
+        "undeclared_return_value" => Code("GL0055"),
+        "option_rendered" => Code("GL0067"),
         "non_camel_case_types" => Code("GL0057"),
         "non_snake_case" => Code("GL0058"),
         "non_upper_case_globals" => Code("GL0059"),

@@ -2143,7 +2143,7 @@ unsafe fn elements_in_reading_order(vec: &GosVec) -> bool {
 }
 
 /// Rebuilds every nested-vector element of `v` small enough to share a block
-/// with its header (see [`tail_block_fits`]) in index order, in place.
+/// with its header (see `tail_block_fits`) in index order, in place.
 ///
 /// A `Vec<Vec<T>>` grown element by element has its element storage scattered
 /// across the heap in the order the pushes happened to allocate, and a walk of

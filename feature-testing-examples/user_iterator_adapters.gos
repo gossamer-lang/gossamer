@@ -51,7 +51,7 @@ impl<T> Iterator for Cycle<T> {
 fn main() {
     let c = Countdown { n: 5 }
     println("{:?}", c.map(|x| x * 10).collect())
-    println("{:?}", c.filter(|x| x % 2 == 1).map(|x| format("<{}>", x)).collect())
+    println("{:?}", c.filter(|x| x % 2 != 0).map(|x| format("<{}>", x)).collect())
     println("{} {} {:?} {:?}", c.sum(), c.product(), c.min(), c.max())
     println("{} (user count wins)", c.count())
     println("{}", c.fold(0, |acc, x| acc * 10 + x))

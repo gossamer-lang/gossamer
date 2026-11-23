@@ -17,7 +17,7 @@ fn main() {
     let g = |k: i64| marks[k]
     println("{} {}", g(3), g(9))
 
-    let odd_live = 2..n |> |v| iter::filter(v, |k| sieve[k] && k % 2 == 1) |> iter::collect
+    let odd_live = 2..n |> |v| iter::filter(v, |k| sieve[k] && k % 2 != 0) |> iter::collect
     println("{:?}", odd_live)
 
     let names = #["ada", "grace"]

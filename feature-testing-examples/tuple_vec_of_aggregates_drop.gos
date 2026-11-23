@@ -46,7 +46,7 @@ fn select(n: i64, probe: i64) -> Result<Res, String> {
 }
 
 fn parse(i: i64) -> Result<Stmt, String> {
-    if i % 5 == 4 { return Ok(Stmt::Compact) }
+    if i.rem_euclid(5) == 4 { return Ok(Stmt::Compact) }
     Ok(Stmt::Select(Q { table: "t" + i.to_string(), cols: #[i, i + 1] }))
 }
 

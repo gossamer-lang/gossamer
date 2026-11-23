@@ -21,6 +21,8 @@ pub use gossamer_abi::macos_deployment;
 pub mod pipeline;
 pub mod runtime_archive;
 pub mod target;
+#[cfg(test)]
+mod test_children;
 
 pub use binding_build::{
     BindingBuildError, Profile as BindingProfile, RenderedBinding, StaticBindingsArchive,

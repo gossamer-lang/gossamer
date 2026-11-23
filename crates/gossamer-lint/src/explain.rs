@@ -321,6 +321,27 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
             without a binding, `spawn(..)`; inside a `cohort { }` the cohort\n\
             joins every task when it ends."
         }
+        "unwrap_used" => {
+            "Calling `.unwrap()` can panic when the value is `None` or `Err`.\n\
+            Handle the missing value or error with `match`, `if let`, or `?`;\n\
+            use `.unwrap_or(..)` when a fallback is appropriate. If a panic is\n\
+            intentional, `.expect(\"reason\")` gives it a useful message."
+        }
+        "undeclared_return_value" => {
+            "A signature with no return type answers a unit, so the value the\n\
+            body's tail expression produces is discarded and the caller reads\n\
+            the unit the signature promises. Return it with `-> T`, or write\n\
+            `-> ()` to say the discard is deliberate."
+        }
+        "option_rendered" => {
+            "An `Option` is rendered with `{}` alongside other text, in an f-string\n\
+            or a `println` / `format` template. When the value is `None`, the\n\
+            output contains the word `None`; when it is present, it contains\n\
+            `Some(..)`. An `Option` printed by itself, as in `println(opt)`, is\n\
+            not flagged. Choose a user-facing value with `name.unwrap_or(\"guest\")`,\n\
+            `if let Some(n) = name`, or `match name`. Use `{name:?}` to show the\n\
+            explicit `Some(...)` or `None` form."
+        }
         "non_upper_case_globals" => {
             "A const or static whose name is not `SCREAMING_SNAKE_CASE`, as Rust\n\
             spells them. A single name in a pattern matches the const it names,\n\

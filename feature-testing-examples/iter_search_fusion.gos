@@ -14,7 +14,7 @@ fn main() {
     }).find(|v| v > 10)
     println("find {:?} {:?} none {:?}", found, seen, xs.iter().find(|v| v > 100))
     let mut seen2: Vec<i64> = #[]
-    let at = xs.iter().filter(|v| v % 2 == 1).position(|v| {
+    let at = xs.iter().filter(|v| v % 2 != 0).position(|v| {
         seen2.push(v)
         v == 9
     })
@@ -30,7 +30,7 @@ fn main() {
         v < 9
     }).map(|v| v * 10).sum()
     println("while {} {:?} {} {:?}", tw, seen3, sw, seen4)
-    let mut calls = 0
+    let calls = 0
     let mut hits: Vec<i64> = #[]
     let fm = xs.iter().filter_map(|v| {
         hits.push(v)

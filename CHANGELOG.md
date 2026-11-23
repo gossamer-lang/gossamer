@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.84.3 - Safer Option handling diagnostics & warning text update
+
+- `.unwrap()` calls are flagged by `GL0068` because they can panic on `None` or `Err`; the lint points to explicit handling, a fallback, or a descriptive `.expect(..)`.
+- `GL0067` now explains the `None` and `Some(..)` text in plain terms, and compiler-synthesized formatting no longer produces the warning.
+- `gos lint` reports `GL0067` and `GL0055`, `gos lint --deny-warnings` fails on them, and `#[lint(allow(option_rendered))]` / `#[lint(allow(undeclared_return_value))]` silence them, as for every other lint.
+- `gos build` prints the warnings `gos check` and `gos run` print.
+- `n % 2 == 1`, and any comparison of a remainder with a positive number, on a signed value that may be negative is the error `GL0064`, which refuses the program; `gos check --fix` rewrites it to `n % 2 != 0` or `n.rem_euclid(k) == r`, and `#[lint(warn(signed_remainder))]` keeps it a warning.
+- A `let` in an inner block that hides an outer `let mut` binding nothing assigns, borrows mutably, or calls a method on is refused with `GT0139`; assigning the outer binding (`x = ..`) is the fix.
+- A `#[lint(deny(..))]` on a type-aware lint refuses the program, as a deny on any other lint fails `gos lint`.
+
 ## 0.84.2 - Miri fixes
 
 - The Miri runtime shard runs cleanly: memory-limit probing and Linux file opening use Miri-compatible paths, static ASCII string headers retain readable provenance, and tests for native-only watchdog helpers are excluded when those helpers are not built.

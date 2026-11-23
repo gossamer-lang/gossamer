@@ -23,6 +23,7 @@ pub(crate) fn run_lint(id: &str, sf: &SourceFile, src: &str) -> Vec<Finding> {
     match id {
         "unused_variable" => lint_unused_variable(sf),
         "unjoined_task" => lint_unjoined_task(sf),
+        "unwrap_used" => lint_unwrap_used(sf),
         "unused_import" => lint_unused_import(sf),
         "unused_mut_variable" => lint_unused_mut_variable(sf),
         "needless_return" => lint_needless_return(sf),
@@ -985,6 +986,31 @@ fn lint_panic_in_main(sf: &SourceFile) -> Vec<Finding> {
             }
         }
     }
+    out
+}
+
+/// Flags `.unwrap()` calls because the syntax-only lint pass cannot prove
+/// that an `Option` is `Some` or a `Result` is `Ok` at the call site.
+fn lint_unwrap_used(sf: &SourceFile) -> Vec<Finding> {
+    let mut out = Vec::new();
+    each_fn_body(sf, |body| {
+        walk_expr(body, &mut |expr| {
+            if let ExprKind::MethodCall { name, args, .. } = &expr.kind
+                && name.name == "unwrap"
+                && args.is_empty()
+            {
+                out.push((
+                    expr.span,
+                    "`.unwrap()` can panic when the value is `None` or `Err`".to_string(),
+                    Some(
+                        "handle the missing value or error with `match`, `if let`, or `?`; \
+                         use `.unwrap_or(..)` for a fallback, or `.expect(\"reason\")` for an intentional panic"
+                            .to_string(),
+                    ),
+                ));
+            }
+        });
+    });
     out
 }
 

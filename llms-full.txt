@@ -156,6 +156,8 @@ extend(&mut items)     // items is now #[1, 2, 1]
 **Bindings and control flow**
 - `let` by default, `let mut` near its one update site; `x += 1`, never
   `x = x + 1`. `if`, `match`, and `loop { break v }` are expressions.
+  An inner `let x` hiding an outer `let mut x` that nothing assigns is
+  GT0139: assign the outer one, `x = ..`.
   `let mut x: T` with no value must be assigned on every path before a
   read (GT0129).
 - Destructure with plain lists: `let a, b = pair`, `let tx, rx = channel()`,
@@ -236,7 +238,8 @@ extend(&mut items)     // items is now #[1, 2, 1]
   would panic). GL0062 marks each `as` that can panic.
 - `%` keeps the sign of the value it divides, as in Rust: `-3 % 2 == -1`.
   Test oddness with `n % 2 != 0`; `n.rem_euclid(k)` answers `0..k` for
-  every sign. GL0064 marks `n % 2 == 1` on a value that may be negative.
+  every sign. `n % 2 == 1` on a value that may be negative is GL0064, an
+  error (`gos check --fix` writes `n % 2 != 0`).
 - `+ - *` panic on overflow on every tier and profile; `+%` `-%` `*%` (and
   `+%=`...) wrap at the declared width, and are the only way to wrap. Divide
   by zero panics, and so does a shift amount outside `0..BITS`; `<<%` /

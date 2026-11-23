@@ -81,7 +81,7 @@ fn main() {
     for a in xs.iter().map(noisy).take(2) {
         for b in ys.iter().filter(|y| {
             println("inner test {}", y)
-            y % 2 == 1
+            y % 2 != 0
         }) {
             println("body {} {}", a, b)
         }

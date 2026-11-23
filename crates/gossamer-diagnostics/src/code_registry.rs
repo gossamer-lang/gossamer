@@ -379,14 +379,20 @@ pub const REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "GL0067",
-        "An `Option` is rendered with `{}` among other text, in an f-string\n\
-            or a `println` / `format` template, so a value that is absent reads\n\
-            as the word `None` in the middle of the sentence, and one that is\n\
-            present as `Some(..)`. An `Option` that is the whole output, as in\n\
-            `println(opt)`, reads as itself and is not flagged. Say what a missing value reads\n\
-            as: `name.unwrap_or(\"guest\")`, an `if let Some(n) = name`, or a\n\
-            `match`. Write `{name:?}` where the `Some(..)` / `None` spelling is\n\
-            the text meant.",
+        "An `Option` is rendered with `{}` alongside other text, in an f-string\n\
+            or a `println` / `format` template. When the value is `None`, the\n\
+            output contains the word `None`; when it is present, it contains\n\
+            `Some(..)`. An `Option` printed by itself, as in `println(opt)`, is\n\
+            not flagged. Choose a user-facing value with `name.unwrap_or(\"guest\")`,\n\
+            `if let Some(n) = name`, or `match name`. Use `{name:?}` to show the\n\
+            explicit `Some(...)` or `None` form.",
+    ),
+    (
+        "GL0068",
+        "Calling `.unwrap()` can panic when the value is `None` or `Err`.\n\
+            Handle the missing value or error with `match`, `if let`, or `?`;\n\
+            use `.unwrap_or(..)` when a fallback is appropriate. If a panic is\n\
+            intentional, `.expect(\"reason\")` gives it a useful message.",
     ),
     (
         "GM0001",
@@ -2110,6 +2116,16 @@ pub const REGISTRY: &[(&str, &str)] = &[
             exactly what `eq` compares (a tuple of those fields), or give the\n\
             type an `impl Ord` whose `cmp` answers 0 exactly when `eq` is true\n\
             and use a `BTreeMap` / `BTreeSet`.",
+    ),
+    (
+        "GT0139",
+        "An inner `let` hides an outer `let mut` binding that nothing assigns.\n\
+            Nothing assigns the outer binding, borrows it mutably, or calls a\n\
+            method on it, and the inner `let` declares a second binding, so the\n\
+            outer one keeps its value and its `mut` is never used: `let mut status = \"pending\"`,\n\
+            then `if ok { let status = \"done\" }`, leaves `status` pending.\n\
+            Assign the outer binding (`status = \"done\"`), or drop its `mut`\n\
+            and give the inner binding a name of its own.",
     ),
     (
         "GX0001",

@@ -22,7 +22,7 @@ fn main() {
         }
         println("match x = {}", x)
 
-        let mut x = x
+        let x = x
         for i in 0..3 {
             let x = x + i
             println("loop shadow x = {}", x)
@@ -41,7 +41,7 @@ fn main() {
     }
     println("if-expression y = {}", y)
 
-    let mut z = 0
+    let z = 0
     for i in 0..5 {
         let z = z + i
         println("for-shadow z = {}", z)

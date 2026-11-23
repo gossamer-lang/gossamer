@@ -11,6 +11,7 @@ use gossamer_ast::{ItemKind, SourceFile};
 use gossamer_diagnostics::Diagnostic;
 use gossamer_resolve::{Resolutions, ResolveDiagnostic};
 
+use crate::TypeDiagnostic;
 use crate::context::TyCtxt;
 use crate::exhaustiveness::ExhaustivenessDiagnostic;
 use crate::table::TypeTable;
@@ -85,13 +86,12 @@ pub fn check_resolved_unit(
     inactive.restore(&mut sf.items);
     observer.phase_done(CheckPhase::Typecheck);
     if !parse_failed {
-        for diag in &type_diags {
-            if diag.is_advisory() {
-                advisory.push(diag.to_diagnostic());
-            } else {
-                fatal.push(diag.to_diagnostic());
-            }
-        }
+        fatal.extend(
+            type_diags
+                .iter()
+                .filter(|diag| !diag.is_advisory())
+                .map(TypeDiagnostic::to_diagnostic),
+        );
     }
 
     let exhaustive = crate::check_exhaustiveness(sf, resolutions, &table, tcx);
@@ -121,6 +121,11 @@ pub fn check_resolved_unit(
         for diag in crate::check_definite_assignment(sf, resolutions, &table, tcx) {
             fatal.push(diag.to_diagnostic());
         }
+        // A `mut` binding nothing assigns, hidden by an inner `let` of its
+        // name, is a write to the outer binding that declared a new one.
+        for diag in crate::check_shadowed_mut(sf, resolutions) {
+            fatal.push(diag.to_diagnostic());
+        }
         // A parallel adapter's callback runs on many workers at once, so one
         // whose purity cannot be shown is refused on every tier.
         if !earlier_fatal && fatal.is_empty() {
@@ -130,7 +135,13 @@ pub fn check_resolved_unit(
         }
     }
     if !parse_failed {
-        advisory.extend(typed_lints(sf, resolutions, &table, tcx));
+        // A typed lint at `deny` refuses the program like any other error.
+        let (denied, warned): (Vec<_>, Vec<_>) =
+            typed_lints(sf, resolutions, &table, tcx, &type_diags)
+                .into_iter()
+                .partition(|diag| diag.severity == gossamer_diagnostics::Severity::Error);
+        fatal.extend(denied);
+        advisory.extend(warned);
     }
     observer.phase_done(CheckPhase::Analysis);
 
@@ -143,22 +154,30 @@ pub fn check_resolved_unit(
 
 /// The findings of the lints that read the checked program's types, at the
 /// levels the default registry and the unit's `#[lint(..)]` attributes give
-/// them. They are advisory wherever they are reported from a check:
-/// `gos lint --deny-warnings` is the gate that makes them errors.
+/// them, with the advisory findings among the checker's own `type_diags`.
+/// A finding at `deny` is an error that refuses the program; the rest are
+/// warnings, which `gos lint --deny-warnings` makes errors.
 #[must_use]
 pub fn typed_lints(
     sf: &SourceFile,
     resolutions: &Resolutions,
     table: &TypeTable,
     tcx: &TyCtxt,
+    type_diags: &[TypeDiagnostic],
 ) -> Vec<Diagnostic> {
     let mut registry = gossamer_lint::Registry::with_defaults();
     gossamer_lint::apply_attributes(&sf.attrs, &mut registry);
+    let mut out = checker_lints(sf, &registry, type_diags);
     let casts = crate::find_lossy_casts(sf, table, tcx)
         .into_iter()
         .map(|cast| (cast.span, cast.title, Some(cast.help)))
         .collect();
-    let mut out = gossamer_lint::leveled(crate::LOSSY_CAST_LINT, sf, &registry, casts);
+    out.extend(gossamer_lint::leveled(
+        crate::LOSSY_CAST_LINT,
+        sf,
+        &registry,
+        casts,
+    ));
     let cycles = crate::find_closure_self_cycles(sf, resolutions, table)
         .into_iter()
         .map(|cycle| {
@@ -180,16 +199,7 @@ pub fn typed_lints(
         &registry,
         cycles,
     ));
-    let remainders = crate::find_signed_remainders(sf, resolutions, table, tcx)
-        .into_iter()
-        .map(|found| (found.span, found.title, Some(found.help)))
-        .collect();
-    out.extend(gossamer_lint::leveled(
-        crate::SIGNED_REMAINDER_LINT,
-        sf,
-        &registry,
-        remainders,
-    ));
+    out.extend(signed_remainders(sf, resolutions, table, tcx, &registry));
     let split_updates = crate::find_split_shared_updates(sf, resolutions, table, tcx)
         .into_iter()
         .map(|found| {
@@ -223,10 +233,71 @@ pub fn typed_lints(
                 })
         })
     });
-    for diag in &mut out {
-        diag.severity = gossamer_diagnostics::Severity::Warning;
+    out
+}
+
+/// The checker's own advisory findings, at the levels `registry` gives
+/// their lints.
+fn checker_lints(
+    sf: &SourceFile,
+    registry: &gossamer_lint::Registry,
+    type_diags: &[TypeDiagnostic],
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for diag in type_diags {
+        let Some(lint) = diag.advisory_lint() else {
+            continue;
+        };
+        let rendered = diag.to_diagnostic();
+        let help = rendered.helps.into_iter().next();
+        out.extend(gossamer_lint::leveled(
+            lint,
+            sf,
+            registry,
+            vec![(diag.span, rendered.title, help)],
+        ));
     }
     out
+}
+
+/// `GL0064` at the level `registry` gives it, each finding carrying the
+/// comparison respelled for every sign where both operands have a spelling.
+fn signed_remainders(
+    sf: &SourceFile,
+    resolutions: &Resolutions,
+    table: &TypeTable,
+    tcx: &TyCtxt,
+    registry: &gossamer_lint::Registry,
+) -> Vec<Diagnostic> {
+    let remainders = crate::find_signed_remainders(sf, resolutions, table, tcx);
+    let rewrites: Vec<(gossamer_lex::Span, String)> = remainders
+        .iter()
+        .filter_map(|found| found.fix.clone().map(|fix| (found.span, fix)))
+        .collect();
+    let mut leveled = gossamer_lint::leveled(
+        crate::SIGNED_REMAINDER_LINT,
+        sf,
+        registry,
+        remainders
+            .into_iter()
+            .map(|found| (found.span, found.title, Some(found.help)))
+            .collect(),
+    );
+    for diag in &mut leveled {
+        let Some(label) = diag.labels.first() else {
+            continue;
+        };
+        let location = label.location;
+        if let Some((_, fix)) = rewrites.iter().find(|(span, _)| *span == location.span) {
+            diag.suggestions
+                .push(gossamer_diagnostics::Suggestion::replacement(
+                    location,
+                    "compare a remainder that holds for every sign",
+                    fix.clone(),
+                ));
+        }
+    }
+    leveled
 }
 
 /// The spans of the modules the bundler wrapped a dependency's sources in

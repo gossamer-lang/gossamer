@@ -29,7 +29,7 @@ fn main() {
     println("eager {} {}", xs.map(|x| x + 1).sum(), xs.filter(|x| x % 2 == 0).count())
     println("count {} {}", xs.iter().count(|v| v > 2), xs.iter().count())
     println("fold {} {}", xs.iter().fold(100, |acc, v| acc - v), (1..5).product())
-    xs.iter().filter(|v| v % 2 == 1).for_each(|v| print("{} ", v))
+    xs.iter().filter(|v| v % 2 != 0).for_each(|v| print("{} ", v))
     println("")
 
     let fs: Vec<f64> = #[0.5, 1.25, 2.0]

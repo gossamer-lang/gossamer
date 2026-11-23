@@ -1969,6 +1969,7 @@ mod tests {
     // the lock with the process, so the next build takes it.
     #[test]
     fn a_lock_file_left_by_a_dead_process_is_taken() {
+        let _children = crate::test_children::releasing_locks();
         let dir = lock_scratch("dead-holder");
         let path = build_lock_path(&dir);
         fs::write(&path, format!("{}\n", u32::MAX)).unwrap();
@@ -1987,6 +1988,7 @@ mod tests {
     fn concurrent_acquirers_never_hold_the_lock_together() {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
+        let _children = crate::test_children::releasing_locks();
         let dir = lock_scratch("concurrent");
         let path = build_lock_path(&dir);
         let holders = Arc::new(AtomicUsize::new(0));
@@ -2021,6 +2023,7 @@ mod tests {
     // else can take that one.
     #[test]
     fn a_waiter_whose_lock_file_is_removed_takes_the_new_one() {
+        let _children = crate::test_children::releasing_locks();
         let dir = lock_scratch("removed-while-waiting");
         let path = build_lock_path(&dir);
         let first = AdvisoryLock::take(&path).unwrap().expect("free");
@@ -2054,6 +2057,7 @@ mod tests {
     #[test]
     fn streamed_output_drains_both_pipes_without_deadlock() {
         const STDERR_BYTES: usize = 256 * 1024;
+        let _children = crate::test_children::spawning();
         let mut command = Command::new("sh");
         command
             .arg("-c")
@@ -2102,6 +2106,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn streamed_output_arrives_before_the_child_exits() {
+        let _children = crate::test_children::spawning();
         let dir = std::env::temp_dir().join(format!("gos-stream-live-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -2196,6 +2201,7 @@ mod tests {
     /// taker must be told the lock is busy instead of getting one of its own.
     #[test]
     fn a_held_build_lock_is_not_taken_twice() {
+        let _children = crate::test_children::releasing_locks();
         let dir = tempdir();
         let path = build_lock_path(&dir);
         let held = AdvisoryLock::try_acquire(&path).expect("a free lock is takeable");
@@ -2400,6 +2406,7 @@ mod tests {
 
     #[test]
     fn a_snapshot_missing_or_truncating_a_file_is_unpacked_again() {
+        let _children = crate::test_children::releasing_locks();
         let dir =
             std::env::temp_dir().join(format!("gos-toolchain-src-partial-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);

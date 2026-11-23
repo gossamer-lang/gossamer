@@ -103,10 +103,19 @@ impl TypeDiagnostic {
     /// reports at warning severity and never moves the exit code.
     #[must_use]
     pub const fn is_advisory(&self) -> bool {
-        matches!(
-            self.error,
-            TypeError::UndeclaredReturnValue { .. } | TypeError::OptionRendered { .. }
-        )
+        self.advisory_lint().is_some()
+    }
+
+    /// The lint an advisory finding reports under, which `#[lint(..)]`
+    /// attributes and `gos lint --deny-warnings` level; `None` for a fatal
+    /// error.
+    #[must_use]
+    pub const fn advisory_lint(&self) -> Option<&'static str> {
+        match self.error {
+            TypeError::UndeclaredReturnValue { .. } => Some("undeclared_return_value"),
+            TypeError::OptionRendered { .. } => Some("option_rendered"),
+            _ => None,
+        }
     }
 
     /// Constructs a diagnostic from its error and span.
@@ -1230,10 +1239,10 @@ pub enum TypeError {
         /// Whether the container is a `BTreeMap` / `BTreeSet`.
         ordered: bool,
     },
-    /// An `Option` is rendered through `{}` among other text, where a missing
-    /// value reads as the word `None` in the middle of it.
+    /// An `Option` is rendered through `{}` among other text, where absence
+    /// may be surprising in the resulting text.
     #[error(
-        "an `Option<{inner}>` is rendered with `{{}}` among other text, so a missing value reads as `None`"
+        "an `Option<{inner}>` is rendered with `{{}}` among other text; when it is `None`, the output contains `None`"
     )]
     OptionRendered {
         /// The payload type, as rendered.
@@ -2298,21 +2307,17 @@ impl TypeDiagnostic {
                     ));
             }
             TypeError::OptionRendered { .. } => {
-                out = out
-                    .with_help(
-                        "say what a missing value reads as: `v.unwrap_or(..)`, an `if let \
-                         Some(x) = v`, or a `match`; write `{v:?}` where `Some(..)` / `None` is \
-                         the text meant",
-                    )
-                    .with_note("lint: option_rendered");
+                out = out.with_help(
+                    "choose the text to show when the value is missing: use `v.unwrap_or(..)`, \
+                         `if let Some(x) = v`, or `match v`; use `{v:?}` to print the explicit \
+                         `Some(...)` or `None` form",
+                );
             }
             TypeError::UndeclaredReturnValue { name, found } => {
-                out = out
-                    .with_help(format!(
-                        "return it: `fn {name}(..) -> {found}`, or say the discard is \
+                out = out.with_help(format!(
+                    "return it: `fn {name}(..) -> {found}`, or say the discard is \
                          deliberate: `fn {name}(..) -> ()`"
-                    ))
-                    .with_note("lint: undeclared_return_value");
+                ));
             }
             TypeError::UnknownAssocItem {
                 base,

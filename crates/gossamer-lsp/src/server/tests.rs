@@ -547,7 +547,7 @@ mod tests {
         std::fs::write(root.join("src").join("asset.txt"), "embedded\n").unwrap();
         std::fs::write(
             root.join("src").join("main.gos"),
-            "use std::fs\n\nfn main() {\n    println(\"{}\", comptime { fs::read_to_string(\"asset.txt\").unwrap() })\n}\n",
+            "use std::fs\n\nfn main() {\n    println(\"{}\", comptime { fs::read_to_string(\"asset.txt\").expect(\"embedded asset\") })\n}\n",
         )
         .unwrap();
         let bind = root.join("src").join("engine").join("bind.gos");

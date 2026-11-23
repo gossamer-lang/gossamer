@@ -20,7 +20,7 @@ fn main() {
     println("collect {} {}", xs.iter().enumerate().collect().len(), xs.iter().enumerate().map(|p| p.0).collect().len())
 
     let mut kept: Vec<(i64, i64)> = #[]
-    for p in xs.iter().enumerate().filter(|p| p.1 % 2 == 1) {
+    for p in xs.iter().enumerate().filter(|p| p.1 % 2 != 0) {
         kept.push(p)
     }
     let mut last = (0, 0)

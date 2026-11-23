@@ -39,7 +39,7 @@ fn option_family() {
     let mapped = a |> |v| option::map(v, |x: i64| x + 1) |> |v| option::unwrap_or(v, 0)
     let chained = a |> |v| option::and_then(v, |x: i64| if x > 1 { Some(x * 10) } else { None })
         |> |v| option::unwrap_or(v, 0)
-    let kept = a |> |v| option::filter(v, |x: i64| x % 2 == 1) |> |v| option::unwrap_or(v, 0)
+    let kept = a |> |v| option::filter(v, |x: i64| x % 2 != 0) |> |v| option::unwrap_or(v, 0)
     let ored = none |> |v| option::or(v, Some(5)) |> |v| option::unwrap_or(v, 0)
     let lazy = none |> |v| option::or_else(v, || Some(6)) |> |v| option::unwrap_or(v, 0)
     let fallback = none |> |v| option::unwrap_or_else(v, || 9)

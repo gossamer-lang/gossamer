@@ -1,0 +1,10 @@
+// ERROR: GT0139
+
+fn main() {
+    let mut status = "pending"
+    if 2 > 1 {
+        let status = "done"
+        println(status)
+    }
+    println(status)
+}

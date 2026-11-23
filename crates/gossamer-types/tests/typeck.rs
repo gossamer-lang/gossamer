@@ -5860,3 +5860,136 @@ fn main() {
         ]
     );
 }
+
+/// The fatal and advisory findings of the command-line gate for `source`.
+fn unit_checks(source: &str) -> gossamer_types::UnitChecks {
+    let mut map = SourceMap::new();
+    let file = map.add_file("test.gos", source.to_string());
+    let (mut sf, parse_diags) = parse_source_file(source, file);
+    assert!(parse_diags.is_empty(), "parse errors: {parse_diags:?}");
+    let (mut resolutions, resolve_diags) = resolve_source_file(&sf);
+    let mut tcx = TyCtxt::new();
+    gossamer_types::check_resolved_unit(
+        &mut sf,
+        &mut resolutions,
+        &resolve_diags,
+        false,
+        false,
+        &mut tcx,
+        &mut (),
+    )
+}
+
+#[test]
+fn a_signed_remainder_refuses_the_program_with_a_rewrite_unless_allowed() {
+    let source = "fn is_odd(n: i64) -> bool {\n    n % 2 == 1\n}\n\
+                  fn third(n: i64) -> bool {\n    n % 3 == 2\n}\n\
+                  fn guarded(n: i64) -> bool {\n    if n >= 0 { n % 2 == 1 } else { n > 0 && n % 7 == 3 }\n}\n\
+                  fn main() { println(is_odd(-3) && third(-1) && guarded(4)) }\n";
+    let checks = unit_checks(source);
+    let refused: Vec<_> = checks
+        .fatal
+        .iter()
+        .filter(|diag| diag.code.as_str() == "GL0064")
+        .collect();
+    assert_eq!(refused.len(), 2, "{:?}", checks.fatal);
+    let rewrites: Vec<&str> = refused
+        .iter()
+        .flat_map(|diag| &diag.suggestions)
+        .map(|suggestion| suggestion.replacement.as_str())
+        .collect();
+    assert_eq!(rewrites, ["n % 2 != 0", "n.rem_euclid(3) == 2"]);
+
+    let allowed = unit_checks(&format!("#![lint(allow(signed_remainder))]\n{source}"));
+    assert!(
+        allowed
+            .fatal
+            .iter()
+            .all(|diag| diag.code.as_str() != "GL0064"),
+        "{:?}",
+        allowed.fatal
+    );
+    let warned = unit_checks(&format!("#![lint(warn(signed_remainder))]\n{source}"));
+    assert!(
+        warned
+            .fatal
+            .iter()
+            .all(|diag| diag.code.as_str() != "GL0064")
+    );
+    assert_eq!(
+        warned
+            .advisory
+            .iter()
+            .filter(|diag| diag.code.as_str() == "GL0064")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn an_inner_let_hiding_a_mut_binding_nothing_assigns_is_refused() {
+    let source = "fn main() {\n    let mut status = \"pending\"\n    if 2 > 1 {\n        \
+                  let status = \"done\"\n        println(status)\n    }\n    println(status)\n}\n";
+    let refused = unit_checks(source);
+    let codes: Vec<&str> = refused
+        .fatal
+        .iter()
+        .map(|diag| diag.code.as_str())
+        .collect();
+    assert_eq!(codes, ["GT0139"], "{:?}", refused.fatal);
+    let inner = source.find("let status").expect("inner let") + "let ".len();
+    let location = refused.fatal[0].labels[0].location.span;
+    assert_eq!(
+        (location.start as usize, location.end as usize),
+        (inner, inner + "status".len())
+    );
+}
+
+#[test]
+fn shadowing_an_immutable_or_written_binding_is_legal() {
+    let checks = unit_checks(
+        "struct P { v: Vec<i64> }\n\
+         fn main() {\n    \
+             let a = 1\n    if a > 0 { let a = 2; println(a) }\n    \
+             let mut b = 1\n    if b > 0 { let b = 2; println(b) }\n    b = 3\n    \
+             let mut xs = #[1]\n    if b > 0 { let xs = 2; println(xs) }\n    xs.push(4)\n    \
+             let mut p = P { v: #[] }\n    if b > 0 { let p = 1; println(p) }\n    p.v.push(1)\n    \
+             let mut c = 0\n    let bump = || { c += 1 }\n    if b > 0 { let c = 9; println(c) }\n    bump()\n    \
+             let mut d = 0\n    let d = d + 1\n    \
+             println(f\"{a} {b} {xs} {p.v} {c} {d}\")\n}\n",
+    );
+    assert!(
+        checks
+            .fatal
+            .iter()
+            .all(|diag| diag.code.as_str() != "GT0139"),
+        "{:?}",
+        checks.fatal
+    );
+}
+
+#[test]
+fn a_guard_on_a_mut_binding_holds_until_the_binding_is_written() {
+    let source = "fn pow2(e: i64) -> i64 {\n    let mut acc = 1\n    let mut n = if e < 0 { -e } else { e }\n    \
+                  while n > 0 {\n        if n % 2 == 1 { acc *= 2 }\n        n /= 2\n    }\n    acc\n}\n\
+                  fn looped(start: i64) -> bool {\n    let mut n = start\n    let mut odd = false\n    \
+                  if n > 0 {\n        loop {\n            odd = n % 2 == 1\n            n -= 3\n            \
+                  if n < -10 { break }\n        }\n    }\n    odd\n}\n\
+                  fn captured(start: i64) -> bool {\n    let mut n = start\n    if n > 0 {\n        \
+                  let f = || n % 2 == 1\n        n -= 9\n        return f()\n    }\n    false\n}\n\
+                  fn written_first(start: i64) -> bool {\n    let mut n = start\n    if n > 0 {\n        \
+                  n -= 9\n        return n % 2 == 1\n    }\n    false\n}\n\
+                  fn main() { println(f\"{pow2(3)} {looped(4)} {captured(4)} {written_first(4)}\") }\n";
+    let checks = unit_checks(source);
+    let lines: Vec<usize> = checks
+        .fatal
+        .iter()
+        .filter(|diag| diag.code.as_str() == "GL0064")
+        .map(|diag| {
+            source[..diag.labels[0].location.span.start as usize]
+                .lines()
+                .count()
+        })
+        .collect();
+    assert_eq!(lines, vec![15, 25, 35], "{:?}", checks.fatal);
+}

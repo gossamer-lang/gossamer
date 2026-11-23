@@ -33,7 +33,7 @@ fn main() {
     println("most {:?} least {:?}", most, least)
     let pairs = counts.iter().enumerate().take(3).map(|(i, p)| i * 100 + p.1).collect()
     println("pairs {:?}", pairs)
-    let any_odd = counts.values().any(|n| n % 2 == 1)
+    let any_odd = counts.values().any(|n| n % 2 != 0)
     let all_small = scores.keys().all(|k| k < 1000)
     println("any_odd {} all_small {}", any_odd, all_small)
 
