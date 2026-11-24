@@ -789,7 +789,7 @@ fn refresh_git_clone(mut git: Command, bare_dir: &Path) -> std::io::Result<()> {
 /// Ensures `bare_dir` contains a bare clone of `url`, creating it
 /// (or refreshing) as needed.
 fn ensure_git_clone(url: &str, bare_dir: &Path) -> std::io::Result<()> {
-    if bare_dir.join("HEAD").is_file() {
+    if keep_usable_clone(bare_dir)? {
         return refresh_git_clone(hardened_git(), bare_dir);
     }
     if let Some(parent) = bare_dir.parent() {
@@ -813,6 +813,19 @@ fn ensure_git_clone(url: &str, bare_dir: &Path) -> std::io::Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Whether `bare_dir` holds a bare clone git can fetch into. A directory
+/// that lacks its `HEAD` or `config` is what an interrupted clone leaves, and
+/// git will not clone over it, so it is removed.
+fn keep_usable_clone(bare_dir: &Path) -> std::io::Result<bool> {
+    if bare_dir.join("HEAD").is_file() && bare_dir.join("config").is_file() {
+        return Ok(true);
+    }
+    if bare_dir.exists() {
+        std::fs::remove_dir_all(bare_dir)?;
+    }
+    Ok(false)
 }
 
 /// Produces a tar buffer of the project tree at `reference` from the
@@ -938,6 +951,32 @@ mod git_source_tests {
         super::refresh_git_clone(Command::new("git"), &cache).unwrap();
         assert_eq!(super::resolve_git_ref(&cache, "v0.1.0").unwrap(), moved);
         assert_eq!(super::resolve_git_ref(&cache, "main").unwrap(), moved);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_clone_missing_its_head_or_config_is_cleared_for_a_fresh_clone() {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("gos-git-partial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let missing = dir.join("missing.git");
+        assert!(!super::keep_usable_clone(&missing).unwrap());
+
+        let partial = dir.join("partial.git");
+        std::fs::create_dir_all(partial.join("objects")).unwrap();
+        std::fs::write(partial.join("FETCH_HEAD"), b"").unwrap();
+        assert!(!super::keep_usable_clone(&partial).unwrap());
+        assert!(!partial.exists(), "the partial clone is removed");
+
+        let bare = dir.join("bare.git");
+        let out = Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(&bare)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert!(super::keep_usable_clone(&bare).unwrap());
+        assert!(bare.join("HEAD").is_file(), "a usable clone is kept");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

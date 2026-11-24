@@ -12,8 +12,11 @@ const SOURCE_VISIBLE_VIA_REWRITE: &[&str] = &[
     // `__gos_*_read_raw` leaf, which takes the three limits, into entries.
     "archive::tar::read_limited",
     "archive::zip::read_limited",
-    // `INDEX_MAP_WRAPPERS` / `BIT_SET_WRAPPERS` / `DECIMAL_WRAPPERS`: types
-    // written in Gossamer.
+    // `INDEX_MAP_WRAPPERS` / `BIT_SET_WRAPPERS` / `DECIMAL_WRAPPERS` /
+    // `BUFIO_READER_WRAPPERS` / `BUFIO_WRITER_WRAPPERS`: types written in
+    // Gossamer.
+    "bufio::Reader",
+    "bufio::Writer",
     "collections::BitSet",
     "collections::IndexMap",
     "exec::spawn_piped",
@@ -42,6 +45,7 @@ const SOURCE_VISIBLE_VIA_REWRITE: &[&str] = &[
     "time::Location::name",
     "time::Location::resolve",
     "time::Location::utc",
+    "time::Time::add_date",
     "time::Time::after",
     "time::Time::before",
     "time::Time::civil",

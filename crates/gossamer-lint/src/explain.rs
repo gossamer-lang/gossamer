@@ -312,6 +312,14 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
             `counter.update(|n| n + 1)` holds the lock across the read and the\n\
             write and stores what the callback answers."
         }
+        "day_duration" => {
+            "A whole number of days, as a `Duration`, added to or taken from a\n\
+            `time::Time`: `t + Duration::from_secs(86_400)`. A `Duration` is\n\
+            elapsed time, so across a daylight-saving change the wall clock\n\
+            moves by 23 or 25 hours and lands an hour off the time of day.\n\
+            `t.add_date(0, 0, 1)?` moves the calendar date and keeps the time\n\
+            of day."
+        }
         "unjoined_task" => {
             "A task's handle bound by `let task = spawn(..)` and never used.\n\
             Nothing joins the task, so the program goes on without waiting for\n\

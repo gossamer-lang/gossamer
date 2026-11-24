@@ -221,6 +221,30 @@ pub fn typed_lints(
         &registry,
         split_updates,
     ));
+    let day_durations = crate::find_day_durations(sf, table, tcx)
+        .into_iter()
+        .map(|found| {
+            let days = found.days.unsigned_abs();
+            let unit = if days == 1 { "day" } else { "days" };
+            let hours = days * 24;
+            (
+                found.span,
+                format!(
+                    "a `Duration` of {days} {unit} is {hours} hours of elapsed time, which lands an hour off the time of day across a daylight-saving change"
+                ),
+                Some(format!(
+                    "to move the calendar date and keep the time of day, write `.add_date(0, 0, {})?` on the `Time`",
+                    found.days
+                )),
+            )
+        })
+        .collect();
+    out.extend(gossamer_lint::leveled(
+        crate::DAY_DURATION_LINT,
+        sf,
+        &registry,
+        day_durations,
+    ));
     // Code the toolchain appended, and a dependency's own code, are not the
     // program's to change.
     let dependencies = dependency_spans(&sf.items);

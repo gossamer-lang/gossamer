@@ -751,7 +751,36 @@ fn for_each_unit(class: CacheClass, root: &Path, visit: &mut impl FnMut(&CacheUn
             return;
         }
         CacheClass::Run => {}
-        CacheClass::Frontend | CacheClass::Ir | CacheClass::Packages | CacheClass::LinkStamps => {
+        // A bare git clone and an unpacked package are each read as a whole,
+        // so each goes whole; any other file in the root goes on its own.
+        CacheClass::Packages => {
+            let whole = [root.join("git"), root.join("pkg")];
+            for dir in &whole {
+                let Ok(entries) = fs::read_dir(dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                        visit_dir_unit(dir, &entry.file_name(), visit);
+                    }
+                }
+            }
+            walk_files(root, &mut |dir, name, meta| {
+                if whole.iter().any(|whole| dir.starts_with(whole)) {
+                    return;
+                }
+                visit(&CacheUnit {
+                    dir,
+                    name,
+                    bytes: meta.len(),
+                    files: 1,
+                    modified: meta.modified().unwrap_or(UNIX_EPOCH),
+                    whole_dir: false,
+                });
+            });
+            return;
+        }
+        CacheClass::Frontend | CacheClass::Ir | CacheClass::LinkStamps => {
             walk_files(root, &mut |dir, name, meta| {
                 visit(&CacheUnit {
                     dir,
@@ -1300,6 +1329,43 @@ mod tests {
         };
         assert_eq!(prune_binding_root(&root, policy, false).unwrap(), (0, 0));
         assert!(dir.join("lib").join("libgos_bindings.so").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn package_clones_and_unpacked_packages_are_reclaimed_whole() {
+        let _children = crate::test_children::releasing_locks();
+        let root = scratch("package-units");
+        let _ = fs::remove_dir_all(&root);
+        let clone = root.join("git").join("dd87eeb3");
+        fs::create_dir_all(clone.join("objects").join("pack")).unwrap();
+        fs::write(clone.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        fs::write(clone.join("config"), b"[core]\n").unwrap();
+        fs::write(clone.join("objects").join("pack").join("a.pack"), [0u8; 8]).unwrap();
+        let package = root.join("pkg").join("0a9f79e6");
+        fs::create_dir_all(package.join("source").join("src")).unwrap();
+        fs::write(package.join("id.txt"), b"example.com/p").unwrap();
+        fs::write(package.join("source").join("src").join("lib.gos"), b"").unwrap();
+        let loose = root.join("index.json");
+        fs::write(&loose, b"{}").unwrap();
+
+        let mut found = units(CacheClass::Packages, &root);
+        found.sort();
+        assert_eq!(
+            found,
+            [
+                (clone.clone(), 3, true),
+                (loose.clone(), 1, false),
+                (package.clone(), 2, true),
+            ]
+        );
+        let policy = CachePolicy {
+            max_bytes: u64::MAX,
+            max_age: Duration::ZERO,
+        };
+        prune_roots(&[(CacheClass::Packages, root.clone())], policy, false);
+        assert!(!clone.join("HEAD").exists() && !clone.join("config").exists());
+        assert!(!package.join("id.txt").exists());
         let _ = fs::remove_dir_all(&root);
     }
 

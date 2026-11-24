@@ -108,6 +108,7 @@ use gossamer_runtime::c_abi::fs::{
     classify_io_error, read_at_offset, sync_directory, try_lock_range_on, unlock_range_on,
     write_at_offset,
 };
+use gossamer_runtime::open_file::OpenFile;
 
 /// Entry point invoked from `builtins::install`.
 use super::*;
@@ -143,6 +144,11 @@ pub(crate) fn install_fs_extras(globals: &mut Vec<(&'static str, Value)>) {
         globals.push((q, crate::builtins::builtin_pub(q, builtin_fs_metadata_raw)));
         let q = "__gos_fs_temp_dir_raw";
         globals.push((q, crate::builtins::builtin_pub(q, builtin_fs_temp_dir_raw)));
+        let q = "__gos_bufio_buffer_writes_raw";
+        globals.push((
+            q,
+            crate::builtins::builtin_pub(q, builtin_bufio_buffer_writes_raw),
+        ));
     }
     // `whence` selectors for `File::seek`, bound as integer globals so
     // call sites name the position rather than a bare 0/1/2.
@@ -212,7 +218,7 @@ struct FsOpenOptionsState {
 
 static NEXT_FS_HANDLE: GlobalReg<i64> =
     GlobalReg::new(|| parking_lot::ReentrantMutex::new(RefCell::new(1)));
-static FS_FILE_REGISTRY: GlobalReg<StdHashMap<i64, Arc<parking_lot::Mutex<std::fs::File>>>> =
+static FS_FILE_REGISTRY: GlobalReg<StdHashMap<i64, Arc<OpenFile>>> =
     GlobalReg::new(|| parking_lot::ReentrantMutex::new(RefCell::new(StdHashMap::new())));
 static FS_OPEN_OPTIONS_REGISTRY: GlobalReg<
     StdHashMap<i64, Arc<parking_lot::Mutex<FsOpenOptionsState>>>,
@@ -230,8 +236,7 @@ fn next_fs_handle() -> i64 {
 fn insert_file_handle(file: std::fs::File) -> Value {
     let id = next_fs_handle();
     FS_FILE_REGISTRY.with(|r| {
-        r.borrow_mut()
-            .insert(id, Arc::new(parking_lot::Mutex::new(file)));
+        r.borrow_mut().insert(id, OpenFile::new(file));
     });
     handle_struct("fs::File", id, |id| FS_FILE_REGISTRY.retire(id))
 }
@@ -247,7 +252,7 @@ fn insert_open_options_handle(opts: FsOpenOptionsState) -> Value {
     })
 }
 
-fn fetch_file_handle(id: i64) -> Option<Arc<parking_lot::Mutex<std::fs::File>>> {
+fn fetch_file_handle(id: i64) -> Option<Arc<OpenFile>> {
     FS_FILE_REGISTRY.with(|r| r.borrow().get(&id).cloned())
 }
 
@@ -263,14 +268,40 @@ fn fetch_file_handle(id: i64) -> Option<Arc<parking_lot::Mutex<std::fs::File>>> 
 /// than handing it to another.
 fn with_file_inline<T, F>(id: i64, _label: &'static str, context: &str, op: F) -> Result<T, Value>
 where
-    F: FnOnce(&mut std::fs::File) -> T,
+    F: FnOnce(&mut &std::fs::File) -> T,
 {
     let Some(file) = fetch_file_handle(id) else {
         return Err(err_variant(format!("{context}: stale handle")));
     };
-    let mut guard = file.lock();
     let _syscall = gossamer_runtime::sched_global::syscall_enter();
-    Ok(op(&mut guard))
+    file.with_cursor(op)
+        .map_err(|e| err_variant(classify_io_error(&e, context)))
+}
+
+/// Runs `op` on the open file behind `id`, marked as inside a system call.
+fn with_open_file<T>(id: i64, context: &str, op: impl FnOnce(&OpenFile) -> T) -> Result<T, Value> {
+    let Some(file) = fetch_file_handle(id) else {
+        return Err(err_variant(format!("{context}: stale handle")));
+    };
+    let _syscall = gossamer_runtime::sched_global::syscall_enter();
+    Ok(op(&file))
+}
+
+/// `__gos_bufio_buffer_writes_raw(file, capacity)`, the leaf under the
+/// injected `bufio::Writer`: buffers later writes to the file.
+pub(crate) fn builtin_bufio_buffer_writes_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let Some(id) = args.first().and_then(handle_id) else {
+        return Ok(err_variant("bufio::Writer: missing file handle"));
+    };
+    let capacity = args.get(1).and_then(value_to_int).unwrap_or(0);
+    let capacity = usize::try_from(capacity).unwrap_or(0);
+    let Some(file) = fetch_file_handle(id) else {
+        return Ok(err_variant("bufio::Writer: stale handle"));
+    };
+    match file.buffer_writes(capacity) {
+        Ok(()) => Ok(ok_variant(Value::Unit)),
+        Err(e) => Ok(err_variant(classify_io_error(&e, "bufio::Writer"))),
+    }
 }
 
 /// Byte offset a `whence` selector names, or the diagnostic for an
@@ -508,9 +539,7 @@ pub(crate) fn builtin_fs_file_write(args: &[Value]) -> RuntimeResult<Value> {
     };
     let bytes = crate::stdlib_builtins::crypto::value_to_bytes(args.get(1).unwrap_or(&Value::Unit));
     let written = bytes.len() as i64;
-    match with_file_inline(id, "fs-file-write", "File::write", move |file| {
-        file.write_all(&bytes)
-    }) {
+    match with_open_file(id, "File::write", |file| file.write_all(&bytes)) {
         Ok(Ok(())) => Ok(ok_variant(Value::Int(written))),
         Ok(Err(e)) => Ok(err_variant(classify_io_error(&e, "File::write"))),
         Err(v) => Ok(v),
@@ -524,12 +553,7 @@ pub(crate) fn builtin_fs_file_write_bytes(args: &[Value]) -> RuntimeResult<Value
         return Ok(err_variant("File::write_bytes: missing handle"));
     };
     let bytes = crate::stdlib_builtins::crypto::value_to_bytes(args.get(1).unwrap_or(&Value::Unit));
-    match with_file_inline(
-        id,
-        "fs-file-write-bytes",
-        "File::write_bytes",
-        move |file| file.write(&bytes),
-    ) {
+    match with_open_file(id, "File::write_bytes", |file| file.write_some(&bytes)) {
         Ok(Ok(n)) => Ok(ok_variant(Value::Int(n as i64))),
         Ok(Err(e)) => Ok(err_variant(classify_io_error(&e, "File::write_bytes"))),
         Err(v) => Ok(v),
@@ -806,7 +830,7 @@ pub(crate) fn builtin_fs_file_flush(args: &[Value]) -> RuntimeResult<Value> {
     let Some(id) = args.first().and_then(handle_id) else {
         return Ok(err_variant("File::flush: missing handle"));
     };
-    match with_file_inline(id, "fs-file-flush", "File::flush", |file| file.flush()) {
+    match with_open_file(id, "File::flush", OpenFile::flush) {
         Ok(Ok(())) => Ok(ok_variant(Value::Unit)),
         Ok(Err(e)) => Ok(err_variant(classify_io_error(&e, "File::flush"))),
         Err(v) => Ok(v),

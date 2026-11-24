@@ -151,12 +151,14 @@ fn write_profile() {
 }
 
 /// Runs every registered hook, last registered first, each at most once, then
-/// writes an instrumented build's profile. A hook is taken off the list before
+/// writes out the files a `bufio::Writer` buffers and an instrumented build's
+/// profile. A hook is taken off the list before
 /// it runs, so one that exits or panics leaves the rest to the exit path it
 /// starts.
 pub fn run_exit_hooks() {
     loop {
         let Some(hook) = HOOKS.lock().pop() else {
+            crate::open_file::write_out_buffered();
             write_profile();
             return;
         };

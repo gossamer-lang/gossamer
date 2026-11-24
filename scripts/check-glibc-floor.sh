@@ -2,9 +2,9 @@
 # Fails when an ELF binary needs a glibc newer than $GLIBC_FLOOR, the oldest
 # glibc the Linux releases support.
 #
-#   GLIBC_FLOOR=2.39 scripts/check-glibc-floor.sh target/release/gos
+#   GLIBC_FLOOR=2.35 scripts/check-glibc-floor.sh target/release/gos
 set -eu
-floor="${GLIBC_FLOOR:?set GLIBC_FLOOR, e.g. 2.39}"
+floor="${GLIBC_FLOOR:?set GLIBC_FLOOR, e.g. 2.35}"
 status=0
 for binary in "$@"; do
     needed=$(readelf --version-info --wide "$binary" |

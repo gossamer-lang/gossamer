@@ -455,7 +455,7 @@ pub const TIME: StdModule = StdModule {
         StdItem {
             name: "Time",
             kind: StdItemKind::Type,
-            doc: "A wall-clock instant with the location it is read in: `now()`, `from_unix` / `from_unix_ms` / `from_unix_nanos`, `parse_rfc3339` (keeps the written offset), `format_rfc3339`, `civil()`, `in_location` / `utc`, `+` / `-` a `Duration`, and `a - b` answering the `Duration` between two instants.",
+            doc: "A wall-clock instant with the location it is read in: `now()`, `from_unix` / `from_unix_ms` / `from_unix_nanos`, `parse_rfc3339` (keeps the written offset), `format_rfc3339`, `civil()`, `in_location` / `utc`, `add_date(years, months, days)` (moves the calendar date and keeps the time of day, refusing a time the change of date skips or repeats), `+` / `-` a `Duration` (elapsed time), and `a - b` answering the `Duration` between two instants.",
         },
         StdItem {
             name: "sleep",

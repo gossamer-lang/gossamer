@@ -1026,3 +1026,46 @@ fn check_fix_rewrites_a_signed_remainder_the_build_refuses() {
     );
     let _ = std::fs::remove_file(&fixture);
 }
+
+const WRITER_OPEN_AT_EXIT: &str = "\
+use std::{bufio, env, fs, process}
+
+fn main() {
+    let target = env::var(\"GOS_BUFIO_TARGET\").unwrap_or(\"\")
+    let mut out = bufio::Writer::new(fs::create(target).expect(\"create\"))
+    out.write(\"kept at exit\\n\").expect(\"write\")
+    match env::var(\"GOS_BUFIO_END\").unwrap_or(\"\") {
+        \"exit\" => process::exit(3),
+        \"panic\" => panic(\"stop\"),
+        _ => {}
+    }
+}
+";
+
+#[test]
+fn a_writer_still_open_when_the_program_ends_reaches_its_file() {
+    let fixture = write_fixture("bufioexit", WRITER_OPEN_AT_EXIT);
+    for (tier, native) in [("vm", false), ("native", true)] {
+        for end in ["return", "exit", "panic"] {
+            let target = fixture.with_extension(format!("{tier}-{end}.txt"));
+            let mut cmd = Command::new(gos_bin());
+            cmd.arg("run");
+            if native {
+                cmd.arg("--native");
+            }
+            cmd.arg(&fixture)
+                .env("GOS_BUFIO_TARGET", &target)
+                .env("GOS_BUFIO_END", end);
+            let out = cmd.env("GOS_JIT", "0").output().expect("spawn run");
+            let written = std::fs::read_to_string(&target).unwrap_or_default();
+            assert_eq!(
+                written,
+                "kept at exit\n",
+                "{tier} ending by {end}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let _ = std::fs::remove_file(&target);
+        }
+    }
+    let _ = std::fs::remove_file(&fixture);
+}

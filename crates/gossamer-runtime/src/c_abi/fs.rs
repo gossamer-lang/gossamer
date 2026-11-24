@@ -14,12 +14,13 @@
 #![allow(clippy::wildcard_imports)]
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::os::raw::c_char;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use super::*;
+use crate::open_file::OpenFile;
 use parking_lot::Mutex;
 
 #[derive(Default)]
@@ -39,16 +40,9 @@ struct GosOpenOptions {
 /// The advisory ranges each open file handle currently holds.
 type HeldLocks = HashMap<i64, Vec<(u64, u64)>>;
 
-/// An open file: the handle positional and metadata calls share, and the lock
-/// serialising calls that move the file cursor.
-struct FileEntry {
-    file: std::fs::File,
-    cursor: Mutex<()>,
-}
-
 // Lookups take the read side, so goroutines working on open files never
 // serialise on the table; only open and close write it.
-static FILE_HANDLES: parking_lot::RwLock<Option<HashMap<i64, Arc<FileEntry>>>> =
+static FILE_HANDLES: parking_lot::RwLock<Option<HashMap<i64, Arc<OpenFile>>>> =
     parking_lot::RwLock::new(None);
 
 // Win32 releases a lock only through an UnlockFileEx naming the same span
@@ -71,13 +65,7 @@ fn insert_file(file: std::fs::File) -> i64 {
     FILE_HANDLES
         .write()
         .get_or_insert_with(HashMap::new)
-        .insert(
-            id,
-            Arc::new(FileEntry {
-                file,
-                cursor: Mutex::new(()),
-            }),
-        );
+        .insert(id, OpenFile::new(file));
     super::registry_key::key_handle(id, retire_file)
 }
 
@@ -92,7 +80,7 @@ fn retire_file(id: i64) {
     }
 }
 
-fn file_clone(h: i64) -> Option<Arc<FileEntry>> {
+fn file_clone(h: i64) -> Option<Arc<OpenFile>> {
     let id = super::registry_key::key_id(h);
     FILE_HANDLES
         .read()
@@ -559,7 +547,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_write(h: i64, data: *const c_char) -> i1
         // SAFETY: `data` is a String argument from compiled code, null or a live string body for the whole call.
         let bytes = unsafe { crate::c_abi::gos_str_arg_string(data) }.into_bytes();
         let len = bytes.len();
-        match with_file_cursor(h, "File::write", move |file| file.write_all(&bytes)) {
+        match with_open_file(h, "File::write", |file| file.write_all(&bytes)) {
             Ok(Ok(())) => gos_rt_result_new(0, len as i64),
             Ok(Err(e)) => fs_io_err(&e, "File::write"),
             Err(packed) => packed,
@@ -571,7 +559,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_write(h: i64, data: *const c_char) -> i1
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fs_file_flush(h: i64) -> i128 {
     ffi_entry!({
-        match with_file_cursor(h, "File::flush", |file| std::io::Write::flush(file)) {
+        match with_open_file(h, "File::flush", OpenFile::flush) {
             Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => fs_io_err(&e, "File::flush"),
             Err(packed) => packed,
@@ -1644,9 +1632,33 @@ where
     let Some(entry) = file_clone(h) else {
         return Err(fs_err(&format!("{context}: stale handle")));
     };
-    let _cursor = entry.cursor.lock();
     let _syscall = crate::sched_global::syscall_enter();
-    Ok(op(&mut &entry.file))
+    entry.with_cursor(op).map_err(|e| fs_io_err(&e, context))
+}
+
+/// Runs `op` on the open file behind `h`, marked as inside a system call.
+fn with_open_file<T>(h: i64, context: &str, op: impl FnOnce(&OpenFile) -> T) -> Result<T, i128> {
+    let Some(entry) = file_clone(h) else {
+        return Err(fs_err(&format!("{context}: stale handle")));
+    };
+    let _syscall = crate::sched_global::syscall_enter();
+    Ok(op(&entry))
+}
+
+/// Turns on the write buffer of the file behind `h`: the leaf under
+/// `bufio::Writer::with_capacity`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_bufio_buffer_writes_raw(h: i64, capacity: i64) -> i128 {
+    ffi_entry!({
+        let capacity = usize::try_from(capacity).unwrap_or(0);
+        let Some(entry) = file_clone(h) else {
+            return fs_err("bufio::Writer: stale handle");
+        };
+        match entry.buffer_writes(capacity) {
+            Ok(()) => gos_rt_result_new(0, 0),
+            Err(e) => fs_io_err(&e, "bufio::Writer"),
+        }
+    })
 }
 
 /// [`with_file_cursor`] for a positional call. On Unix it reads and writes
@@ -1659,11 +1671,8 @@ where
     let Some(entry) = file_clone(h) else {
         return Err(fs_err(&format!("{context}: stale handle")));
     };
-    // Win32 positional calls move the cursor, so they take its lock.
-    #[cfg(windows)]
-    let _cursor = entry.cursor.lock();
     let _syscall = crate::sched_global::syscall_enter();
-    Ok(op(&mut &entry.file))
+    entry.positional(op).map_err(|e| fs_io_err(&e, context))
 }
 
 /// `fs::File::read_at(len, offset) -> Result<Vec<u8>, Error>`. The answer
@@ -1823,7 +1832,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_write_bytes(
         // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `vec_bytes` accepts.
         let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
-        let written = with_file_cursor(h, "File::write_bytes", move |f| f.write(&bytes));
+        let written = with_open_file(h, "File::write_bytes", |file| file.write_some(&bytes));
         match written {
             Ok(Ok(n)) => gos_rt_result_new(0, n as i64),
             Ok(Err(e)) => fs_io_err(&e, "File::write_bytes"),
@@ -1976,7 +1985,7 @@ pub extern "C" fn gos_rt_fs_file_fd(h: i64) -> i128 {
         let Some(entry) = file_clone(h) else {
             return fs_err("File::fd: stale handle");
         };
-        match raw_descriptor(&entry.file) {
+        match raw_descriptor(entry.file()) {
             Some(fd) => gos_rt_result_new(0, fd),
             None => fs_err("File::fd: descriptors are not available on this target"),
         }

@@ -864,12 +864,12 @@ pub const BUFIO: StdModule = StdModule {
         StdItem {
             name: "Reader",
             kind: StdItemKind::Type,
-            doc: "Buffered reader.",
+            doc: "Reads an `fs::File` a chunk at a time: `Reader::new(file)`, then `read_line` (answers `Ok(None)` at the end; the line leaves out its `\\n` and a `\\r` before it), `lines`, and `read_to_string`, each answering a `Result`.",
         },
         StdItem {
             name: "Writer",
             kind: StdItemKind::Type,
-            doc: "Buffered writer.",
+            doc: "Writes to an `fs::File` through a buffer: `Writer::new(file)` (4096 bytes) or `Writer::with_capacity(file, n)`, then `write`, `write_bytes`, and `flush`. Buffered bytes reach the file before any other call on it, at `flush`, when the last handle to the file goes, and when the program ends.",
         },
         StdItem {
             name: "Scanner",

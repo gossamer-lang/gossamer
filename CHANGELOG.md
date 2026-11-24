@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.84.4 - Buffered file reads and writes, and calendar days on a wall-clock time
+
+- `bufio::Writer::new(file)` and `Writer::with_capacity(file, n)` buffer writes to an `fs::File` (`write`, `write_bytes`, `flush`), where `gos doc` listed the type but no program could build one. Buffered bytes reach the file before any other call on it, at `flush`, when the last handle to the file goes, and when the program ends, `process::exit` and a panic included, so no write is dropped unwritten.
+- `bufio::Reader::new(file)` reads a file a chunk at a time and answers it line by line: `read_line` (`Ok(None)` at the end; the line leaves out its `\n` and a `\r` before it), `lines`, and `read_to_string`.
+- `t.add_date(years, months, days)` on a `time::Time` moves the calendar date and keeps the time of day, refusing a time the change of date skips or repeats.
+- A `Duration` of whole days added to or taken from a `time::Time` is the warning `GL0069`: it is elapsed time, so across a daylight-saving change `t + Duration::from_secs(86_400)` lands an hour off the time of day.
+- Cache pruning reclaims a fetched package or git clone whole and by when a build last read it, instead of file by file, so a clone no longer loses its `HEAD` and `config` after 30 days; `gos fetch` replaces a clone an interrupted fetch or the old pruning left incomplete.
+- The Linux glibc archives and packages, x86_64 and aarch64, run on glibc 2.35 (Ubuntu 22.04, Debian 12) and later, where they needed 2.39 and `gos` failed to start on Ubuntu 22.04.
+- A misspelled name gets the same "did you mean" suggestion on every run, where two candidates the same distance away were picked in hash order.
+
 ## 0.84.3 - Safer Option handling diagnostics & warning text update
 
 - `.unwrap()` calls are flagged by `GL0068` because they can panic on `None` or `Err`; the lint points to explicit handling, a fallback, or a descriptive `.expect(..)`.

@@ -1580,6 +1580,10 @@ impl<'a> Builder<'a> {
             "__gos_fs_temp_dir_raw" => {
                 ("gos_rt_fs_temp_dir_raw", self.result_string_error_adt_ty())
             }
+            "__gos_bufio_buffer_writes_raw" => (
+                "gos_rt_bufio_buffer_writes_raw",
+                self.result_unit_error_adt_ty(),
+            ),
             "ffi::last_errno" | "std::ffi::last_errno" => (
                 "gos_rt_ffi_last_errno",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),

@@ -636,6 +636,8 @@ const MANGLED_STDLIB_NAMES: &[(&str, &str, &str)] = &[
     ("path", "Path", "__gos_path_Path"),
     ("collections", "IndexMap", "__gos_collections_IndexMap"),
     ("collections", "BitSet", "__gos_collections_BitSet"),
+    ("bufio", "Reader", "__gos_bufio_Reader"),
+    ("bufio", "Writer", "__gos_bufio_Writer"),
     ("math", "Decimal", "__gos_math_Decimal"),
     ("http", "Http2Config", "__gos_http_Http2Config"),
     ("Http2Config", "default", "__gos_http_Http2Config_default"),

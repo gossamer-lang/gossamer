@@ -409,6 +409,7 @@ pub mod listen;
 pub mod memory_limit;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod netpoll;
+pub mod open_file;
 pub mod path_grammar;
 // musl's own routines are replaced there; the tests run on every x86_64
 // host. Inline assembly is not something Miri interprets.
