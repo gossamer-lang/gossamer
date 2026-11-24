@@ -3,7 +3,6 @@
 // with while let Some to expose scheduler and recv differences.
 
 use std::sync::channel
-use std::time
 
 fn worker(id: i64, tx: channel::Sender<i64>, val: i64) {
     tx.send(val)
@@ -18,14 +17,13 @@ fn main() {
     spawn(|| worker(4, tx, 40))
     spawn(|| worker(5, tx, 50))
 
-    // Give the scheduler a beat. Multiple senders share the
-    // channel so drain via `try_recv` rather than `recv` -
-    // close+drain requires a single owner of the close step.
-    time::sleep(50)
-
+    // `main` still holds a sender, so the channel never closes on its own:
+    // take exactly one value per worker, each `recv` waiting for its send.
     let mut received: Vec<i64> = Vec::from([])
-    while let Some(v) = rx.try_recv() {
-        received.push(v)
+    for _ in 0..5 {
+        if let Some(v) = rx.recv() {
+            received.push(v)
+        }
     }
 
     received.sort()

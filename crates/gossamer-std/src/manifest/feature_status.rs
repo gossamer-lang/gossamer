@@ -10507,7 +10507,6 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
         &[
             "examples/sleep_demo.gos",
             "examples/structured_concurrency.gos",
-            "feature-testing-examples/channel_fan_in.gos",
             "feature-testing-examples/channel_timers.gos",
             "feature-testing-examples/clock_arithmetic.gos",
             "feature-testing-examples/cohort_cancel.gos",
