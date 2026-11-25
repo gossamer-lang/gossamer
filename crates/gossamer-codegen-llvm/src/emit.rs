@@ -2043,10 +2043,17 @@ fn module_header(triple: &str) -> String {
     // an IR attribute: `clang -x ir` ignores `-fno-omit-frame-pointer`,
     // which only sets it when clang generates the IR itself. A frame larger
     // than a page probes each page it spans, top down, so it reaches the
-    // guard page below the stack instead of stepping over it.
+    // guard page below the stack instead of stepping over it. Windows code
+    // probes such a frame through `__chkstk` already, and there LLVM reads
+    // a `probe-stack` value as the name of the function to call instead.
+    let probe = if target_is_windows() {
+        ""
+    } else {
+        " \"probe-stack\"=\"inline-asm\""
+    };
     writeln!(
         out,
-        "attributes #0 = {{ \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\" }}"
+        "attributes #0 = {{ \"frame-pointer\"=\"all\"{probe} }}"
     )
     .unwrap();
     writeln!(out).unwrap();

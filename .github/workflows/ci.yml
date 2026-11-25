@@ -502,28 +502,11 @@ jobs:
           cache-key: cross-from-linux
           cache-save: true
       - name: Install zig
-        # A direct download instead of `mlugg/setup-zig`: that action
-        # still declares a Node 20 runtime (triggering the deprecation
-        # warning on every run), and independently, its `v1` line never
-        # picked up upstream's tarball-naming fix for Zig >=0.14.1
-        # (`zig-<arch>-<os>-<version>`, not the pre-0.14.1
-        # `zig-<os>-<arch>-<version>`), so every mirror plus the
-        # "official" fallback 404s for any current Zig release. The
-        # official index (ziglang.org/download/index.json) confirms the
-        # real filename below.
-        run: |
-          set -euo pipefail
-          case "$(uname -m)" in
-            x86_64|amd64) zig_arch=x86_64 ;;
-            aarch64|arm64) zig_arch=aarch64 ;;
-            *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
-          esac
-          zig_ver=0.16.0
-          zig_tarball="zig-${zig_arch}-linux-${zig_ver}.tar.xz"
-          curl -fsSL -o /tmp/zig.tar.xz "https://ziglang.org/download/${zig_ver}/${zig_tarball}"
-          mkdir -p /tmp/zig-install
-          tar -xf /tmp/zig.tar.xz -C /tmp/zig-install --strip-components=1
-          echo "/tmp/zig-install" >> "$GITHUB_PATH"
+        # From Zig's community mirrors, checked against the official index's
+        # SHA-256 (scripts/ci/install_zig.py), as the Zig project asks of
+        # automated downloads. `mlugg/setup-zig` does the same but still
+        # declares a Node 20 runtime.
+        run: python3 -I scripts/ci/install_zig.py 0.16.0 "$RUNNER_TEMP/zig"
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
@@ -617,23 +600,8 @@ jobs:
           cache-key: cross-from-macos
           cache-save: true
       - name: Install zig
-        # See the cross-from-linux job for why this replaces
-        # `mlugg/setup-zig`: it still runs on a deprecated Node 20
-        # runtime, and its `v1` line 404s fetching any current Zig
-        # release (a stale pre-0.14.1 tarball-naming assumption).
-        run: |
-          set -euo pipefail
-          case "$(uname -m)" in
-            x86_64) zig_arch=x86_64 ;;
-            arm64|aarch64) zig_arch=aarch64 ;;
-            *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
-          esac
-          zig_ver=0.16.0
-          zig_tarball="zig-${zig_arch}-macos-${zig_ver}.tar.xz"
-          curl -fsSL -o /tmp/zig.tar.xz "https://ziglang.org/download/${zig_ver}/${zig_tarball}"
-          mkdir -p /tmp/zig-install
-          tar -xf /tmp/zig.tar.xz -C /tmp/zig-install --strip-components=1
-          echo "/tmp/zig-install" >> "$GITHUB_PATH"
+        # See the cross-from-linux job.
+        run: python3 -I scripts/ci/install_zig.py 0.16.0 "$RUNNER_TEMP/zig"
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
@@ -683,21 +651,9 @@ jobs:
           cache-key: cross-from-windows
           cache-save: true
       - name: Install zig
-        # See the cross-from-linux job for why this replaces
-        # `mlugg/setup-zig`: it still runs on a deprecated Node 20
-        # runtime, and its `v1` line 404s fetching any current Zig
-        # release (a stale pre-0.14.1 tarball-naming assumption).
+        # See the cross-from-linux job.
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $zigArch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
-          $zigVer = '0.16.0'
-          $tarball = "zig-$zigArch-windows-$zigVer.zip"
-          Invoke-WebRequest -Uri "https://ziglang.org/download/$zigVer/$tarball" -OutFile "$env:RUNNER_TEMP\zig.zip"
-          $dest = Join-Path $env:RUNNER_TEMP 'zig-install'
-          Expand-Archive -Path "$env:RUNNER_TEMP\zig.zip" -DestinationPath $dest
-          $inner = Get-ChildItem $dest | Select-Object -First 1
-          Add-Content -Path $env:GITHUB_PATH -Value $inner.FullName
+        run: python -I scripts/ci/install_zig.py 0.16.0 "$env:RUNNER_TEMP\zig"
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild
