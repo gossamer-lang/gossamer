@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0143]: A struct or enum is sorted, compared with `<` / `<=` / `>` / `>=`, - here
+--- framed ---
+error[GT0143]: A struct or enum is sorted, compared with `<` / `<=` / `>` / `>=`,
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

@@ -2,6 +2,7 @@
 // root, nested-module, and generic iterators, built-in iterators as `zip`
 // partners, and a method the type defines itself taking precedence.
 mod shapes {
+    #[derive(PartialOrd, Ord)]
     pub struct Point { pub x: i64, pub y: i64 }
     pub struct Walk { step: i64 }
     impl Iterator for Walk {

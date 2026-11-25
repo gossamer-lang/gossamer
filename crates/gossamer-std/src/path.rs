@@ -28,9 +28,15 @@ impl Path {
         &self.0
     }
 
-    #[must_use]
-    pub fn join(&self, segment: &str) -> Self {
-        Self(join(&self.0, segment))
+    /// This path with `segment` appended, refusing a segment that names a
+    /// path outside this one.
+    ///
+    /// # Errors
+    ///
+    /// The message of [`join`] for an absolute segment or one whose `..`
+    /// climbs above this path.
+    pub fn join(&self, segment: &str) -> Result<Self, String> {
+        join(&self.0, segment).map(Self)
     }
 
     #[must_use]
@@ -89,11 +95,15 @@ impl From<&str> for Path {
 
 use gossamer_runtime::path_grammar as grammar;
 
-/// Joins `base` with `segment` by one `/`; an absolute `segment` (a
-/// separator, drive or UNC root) replaces `base`.
-#[must_use]
-pub fn join(base: &str, segment: &str) -> String {
-    grammar::join(base, segment)
+/// Joins `base` with the relative `segment` by one `/`, refusing a
+/// `segment` that names a path outside `base`: an absolute one (a separator,
+/// drive or UNC root) or one whose `..` components climb above `base`.
+///
+/// # Errors
+///
+/// A message naming the segment and why it leaves `base`.
+pub fn join(base: &str, segment: &str) -> Result<String, String> {
+    grammar::join_within(base, segment)
 }
 
 /// Splits `path` into a `(directory, file)` pair. The directory keeps a
@@ -218,13 +228,17 @@ pub mod native {
     pub const SEPARATOR: char = '/';
 
     /// Joins two path components using the platform-native
-    /// separator. Input components may use either `/` or `\`; output
-    /// uses exclusively the native separator.
-    #[must_use]
-    pub fn join(base: &str, segment: &str) -> String {
+    /// separator, refusing a segment that leaves `base` as [`super::join`]
+    /// does. Input components may use either `/` or `\`; output uses
+    /// exclusively the native separator.
+    ///
+    /// # Errors
+    ///
+    /// The message of [`super::join`].
+    pub fn join(base: &str, segment: &str) -> Result<String, String> {
         let posix_base = to_posix(base);
         let posix_segment = to_posix(segment);
-        to_native(&posix_join(&posix_base, &posix_segment))
+        posix_join(&posix_base, &posix_segment).map(|joined| to_native(&joined))
     }
 
     /// Canonicalises `path` into native-separator form with `..` /
@@ -280,7 +294,7 @@ pub mod native {
 
         #[test]
         fn join_uses_native_separator() {
-            let joined = join("a", "b");
+            let joined = join("a", "b").unwrap();
             assert!(joined.contains(SEPARATOR));
             assert_eq!(joined.matches(SEPARATOR).count(), 1);
         }
@@ -300,11 +314,30 @@ mod tests {
 
     #[test]
     fn join_basic_cases() {
-        assert_eq!(join("a", "b"), "a/b");
-        assert_eq!(join("a/", "b"), "a/b");
-        assert_eq!(join("a", "/b"), "/b");
-        assert_eq!(join("", "b"), "b");
-        assert_eq!(join("a", ""), "a/");
+        assert_eq!(join("a", "b").unwrap(), "a/b");
+        assert_eq!(join("a/", "b").unwrap(), "a/b");
+        assert_eq!(join("", "b").unwrap(), "b");
+        assert_eq!(join("a", "").unwrap(), "a/");
+        assert_eq!(join("a", "b/../c").unwrap(), "a/b/../c");
+        assert_eq!(join("a", "./b").unwrap(), "a/./b");
+    }
+
+    #[test]
+    fn join_refuses_a_segment_that_leaves_the_base() {
+        for segment in [
+            "/etc/passwd",
+            "\\host\\share\\x",
+            "C:/Windows",
+            "C:x",
+            "..",
+            "../x",
+            "a/../../x",
+            "a\\..\\..\\x",
+        ] {
+            assert!(join("/srv/app/uploads", segment).is_err(), "{segment}");
+        }
+        assert!(Path::new("/srv").join("../etc").is_err());
+        assert_eq!(Path::new("/srv").join("www").unwrap().as_str(), "/srv/www");
     }
 
     #[test]
@@ -913,11 +946,11 @@ mod separator_grammar_tests {
     }
 
     #[test]
-    fn a_drive_path_is_absolute_and_replaces_a_base() {
+    fn a_drive_path_is_absolute_and_never_joined_under_a_base() {
         assert!(is_absolute("D:\\a\\gui-gos"));
-        assert_eq!(join("examples", "D:\\a"), "D:\\a");
+        assert!(join("examples", "D:\\a").is_err());
         assert_eq!(
-            join("D:\\a\\examples\\hello-world", "packaging.toml"),
+            join("D:\\a\\examples\\hello-world", "packaging.toml").unwrap(),
             "D:\\a\\examples\\hello-world/packaging.toml"
         );
     }

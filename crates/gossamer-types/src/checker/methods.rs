@@ -562,8 +562,11 @@ impl TypeChecker<'_> {
         args: &[Expr],
         expected: Expectation,
     ) -> Ty {
+        let method = site.method;
+        let span = site.call_span;
         let ty = self.check_method_call_inner(site, receiver, args, expected);
         self.check_by_value_argument_aliases(args);
+        self.note_method_order(method, receiver, args, span);
         ty
     }
 

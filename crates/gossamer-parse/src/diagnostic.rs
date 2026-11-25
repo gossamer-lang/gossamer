@@ -372,6 +372,20 @@ pub enum ParseError {
         /// The character's scalar value.
         codepoint: u32,
     },
+    /// An identifier mixes letters of more than one script.
+    #[error("identifier `{name}` mixes letters of more than one script")]
+    MixedScriptIdent {
+        /// The identifier as written.
+        name: String,
+    },
+    /// An identifier renders like another identifier of the same file.
+    #[error("identifier `{name}` looks like `{other}`, a different name in this file")]
+    ConfusableIdent {
+        /// The identifier as written.
+        name: String,
+        /// The name it looks like.
+        other: String,
+    },
     /// A bare statement appeared inside a `mod { }` body, where only items
     /// are allowed. Top-level statements belong only to the entry file's
     /// implicit `fn main`.
@@ -574,10 +588,23 @@ impl ParseDiagnostic {
 impl ParseError {
     /// The parse diagnostic a lexer error becomes.
     #[must_use]
-    pub fn from_lex(err: &gossamer_lex::LexError) -> Self {
+    pub fn from_lex(err: &gossamer_lex::LexError, source: &str) -> Self {
+        let text = |span: &gossamer_lex::Span| {
+            source
+                .get(span.start as usize..span.end as usize)
+                .unwrap_or_default()
+                .to_string()
+        };
         match err {
             gossamer_lex::LexError::BidiControl { codepoint, .. } => Self::BidiControl {
                 codepoint: *codepoint,
+            },
+            gossamer_lex::LexError::MixedScriptIdent { span } => {
+                Self::MixedScriptIdent { name: text(span) }
+            }
+            gossamer_lex::LexError::ConfusableIdent { span, other } => Self::ConfusableIdent {
+                name: text(span),
+                other: text(other),
             },
             other => Self::Lex {
                 message: other.to_string(),
@@ -679,6 +706,31 @@ impl ParseError {
             expected: expected.into(),
             found,
             help: Some(help.into()),
+        }
+    }
+
+    /// The code, title, and help of an identifier that reads as a name it
+    /// is not.
+    fn identifier_report(&self) -> (&'static str, String, Option<String>) {
+        match self {
+            Self::MixedScriptIdent { name } => (
+                "GP0071",
+                format!("identifier `{name}` mixes letters of more than one script"),
+                Some(format!(
+                    "`{name}` holds {}, so it renders like a different name; spell it in one \
+                     script",
+                    script_mix_note(name)
+                )),
+            ),
+            Self::ConfusableIdent { name, other } => (
+                "GP0071",
+                format!("identifier `{name}` looks like `{other}`, a different name in this file"),
+                Some(format!(
+                    "the two render alike but name different things; spell it `{other}` if \
+                     that name is meant, or choose a name that reads differently"
+                )),
+            ),
+            _ => unreachable!("identifier_report answers only identifier errors"),
         }
     }
 
@@ -815,6 +867,9 @@ impl ParseError {
                      `\\u{{{codepoint:X}}}` inside a string or char literal"
                 )),
             ),
+            ParseError::MixedScriptIdent { .. } | ParseError::ConfusableIdent { .. } => {
+                self.identifier_report()
+            }
             other => other.code_title_help_malformed(),
         }
     }
@@ -1384,5 +1439,20 @@ impl ParseError {
             // split exists only to keep each match under the line cap.
             _ => unreachable!("code_title_help dispatches every other variant"),
         }
+    }
+}
+
+/// The characters of `name` outside ASCII, as `U+XXXX` codes, for a help
+/// line: the letters that do not belong to the script around them.
+fn script_mix_note(name: &str) -> String {
+    let codes: Vec<String> = name
+        .chars()
+        .filter(|c| !c.is_ascii())
+        .map(|c| format!("U+{:04X}", u32::from(c)))
+        .collect();
+    if codes.len() == 1 {
+        format!("the non-ASCII letter {}", codes[0])
+    } else {
+        format!("the non-ASCII letters {}", codes.join(", "))
     }
 }

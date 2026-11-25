@@ -22,6 +22,7 @@ use std::time::Instant;
 mod common;
 
 const SOURCE: &str = r#"
+use std::errors
 use std::http
 use std::http::router
 

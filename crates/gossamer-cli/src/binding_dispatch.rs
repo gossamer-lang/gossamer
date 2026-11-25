@@ -120,6 +120,10 @@ fn install_for_project(project: &crate::paths::ProjectContext) -> Result<usize> 
         ));
     }
     let manifest_dir = project.manifest_dir().unwrap_or_else(|| PathBuf::from("."));
+    // A binding crate patches in the crates its project's dependencies
+    // carry, so an unfetched or drifted dependency is named before Cargo
+    // fails on the crate it cannot find.
+    crate::paths::require_prepared_dependencies(&manifest_dir.join("project.toml"))?;
     // One library for the whole set, so crates two bindings share are one
     // copy in the process, as in a native build's link.
     let built = gossamer_driver::binding_library::ensure_bindings_library(

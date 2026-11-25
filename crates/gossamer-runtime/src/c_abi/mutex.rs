@@ -39,6 +39,15 @@ pub struct GosMutex {
     /// the lock). `-1` means unlocked. Read by `unlock` to refuse
     /// a cross-goroutine release.
     owner: AtomicI64,
+    /// Counts acquisitions, so a guard releases only the hold it took.
+    generation: AtomicI64,
+    /// Whether [`Self::poison`] holds a cause, read on every acquisition so
+    /// a healthy lock costs one load.
+    is_poisoned: std::sync::atomic::AtomicBool,
+    /// The panic a holder unwound with while releasing the lock. Every later
+    /// `lock` panics naming it, since the state the lock guards may be half
+    /// written.
+    poison: parking_lot::Mutex<Option<String>>,
 }
 
 super::rc::managed_handle!(GosMutex);
@@ -58,6 +67,9 @@ pub extern "C" fn gos_rt_mutex_new() -> *mut GosMutex {
             released: parking_lot::Condvar::new(),
             last_unlocker: AtomicI64::new(-1),
             owner: AtomicI64::new(-1),
+            generation: AtomicI64::new(0),
+            is_poisoned: std::sync::atomic::AtomicBool::new(false),
+            poison: parking_lot::Mutex::new(None),
         })
     })
 }
@@ -104,54 +116,111 @@ fn acquire(m: &GosMutex) {
         m.released.wait(&mut state);
     }
     state.locked = true;
-    drop(state);
+    // `main` stops waiting before its own hold can be seen, so a deadlock
+    // check never reads the lock `main` now holds as the one it waits for.
     crate::sched_global::end_main_wait();
+    drop(state);
+}
+
+/// The panic text a `lock` of a poisoned mutex raises.
+pub fn poisoned_message(cause: &str) -> String {
+    format!("Mutex poisoned: a goroutine panicked while holding it: {cause}")
+}
+
+/// The panic text an `unlock` of a mutex the caller does not hold raises.
+pub const NOT_HELD_MESSAGE: &str = "Mutex::unlock of a lock this goroutine does not hold";
+
+/// Takes `m` for the calling goroutine and answers the acquisition's
+/// generation; a poisoned mutex is released again and the call panics.
+fn take(m: &GosMutex) -> i64 {
+    acquire(m);
+    if m.is_poisoned.load(Ordering::Acquire) {
+        let cause = m.poison.lock().clone().unwrap_or_default();
+        release(m);
+        crate::c_abi::panic::panic_text(&poisoned_message(&cause));
+    }
+    m.owner
+        .store(i64::from(crate::race::current_gid()), Ordering::Release);
+    let from = m.last_unlocker.load(Ordering::Acquire);
+    if from >= 0 {
+        crate::race::record_sync(u32::try_from(from).unwrap_or(0), crate::race::current_gid());
+    }
+    m.generation.fetch_add(1, Ordering::AcqRel) + 1
+}
+
+/// Frees `m` and wakes the next waiter.
+fn release(m: &GosMutex) {
+    let mut state = m.state.lock();
+    state.locked = false;
+    let next = state.parked.pop_front();
+    drop(state);
+    if let Some(gid) = next {
+        crate::sched_global::unpark(gid);
+    }
+    m.released.notify_one();
+}
+
+/// Gives up the calling goroutine's hold on `m`, poisoning it when the
+/// release runs because a panic is unwinding.
+fn give_up(m: &GosMutex, me: i64) {
+    if let Some(cause) = crate::c_abi::panic::unwinding_panic() {
+        *m.poison.lock() = Some(cause);
+        m.is_poisoned.store(true, Ordering::Release);
+    }
+    m.owner.store(-1, Ordering::Release);
+    m.last_unlocker.store(me, Ordering::Release);
+    release(m);
+}
+
+// The lock shims are bare (no `ffi_entry!`): their one fault is a Gossamer
+// panic - a poisoned lock, or an unlock of a lock the caller does not hold -
+// which unwinds to the goroutine as any panic in its code does.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn gos_rt_mutex_lock(m: *mut GosMutex) {
+    if m.is_null() {
+        return;
+    }
+    // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
+    take(unsafe { &*m });
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_mutex_lock(m: *mut GosMutex) {
-    ffi_entry!({
-        if m.is_null() {
-            return;
-        }
-        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
-        let m = unsafe { &*m };
-        acquire(m);
-        m.owner
-            .store(i64::from(crate::race::current_gid()), Ordering::Release);
-        let from = m.last_unlocker.load(Ordering::Acquire);
-        if from >= 0 {
-            crate::race::record_sync(u32::try_from(from).unwrap_or(0), crate::race::current_gid());
-        }
-    });
+pub unsafe extern "C-unwind" fn gos_rt_mutex_unlock(m: *mut GosMutex) {
+    if m.is_null() {
+        return;
+    }
+    // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
+    let m = unsafe { &*m };
+    let me = i64::from(crate::race::current_gid());
+    if m.owner.load(Ordering::Acquire) != me {
+        crate::c_abi::panic::panic_text(NOT_HELD_MESSAGE);
+    }
+    give_up(m, me);
 }
 
+/// `m.lock()` bound by `let`: takes the lock and answers the acquisition's
+/// generation, which the guard releases by.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_mutex_unlock(m: *mut GosMutex) {
-    ffi_entry!({
-        if m.is_null() {
-            return;
-        }
-        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
-        let m = unsafe { &*m };
-        let me = i64::from(crate::race::current_gid());
-        let owner = m.owner.load(Ordering::Acquire);
-        if owner != me {
-            eprintln!(
-                "panic: mutex.unlock() from goroutine {me} but mutex is held by {owner}; \
-                 cross-goroutine unlock is undefined behaviour",
-            );
-            std::process::abort();
-        }
-        m.owner.store(-1, Ordering::Release);
-        m.last_unlocker.store(me, Ordering::Release);
-        let mut state = m.state.lock();
-        state.locked = false;
-        let next = state.parked.pop_front();
-        drop(state);
-        if let Some(gid) = next {
-            crate::sched_global::unpark(gid);
-        }
-        m.released.notify_one();
-    });
+pub unsafe extern "C-unwind" fn gos_rt_mutex_acquire(m: *mut GosMutex) -> i64 {
+    if m.is_null() {
+        return 0;
+    }
+    // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
+    take(unsafe { &*m })
+}
+
+/// A guard's release: frees `m` when the calling goroutine still holds the
+/// acquisition `generation` named, and does nothing once that hold has been
+/// given up.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn gos_rt_mutex_release(m: *mut GosMutex, generation: i64) {
+    if m.is_null() {
+        return;
+    }
+    // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
+    let m = unsafe { &*m };
+    let me = i64::from(crate::race::current_gid());
+    if m.owner.load(Ordering::Acquire) == me && m.generation.load(Ordering::Acquire) == generation {
+        give_up(m, me);
+    }
 }

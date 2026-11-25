@@ -776,7 +776,6 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
     globals.push(("__range", builtin("__range", builtin_btree_map_range)));
     globals.push(("walk", native("walk", native_fs_walk_dir)));
     globals.push(("path::walk", native("path::walk", native_fs_walk_dir)));
-    install_module("path", &[("join", builtin_path_join_v)], globals);
     install_module(
         "BTreeMap",
         &[("new", builtin_btmap_new), ("from", builtin_btmap_from)],

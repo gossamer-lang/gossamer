@@ -26,9 +26,11 @@ mod day_durations;
 mod definite_assignment;
 mod error;
 mod exhaustiveness;
+mod float_equality;
 mod foreign_layout;
 mod foreign_policy;
 mod frontend_checks;
+mod guard_uses;
 mod infer;
 pub mod instantiate;
 mod lossy_casts;
@@ -46,6 +48,7 @@ mod table;
 mod trait_index;
 mod traits;
 mod ty;
+mod unjoined_tasks;
 
 /// Element-kind tags a vector's header carries, naming what one element
 /// owns. The runtime's `vec_elem_kind` module defines the same values.
@@ -95,11 +98,16 @@ pub use error::{
     ForeignError, ForeignLibrary, IntegerCastFix, NotDisplayableClass, TypeDiagnostic, TypeError,
 };
 pub use exhaustiveness::{ExhaustivenessDiagnostic, ExhaustivenessError, check_exhaustiveness};
+pub use float_equality::{
+    FLOAT_EQ_LINT, InexactFloatEquality, check_float_equalities, find_inexact_float_equalities,
+    float_literal_is_exact,
+};
 pub use foreign_layout::{CLeaf, CStep, c_class_signed, c_class_width};
 pub use foreign_policy::ForeignPolicy;
 pub use frontend_checks::{
     CheckPhase, PhaseObserver, UnitChecks, check_resolved_unit, top_level_names, typed_lints,
 };
+pub use guard_uses::check_guard_uses;
 pub use infer::{InferCtxt, UnifyError};
 pub use lossy_casts::{
     CastCheck, LOSSY_CAST_LINT, LossyCast, cast_check, find_lossy_casts, float_to_int_check,
@@ -123,6 +131,7 @@ pub use trait_index::{
 };
 pub use traits::{Predicate, TraitRef};
 pub use ty::{ArrayLen, ClosureKind, FloatTy, FnSig, IntTy, Mutbl, ParamIdx, Ty, TyKind, TyVid};
+pub use unjoined_tasks::{UNJOINED_TASK_LINT, UnjoinedTask, find_unjoined_tasks};
 
 /// Method names whose built-in dispatch mutates and writes the receiver back
 /// into its source place. The type checker and execution tiers share this

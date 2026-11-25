@@ -15,9 +15,9 @@ use std::errors
 use std::fs
 use std::path
 
-let dir = path::join(env::temp_dir(), "gossamer-file-io-demo")
-let text_path = path::join(dir, "greeting.txt")
-let json_path = path::join(dir, "settings.json")
+let dir = path::join(env::temp_dir(), "gossamer-file-io-demo")?
+let text_path = path::join(dir, "greeting.txt")?
+let json_path = path::join(dir, "settings.json")?
 
 fs::create_dir_all(dir).map_err(|e| errors::wrap(e, "mkdir"))?
 

@@ -386,7 +386,7 @@ for i in 0..n {
     total += strconv::format_f64(1.5).len()
     total += base64::encode("abc".as_bytes()).len()
     total += hex::encode("abc".as_bytes()).len()
-    total += path::join("a", "b").len()
+    if let Ok(joined) = path::join("a", "b") { total += joined.len() }
     total += uuid::v4().len()
     total += url::query_escape("a b").len()
     total += format("{:>8}", i).len()

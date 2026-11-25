@@ -554,7 +554,7 @@ fn llvm_whole_unit_defines_the_frame_pointer_attribute_its_bodies_name() {
         .expect("loop MIR must render to LLVM IR");
     assert!(ir.contains(") #0"), "bodies name attribute group #0: {ir}");
     assert!(
-        ir.contains("attributes #0 = { \"frame-pointer\"=\"all\" }"),
+        ir.contains("attributes #0 = { \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\" }"),
         "the unit defines attribute group #0: {ir}"
     );
 }

@@ -65,17 +65,18 @@ fn main() {
 }
 
 #[test]
-fn bitwise_operators_combine_booleans() {
+fn exclusive_or_combines_booleans_and_bitwise_operators_take_integers() {
     everywhere(
         r#"fn main() {
     let a = true
     let b = false
     let mut seen = 0
-    let c = { seen += 1; a } & { seen += 1; b }
-    println(f"{a & b} {a | b} {a ^ b} {b ^ b} {c} {seen}")
+    let c = { seen += 1; a } ^ { seen += 1; b }
+    let d = (a as i64) & (b as i64) | 6
+    println(f"{a ^ b} {b ^ b} {c} {d} {seen}")
 }
 "#,
-        "false true true false false 2\n",
+        "true false true 6 2\n",
     );
 }
 

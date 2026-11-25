@@ -1509,6 +1509,8 @@ pub const STDLIB_QUALIFIED: &[&str] = &[
     "sync::Map::len",
     "sync::Map::new",
     "sync::Map::remove",
+    "sync::Mutex::__acquire",
+    "sync::Mutex::__release",
     "sync::Mutex::lock",
     "sync::Mutex::new",
     "sync::Mutex::unlock",

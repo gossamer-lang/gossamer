@@ -19,6 +19,87 @@ pub struct TypeDiagnostic {
 /// The help and notes of the rules that refuse a construct whose meaning the
 /// source misstates: unreachable code, dropped comparisons, constant faults,
 /// repeated keys, unsynchronized statics, and key types whose `eq` a
+/// The help, notes, and rewrites of the refusals of code that reads as
+/// something it does not do: a dropped value, a non-short-circuit `bool`
+/// operator, an inexact float comparison, an undeclared order, and a guard
+/// used beyond its scope.
+fn refusal_help(
+    error: &TypeError,
+    mut out: gossamer_diagnostics::Diagnostic,
+) -> gossamer_diagnostics::Diagnostic {
+    match error {
+        TypeError::DiscardedPureValue { method, receiver } => {
+            out = out.with_help(if receiver.is_empty() {
+                format!(
+                    "use what `{method}` answers: bind it (`let value = ..`), or pass it \
+                     where it is needed"
+                )
+            } else {
+                format!(
+                    "use what `{method}` answers: bind it (`let value = {receiver}.{method}(..)`), \
+                     assign it back to a `let mut {receiver}` (`{receiver} = \
+                     {receiver}.{method}(..)`), or pass it where it is needed"
+                )
+            });
+        }
+        TypeError::BitwiseOnBool { op, logical } => {
+            out = out.with_help(if op.ends_with('=') {
+                format!(
+                    "write `flag = flag {logical} value`, which evaluates `value` only when \
+                     `flag` does not decide the answer; where `value` must run every time, \
+                     bind it first: `let changed = update()`, then `flag = flag {logical} \
+                     changed`"
+                )
+            } else {
+                format!(
+                    "write `{logical}`, which evaluates its right side only when the left \
+                     does not decide the answer"
+                )
+            });
+        }
+        TypeError::InexactFloatEquality { ty, .. } => {
+            out = out
+                .with_help(
+                    "compare within a tolerance: `(a - b).abs() < 1e-9`, or compare with a \
+                     value the type holds exactly (`0.5`, `0.25`, a whole number)",
+                )
+                .with_note(format!(
+                    "a `{ty}` holds binary fractions, so arithmetic that should reach the \
+                     decimal rounds to a neighbour of it and the comparison is false"
+                ));
+        }
+        TypeError::MissingOrder { ty, decls, .. } => {
+            out = out.with_help(format!(
+                "declare the order: `#[derive(PartialOrd, Ord)]` on `{ty}` compares its \
+                 fields in declaration order, or write `impl Ord for {ty}`; to order by one \
+                 field, sort by a key: `sort_by_key(|v| v.field)`"
+            ));
+            for decl in decls {
+                let at = Span::new(decl.file, decl.start, decl.start);
+                out = out.with_suggestion(gossamer_diagnostics::Suggestion::replacement(
+                    gossamer_diagnostics::Location::new(decl.file, at),
+                    "derive an order".to_string(),
+                    "#[derive(PartialOrd, Ord)]\n".to_string(),
+                ));
+            }
+        }
+        TypeError::GuardEscape { name } => {
+            out = out
+                .with_help(format!(
+                    "the block that binds `{name}` releases the lock when it ends; call \
+                     `{name}.unlock()` to release it sooner, and take another guard where \
+                     the lock is needed again"
+                ))
+                .with_note(
+                    "a guard passed on, returned, stored, or copied would outlive the \
+                     release its block makes",
+                );
+        }
+        _ => {}
+    }
+    out
+}
+
 /// container never calls.
 fn source_rule_help(
     error: &TypeError,
@@ -73,6 +154,11 @@ fn source_rule_help(
                  condition (`if a == b { .. }`)",
             );
         }
+        TypeError::DiscardedPureValue { .. }
+        | TypeError::BitwiseOnBool { .. }
+        | TypeError::InexactFloatEquality { .. }
+        | TypeError::MissingOrder { .. }
+        | TypeError::GuardEscape { .. } => out = refusal_help(error, out),
         TypeError::ConstArithmetic { .. } => {
             out = out.with_help(
                 "a constant's value must fit its declared type at every step: widen the \
@@ -1215,6 +1301,56 @@ pub enum TypeError {
     /// an assignment (`=`) or a condition was almost always meant.
     #[error("a comparison is used as a statement and its answer is dropped")]
     ComparisonStatement,
+    /// A statement calls a method that answers a new value and changes
+    /// nothing, then drops what it answers.
+    #[error("`{method}` answers a new value and changes nothing, and that value is dropped")]
+    DiscardedPureValue {
+        /// The method called.
+        method: String,
+        /// The receiver's binding name, or empty when the receiver is not a
+        /// plain binding.
+        receiver: String,
+    },
+    /// `&`, `|`, `&=`, or `|=` with `bool` operands, which evaluates both
+    /// sides where `&&` / `||` stop at the first that decides.
+    #[error("`{op}` on `bool` operands evaluates both sides")]
+    BitwiseOnBool {
+        /// The operator as written.
+        op: &'static str,
+        /// The short-circuit operator meant.
+        logical: &'static str,
+    },
+    /// `==` / `!=` between a computed float and a literal the float type
+    /// cannot hold exactly.
+    #[error(
+        "`{op}` compares a computed `{ty}` with `{literal}`, which a `{ty}` cannot hold exactly"
+    )]
+    InexactFloatEquality {
+        /// `==` or `!=`.
+        op: &'static str,
+        /// The literal as written.
+        literal: String,
+        /// `f32` or `f64`.
+        ty: &'static str,
+    },
+    /// A mutex guard is used for something other than its own `unlock()`.
+    #[error("the guard `{name}` is used beyond its `unlock()`")]
+    GuardEscape {
+        /// The guard binding.
+        name: String,
+    },
+    /// A user type is sorted, compared with `<`, or used where an order is
+    /// needed, and declares none.
+    #[error("`{ty}` has no order: {what} needs `{ty}` to be ordered")]
+    MissingOrder {
+        /// The user type with no order.
+        ty: String,
+        /// What needed the order.
+        what: String,
+        /// Where `ty`, and each type its derived order would need ordered
+        /// too, is declared, for the rewrite that derives the orders.
+        decls: Vec<Span>,
+    },
     /// A map or set literal spells the same constant key twice.
     #[error("the key {key} appears more than once in this {collection} literal")]
     DuplicateLiteralKey {
@@ -1527,6 +1663,11 @@ impl TypeError {
             Self::DuplicateLiteralKey { .. } => "duplicate-literal-key",
             Self::HashKeyCustomEq { .. } => "hash-key-custom-eq",
             Self::ComparisonStatement => "comparison-statement",
+            Self::DiscardedPureValue { .. } => "discarded-pure-value",
+            Self::BitwiseOnBool { .. } => "bitwise-on-bool",
+            Self::InexactFloatEquality { .. } => "inexact-float-equality",
+            Self::MissingOrder { .. } => "missing-order",
+            Self::GuardEscape { .. } => "guard-escape",
             Self::MutableReferenceToImmutable { .. } => "mutable-reference-to-immutable",
             Self::MutableReferenceConflict { .. } => "mutable-reference-conflict",
             Self::ReferenceEscapeUnsupported { .. } => "reference-escape-unsupported",
@@ -1685,6 +1826,11 @@ impl TypeError {
             Self::DuplicateLiteralKey { .. } => "GT0137",
             Self::HashKeyCustomEq { .. } => "GT0138",
             Self::ComparisonStatement => "GT0136",
+            Self::DiscardedPureValue { .. } => "GT0140",
+            Self::BitwiseOnBool { .. } => "GT0141",
+            Self::InexactFloatEquality { .. } => "GT0142",
+            Self::MissingOrder { .. } => "GT0143",
+            Self::GuardEscape { .. } => "GT0144",
         }
     }
 }
@@ -2722,6 +2868,11 @@ impl TypeDiagnostic {
             | TypeError::DuplicateLiteralKey { .. }
             | TypeError::UnreachableCode
             | TypeError::ComparisonStatement
+            | TypeError::DiscardedPureValue { .. }
+            | TypeError::BitwiseOnBool { .. }
+            | TypeError::InexactFloatEquality { .. }
+            | TypeError::MissingOrder { .. }
+            | TypeError::GuardEscape { .. }
             | TypeError::ConstArithmetic { .. }
             | TypeError::StaticMutOutsideUnsafe { .. } => {
                 out = source_rule_help(&self.error, out);

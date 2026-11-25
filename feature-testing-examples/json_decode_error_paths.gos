@@ -6,6 +6,7 @@
 // Bit-identical on the VM, Cranelift, and LLVM tiers.
 
 use std::encoding::json
+use std::errors
 
 struct Current {
     temperature: f64

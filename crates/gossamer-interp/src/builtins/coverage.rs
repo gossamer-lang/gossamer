@@ -350,6 +350,16 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
          value; these shims are its per-type compiled forms",
     ),
     (
+        "gos_rt_mutex_acquire",
+        "the VM's `Mutex::__acquire` builtin takes the lock and answers the \
+         acquisition's generation, the call a guard's `let` lowers to",
+    ),
+    (
+        "gos_rt_mutex_release",
+        "the VM's `Mutex::__release` builtin frees the lock when the calling \
+         goroutine still holds the generation a guard took",
+    ),
+    (
         "gos_rt_metrics_serve",
         "the VM serves metrics through `stdlib_builtins/metrics.rs`",
     ),

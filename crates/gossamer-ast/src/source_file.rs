@@ -50,6 +50,11 @@ pub struct SourceFile {
     #[serde(default)]
     #[serde(serialize_with = "crate::ordered::map")]
     pub named_args: std::collections::HashMap<NodeId, Vec<NamedArg>>,
+    /// Path expressions the parser writes when it desugars a construct
+    /// (`arena { }`, `cohort { }`), which reach their module through a
+    /// synthetic import although their span is the program's own text.
+    #[serde(default)]
+    pub desugared_paths: Vec<NodeId>,
 }
 
 /// One `name: value` argument label at a call site.
@@ -83,6 +88,7 @@ impl SourceFile {
             next_node_id: 0,
             program_end: None,
             named_args: std::collections::HashMap::new(),
+            desugared_paths: Vec::new(),
         }
     }
 }
@@ -133,6 +139,11 @@ pub struct UseDecl {
     /// within its file; every entry of one group carries the same number.
     #[serde(default)]
     pub group: Option<u32>,
+    /// `true` for an import the toolchain adds for the code it writes. It
+    /// serves that code and the paths the parser desugars, never the
+    /// program's own text, which imports what it names.
+    #[serde(default)]
+    pub synthetic: bool,
 }
 
 impl UseDecl {
@@ -149,6 +160,16 @@ impl UseDecl {
             cfg: None,
             glob: false,
             group: None,
+            synthetic: false,
+        }
+    }
+
+    /// An import the toolchain adds for the code it writes.
+    #[must_use]
+    pub fn synthetic(span: Span, target: UseTarget) -> Self {
+        Self {
+            synthetic: true,
+            ..Self::simple(NodeId::DUMMY, span, target)
         }
     }
 }

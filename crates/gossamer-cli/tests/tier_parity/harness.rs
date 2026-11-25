@@ -917,6 +917,12 @@ const SPECS: &[Spec] = &[
     // and a type with none keeps the field-by-field order through the same
     // path: sort, sort_stable, min / max, and the sorted-sequence searches.
     spec("feature-testing-examples/user_cmp_ordering.gos"),
+    // `main` and a goroutine recurse past any fixed stack size: stacks grow
+    // on demand to a memory-based limit on every tier.
+    spec("feature-testing-examples/deep_recursion_grows.gos"),
+    // Ordering is declared: a derived or written `cmp` orders a user type,
+    // and equality stays structural.
+    spec("feature-testing-examples/derived_order.gos"),
     // Pattern destructuring in function parameters (tuple / struct /
     // tuple-struct), bound via a fresh local + injected destructuring let.
     spec("feature-testing-examples/param_destructure.gos"),
@@ -1521,6 +1527,10 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/process_run_in.gos"),
     spec("feature-testing-examples/path_split.gos"),
     spec("feature-testing-examples/path_value.gos"),
+    // `path::join` answers an error for a segment that leaves its base.
+    spec("feature-testing-examples/path_join_checked.gos"),
+    // Indexing past a String's end names a string in its panic.
+    spec("feature-testing-examples/string_index_oob_message.gos"),
     spec("feature-testing-examples/base32_decode.gos"),
     spec("feature-testing-examples/codec_validation.gos"),
     spec("feature-testing-examples/weak_references_in_containers.gos"),
@@ -1676,6 +1686,10 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/iter_zip_advances.gos"),
     spec("feature-testing-examples/mutex_poison_recovery.gos"),
     spec("feature-testing-examples/mutex_vs_channel_counter.gos"),
+    // A `let`-bound guard releases its lock at every exit of its block.
+    spec("feature-testing-examples/mutex_guard_scope.gos"),
+    // A lock released while a panic unwinds is poisoned for later lockers.
+    spec("feature-testing-examples/mutex_poison.gos"),
     spec("feature-testing-examples/numeric_conversion_matrix.gos"),
     spec("feature-testing-examples/option_default.gos"),
     spec("feature-testing-examples/option_unwrap_chain.gos"),

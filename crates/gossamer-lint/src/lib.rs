@@ -65,7 +65,7 @@ impl Level {
 /// Lints the default registry enables at `deny`: their findings are never
 /// what the code means, so a program that holds one is refused unless an
 /// item's `#[lint(allow(..))]` or `#[lint(warn(..))]` says otherwise.
-pub const DENY_BY_DEFAULT: &[&str] = &["signed_remainder"];
+pub const DENY_BY_DEFAULT: &[&str] = &["signed_remainder", "unjoined_task"];
 
 /// Registry mapping lint IDs to levels. The default registry has
 /// every day-one lint enabled at `warn`, and [`DENY_BY_DEFAULT`] at `deny`.
@@ -192,9 +192,8 @@ pub const DAY_ONE_LINTS: &[&str] = &[
     "non_camel_case_types",
     "non_snake_case",
     "non_upper_case_globals",
-    // A spawned task's handle that nothing joins.
-    "unjoined_task",
     // Type-aware: reported from the checked program through [`leveled`].
+    "unjoined_task",
     "lossy_cast",
     "closure_self_cycle",
     "signed_remainder",
@@ -210,6 +209,8 @@ pub const DAY_ONE_LINTS: &[&str] = &[
 /// pass [`run`] reports none of them; a caller holding the types computes
 /// the findings and hands them to [`leveled`].
 pub const TYPED_LINTS: &[&str] = &[
+    "unjoined_task",
+    "float_eq_zero",
     "lossy_cast",
     "closure_self_cycle",
     "signed_remainder",

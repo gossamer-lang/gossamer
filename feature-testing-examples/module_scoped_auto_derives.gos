@@ -3,6 +3,7 @@ use std::sync::channel_unbounded
 struct Model { requests: Sender<i64> }
 
 mod values {
+    #[derive(PartialOrd, Ord)]
     pub struct Model { value: i64 }
 
     pub fn exercise() -> String {

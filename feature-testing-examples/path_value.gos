@@ -1,7 +1,8 @@
 use std::path
 
 let base = path::Path::new("a/./b")
-let joined = base.normalize().join("file.txt")
+let joined = base.normalize().join("file.txt").expect("relative segment")
+assert(base.join("../../up").is_err(), "a segment above the base is refused")
 assert(joined.as_str() == "a/b/file.txt", "normalized join")
 assert(joined.file_name() == Some("file.txt"), "file name")
 assert(joined.stem() == Some("file"), "stem")

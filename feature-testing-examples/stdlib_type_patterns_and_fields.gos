@@ -6,6 +6,7 @@ use std::fs
 use std::fs::DirInfo
 use std::process::Stdio
 
+#[derive(PartialOrd, Ord)]
 struct Holder { info: fs::DirInfo, n: i64 }
 struct Bare { info: DirInfo }
 

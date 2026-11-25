@@ -34,6 +34,8 @@ struct FaultState {
     last_panic: Option<String>,
     /// How many landing pads are running their deferred expressions.
     pads: usize,
+    /// The panic the goroutine's frames are unwinding with, as raised.
+    raised: Option<String>,
     /// A panic a deferred expression raised inside a landing pad, until the
     /// pad's note handler records it.
     nested: Option<String>,
@@ -114,8 +116,17 @@ fn record_raise(text: &str) -> bool {
             true
         } else {
             state.notes.clear();
+            state.raised = Some(text.to_string());
             false
         }
+    })
+}
+
+/// The panic the running goroutine is unwinding with while a landing pad
+/// runs its deferred expressions; `None` outside a landing pad.
+pub(crate) fn unwinding_panic() -> Option<String> {
+    with_fault_state(|state| {
+        (state.pads > 0).then(|| state.raised.clone().unwrap_or_else(|| "panic".to_string()))
     })
 }
 
@@ -233,7 +244,13 @@ pub unsafe extern "C" fn gos_rt_call_main(entry: *const u8, out: *mut u8) {
     // unwinding function that takes the result slot's address.
     let entry: extern "C-unwind" fn(*mut u8) = unsafe { std::mem::transmute(entry) };
     let outer = MAIN_UNWINDS.with(|flag| flag.replace(true));
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry(out)));
+    // `main` runs on a stack that grows on demand to the stack limit, as a
+    // goroutine's does, so deep recursion is bounded by memory rather than
+    // the OS's default stack size.
+    let out = out as usize;
+    let result = gossamer_coro::on_growable_stack(gossamer_coro::stack_limit_bytes(), move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry(out as *mut u8)))
+    });
     MAIN_UNWINDS.with(|flag| flag.set(outer));
     if let Err(payload) = result {
         if let Some(fault) = take_deferred_fault(&*payload) {

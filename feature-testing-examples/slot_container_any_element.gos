@@ -3,8 +3,10 @@
 // orders, and order it the same way `sort` does. Every tier renders and orders
 // them identically.
 
+#[derive(PartialOrd, Ord)]
 struct Point { x: i64, y: String }
 
+#[derive(PartialOrd, Ord)]
 enum Level { Low, Mid(i64), High }
 
 // A hot loop over the same containers, so the JIT tier compiles a body that

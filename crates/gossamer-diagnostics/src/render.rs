@@ -45,12 +45,12 @@ pub fn render(diag: &Diagnostic, map: &SourceMap, options: RenderOptions) -> Str
         let _ = writeln!(out, "  {dim_colour}= help:{reset} {help}");
     }
     for suggestion in &diag.suggestions {
+        // An inserted line carries its own line break, which the one-line
+        // rendering leaves out.
+        let shown = suggestion.replacement.trim_end_matches('\n');
         // A message that already quotes its replacement is complete on its
         // own; appending the arrow would print the same text twice.
-        if suggestion
-            .message
-            .contains(&format!("`{}`", suggestion.replacement))
-        {
+        if suggestion.message.contains(&format!("`{shown}`")) {
             let _ = writeln!(
                 out,
                 "  {dim_colour}= suggestion:{reset} {}",
@@ -59,8 +59,8 @@ pub fn render(diag: &Diagnostic, map: &SourceMap, options: RenderOptions) -> Str
         } else {
             let _ = writeln!(
                 out,
-                "  {dim_colour}= suggestion:{reset} {} → `{}`",
-                suggestion.message, suggestion.replacement
+                "  {dim_colour}= suggestion:{reset} {} → `{shown}`",
+                suggestion.message
             );
         }
     }

@@ -128,8 +128,10 @@ impl Parser<'_> {
         // primitive stays unchecked.
         block.kind = gossamer_ast::BlockKind::Arena;
         let runtime_call = |p: &mut Self, fn_name: &str, span| {
+            let id = p.alloc_id();
+            p.desugared_paths.push(id);
             let path = Expr::new(
-                p.alloc_id(),
+                id,
                 span,
                 ExprKind::Path(PathExpr::from_names(["runtime", fn_name])),
             );

@@ -31,23 +31,6 @@ fn unused_variable_fires_on_let_without_use() {
 }
 
 #[test]
-fn unjoined_task_fires_on_a_spawn_handle_never_used() {
-    let diags = lint("fn main() {\n let task = spawn(|| 1i64)\n println(1)\n}\n");
-    assert!(has_code(&diags, "GL0065"), "got {:?}", diags_codes(&diags));
-    assert!(!has_code(&diags, "GL0001"), "got {:?}", diags_codes(&diags));
-}
-
-#[test]
-fn unjoined_task_silenced_when_joined_or_unbound() {
-    let joined = lint("fn main() {\n let task = spawn(|| 1i64)\n let _n = task.join()\n}\n");
-    assert!(!has_code(&joined, "GL0065"), "{:?}", diags_codes(&joined));
-    let unbound = lint("fn main() {\n spawn(|| 1i64)\n}\n");
-    assert!(!has_code(&unbound, "GL0065"), "{:?}", diags_codes(&unbound));
-    let ignored = lint("fn main() {\n let _task = spawn(|| 1i64)\n}\n");
-    assert!(!has_code(&ignored, "GL0065"), "{:?}", diags_codes(&ignored));
-}
-
-#[test]
 fn shadowed_binding_fires_on_a_nested_let_hiding_an_outer_let_mut() {
     let diags = lint(
         "fn main() {\n let ok = true\n let mut status = 1i64\n if ok {\n let status = 2i64\n println(status)\n }\n println(status)\n}\n",
@@ -191,14 +174,6 @@ fn if_not_else_is_silent_on_a_let_chain_without_else() {
         "fn f(o: Option<String>, flag: bool) { if let Some(s) = o && flag && !s.is_empty() { println(s) } }\n",
     );
     assert!(!has_code(&diags, "GL0034"), "{:?}", diags_codes(&diags));
-}
-
-#[test]
-fn float_comparison_with_exact_zero_is_exempt() {
-    let diags = lint("fn ratio(n: f64, d: f64) -> f64 { if d == 0.0 { 0.0 } else { n / d } }\n");
-    assert!(!has_code(&diags, "GL0025"), "{:?}", diags_codes(&diags));
-    let diags = lint("fn half(d: f64) -> bool { d == 0.5 }\n");
-    assert!(has_code(&diags, "GL0025"), "{:?}", diags_codes(&diags));
 }
 
 #[test]
@@ -606,18 +581,6 @@ fn nested_ternary_if_silent_without_a_closing_else() {
 
 fn diags_codes(diags: &[Diagnostic]) -> Vec<&str> {
     diags.iter().map(|d| d.code.as_str()).collect()
-}
-
-#[test]
-fn no_effect_statement_fires_on_a_dropped_value_only_method() {
-    let diags = lint(
-        "fn main() {\n    let v = #[1, 1, 2]\n    v.dedup()\n    let s = \" a \"\n    s.trim()\n    println(\"{:?} {}\", v, s)\n}\n",
-    );
-    assert_eq!(
-        diags.iter().filter(|d| d.code.as_str() == "GL0056").count(),
-        2,
-        "{diags:?}"
-    );
 }
 
 #[test]

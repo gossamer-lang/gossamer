@@ -1,0 +1,10 @@
+// ERROR: GT0144
+
+use std::sync::Mutex
+
+fn main() {
+    let m = Mutex::new()
+    let guard = m.lock()
+    let other = guard
+    other.unlock()
+}

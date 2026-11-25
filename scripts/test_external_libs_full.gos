@@ -52,7 +52,7 @@ fn repo_root() -> String {
     }
     let mut directory = env::current_dir().unwrap_or(".")
     loop {
-        if fs::is_dir(path::join(directory, "example-external-libraries")) {
+        if fs::is_dir(path::join(directory, "example-external-libraries").expect("relative segment")) {
             return directory
         }
         match path::parent(directory) {
@@ -103,7 +103,7 @@ fn main() {
         }
         Err(e) => fail(format("cargo build: {}", e))
     }
-    let gos = path::join(target_dir(root), "debug/gos")
+    let gos = path::join(target_dir(root), "debug/gos").expect("relative segment")
     if !fs::is_file(gos) {
         fail(format("gos binary not produced at {}", gos))
     }
@@ -119,9 +119,9 @@ fn main() {
         }
     }
 
-    let examples = path::join(root, "example-external-libraries")
-    let aware = path::join(examples, "01-gossamer-aware")
-    let wrapped = path::join(examples, "02-plain-rust-wrapped")
+    let examples = path::join(root, "example-external-libraries").expect("relative segment")
+    let aware = path::join(examples, "01-gossamer-aware").expect("relative segment")
+    let wrapped = path::join(examples, "02-plain-rust-wrapped").expect("relative segment")
 
     println("=> phase 1: example 01 (echo-binding)")
     let aware_markers = #["HELLO, GOSSAMER", "sum: 15", "count: 3"]
@@ -178,9 +178,9 @@ fn main() {
             return
         }
     }
-    let _ = fs::create_dir_all(path::join(plain, "src"))
-    let _ = fs::write(path::join(plain, "project.toml"), PLAIN_MANIFEST.as_bytes())
-    let _ = fs::write(path::join(plain, "src/main.gos"), PLAIN_SOURCE.as_bytes())
+    let _ = fs::create_dir_all(path::join(plain, "src").expect("relative segment"))
+    let _ = fs::write(path::join(plain, "project.toml").expect("relative segment"), PLAIN_MANIFEST.as_bytes())
+    let _ = fs::write(path::join(plain, "src/main.gos").expect("relative segment"), PLAIN_SOURCE.as_bytes())
     run_cell(
         gos
         Cell {
@@ -201,5 +201,5 @@ fn main() {
 /// `root` unless absolute, else `<root>/target`.
 fn target_dir(root: String) -> String {
     let dir = env::var("CARGO_TARGET_DIR").unwrap_or("target")
-    if path::is_absolute(dir) { dir } else { path::join(root, dir) }
+    if path::is_absolute(dir) { dir } else { path::join(root, dir).expect("relative segment") }
 }

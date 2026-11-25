@@ -879,6 +879,16 @@ pub const REGISTRY: &[(&str, &str)] = &[
             `\"\\u{202E}\"`.",
     ),
     (
+        "GP0071",
+        "An identifier reads as a name it is not (Unicode UTS #39). Either it\n\
+            mixes letters of more than one script - `is_\u{430}dmin` holds a\n\
+            Cyrillic `\u{430}` among Latin letters - or its letters render\n\
+            like a different name of the same file. An editor and a review\n\
+            tool show the two alike, so a reader checks one function and the\n\
+            program calls another. Spell the name in one script, and give\n\
+            names that mean different things spellings that read differently.",
+    ),
+    (
         "GR0001",
         "A name used in source could not be resolved to a declaration.\n\
                      Check the spelling, whether a `use` brings the name into scope,\n\
@@ -2134,6 +2144,56 @@ pub const REGISTRY: &[(&str, &str)] = &[
             then `if ok { let status = \"done\" }`, leaves `status` pending.\n\
             Assign the outer binding (`status = \"done\"`), or drop its `mut`\n\
             and give the inner binding a name of its own.",
+    ),
+    (
+        "GT0140",
+        "A statement calls a method that answers a new value and changes\n\
+            nothing, and drops that value: `name.to_uppercase()` on its own\n\
+            line leaves `name` as it was. The methods of `String`, `Vec`, an\n\
+            array, `Map`, `Set`, a number, a `char`, an `Option`, and a\n\
+            `Result` that build a new value (`trim`, `replace`, `map`,\n\
+            `filter`, `len`, `contains`, `abs`, ...) are refused this way;\n\
+            the ones that change their receiver (`push`, `sort`, `insert`,\n\
+            `clear`) are not. Bind the value, assign it back, or pass it on.",
+    ),
+    (
+        "GT0141",
+        "`&` or `|` (or `&=` / `|=`) with `bool` operands. Both sides are\n\
+            evaluated, where `&&` and `||` stop at the first that decides, so\n\
+            a guard such as `(s.len() > 0) & (s[0] == 'a')` still runs the\n\
+            index it was written to protect. Write `&&` or `||`. `^` (exclusive\n\
+            or) on `bool` stays legal: it has no short-circuit form.",
+    ),
+    (
+        "GT0142",
+        "`==` or `!=` compares a computed float, the result of arithmetic or\n\
+            a call, with a literal its type cannot hold exactly, such as `0.1`\n\
+            or `0.3`. A float holds binary fractions, so `0.1 + 0.2` rounds to\n\
+            a neighbour of `0.3` and `a == 0.3` is false. Compare within a\n\
+            tolerance, `(a - 0.3).abs() < 1e-9`. A literal the type holds\n\
+            exactly (`0.5`, `0.0`, `1.0`) stays legal, as does comparing a\n\
+            binding set straight from the same literal.",
+    ),
+    (
+        "GT0143",
+        "A struct or enum is sorted, compared with `<` / `<=` / `>` / `>=`,\n\
+            passed to `min` / `max`, or used as a `BTreeMap` / `BTreeSet` key\n\
+            or a heap element, and declares no order. Equality is structural\n\
+            and automatic, but an order is a choice the type makes:\n\
+            `#[derive(PartialOrd, Ord)]` orders by the fields in declaration\n\
+            order (variants by declaration order), and `impl Ord` writes a\n\
+            `cmp` of its own. `gos check --fix` adds the derive. To order by\n\
+            one field without declaring an order, sort by a key:\n\
+            `sort_by_key(|p| p.x)`.",
+    ),
+    (
+        "GT0144",
+        "A mutex guard is used for something other than its own `unlock()`.\n\
+            `let guard = m.lock()` holds the lock to the end of the block that\n\
+            binds `guard`, which releases it at every exit, panics included.\n\
+            A guard passed to a function, returned, stored, or copied would\n\
+            outlive that release. Call `guard.unlock()` to release the lock\n\
+            sooner, and take another guard where the lock is needed again.",
     ),
     (
         "GX0001",

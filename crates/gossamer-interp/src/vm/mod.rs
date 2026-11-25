@@ -367,7 +367,7 @@ pub struct Vm {
     /// on every `apply` entry, decremented on return.
     pub(crate) call_depth: Cell<usize>,
     /// Bytes held by this goroutine's suspended heap frames. A call that
-    /// would take it past `MAX_HEAP_FRAME_BYTES` is refused with
+    /// would take it past `heap_frame_limit()` is refused with
     /// `RuntimeError::StackOverflow`, so recursion depth is bounded by the
     /// memory the frames occupy rather than by how many there are.
     pub(crate) heap_frame_bytes: Cell<usize>,
@@ -764,6 +764,13 @@ pub(crate) fn index_oob_panic(index: i64, len: usize) -> RuntimeError {
         "vec index out of bounds: the len is {len} but the index is {index}"
     ))
 }
+/// The panic `s[i]` reports for an index outside the string's scalars, worded
+/// as the compiled tiers word it.
+pub(crate) fn string_index_oob_panic(index: i64, len: usize) -> RuntimeError {
+    RuntimeError::Panic(format!(
+        "string index out of bounds: the len is {len} but the index is {index}"
+    ))
+}
 /// The panic `s.byte_at(i)` reports for an index outside the string's bytes,
 /// worded as the compiled tiers word it.
 pub(crate) fn string_byte_oob_panic(index: i64, len: usize) -> RuntimeError {
@@ -1137,13 +1144,15 @@ pub(crate) enum Global {
 /// Every `apply` entry nests Rust frames, and without the byte-budget guard
 /// nothing else stops that recursion before the native stack overflows. The
 /// `gos` binary arms the guard on every VM thread, so there the limit is
-/// [`MAX_HEAP_FRAME_BYTES`] and the stack guard instead.
+/// [`heap_frame_limit`] and the stack guard instead.
 const MAX_UNGUARDED_CALL_DEPTH: usize = 4_096;
 
-/// Bytes of suspended heap frames one goroutine may hold, the ceiling Go
-/// places on a goroutine's stack on 64-bit hosts. Deep recursion is bounded
-/// by the memory its frames occupy, and exceeding it is `GX0008`.
-const MAX_HEAP_FRAME_BYTES: usize = 1 << 30;
+/// Bytes of suspended heap frames one goroutine may hold: the limit its
+/// native stack grows to, so deep recursion is bounded by the memory its
+/// frames occupy on every tier, and exceeding it is `GX0008`.
+pub(crate) fn heap_frame_limit() -> usize {
+    gossamer_coro::stack_limit_bytes()
+}
 
 /// Native-stack depth at which direct bytecode calls switch to the heap-frame
 /// trampoline.
@@ -1305,6 +1314,9 @@ pub(crate) fn index_get(base: &Value, idx: &Value) -> RuntimeResult<Value> {
         }
     };
     if raw < 0 || raw as usize >= len {
+        if matches!(base, Value::String(_)) {
+            return Err(string_index_oob_panic(raw, len));
+        }
         return Err(crate::vm::index_oob_panic(raw, len));
     }
     let i = raw as usize;

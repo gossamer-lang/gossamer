@@ -64,14 +64,14 @@ fn main() {
 
     println("{:<14} {:>12} {:>12} {:>12}", "fixture", "bytecode ms", "jit ms", "native ms")
     for name in FIXTURES {
-        let src = path::join("benchmarks/combinators", name)
-        let scratch = path::join(env::temp_dir(), format("gos-comb-{}", name))
+        let src = path::join("benchmarks/combinators", name).expect("relative segment")
+        let scratch = path::join(env::temp_dir(), format("gos-comb-{}", name)).expect("relative segment")
         let _ = fs::remove_dir_all(scratch)
         if let Err(e) = fs::create_dir_all(scratch) {
             eprintln("combinators: scratch: {}", e)
             process::exit(1)
         }
-        let copy = path::join(scratch, name)
+        let copy = path::join(scratch, name).expect("relative segment")
         if let Err(e) = fs::copy(src, copy) {
             eprintln("combinators: copy: {}", e)
             process::exit(1)
@@ -88,7 +88,7 @@ fn main() {
             Err(e) => { eprintln("combinators: build {}: {}", name, e); process::exit(1) }
         }
         let stem = name.replace(".gos", "")
-        let binary = path::join(path::join(path::join(scratch, "target"), "release"), stem)
+        let binary = path::join(path::join(path::join(scratch, "target").expect("relative segment"), "release").expect("relative segment"), stem).expect("relative segment")
 
         // Options come before the file; every token after it is the
         // program's own argument.

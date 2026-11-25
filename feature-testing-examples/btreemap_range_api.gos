@@ -1,7 +1,9 @@
 // A `BTreeMap` answers its entries between two keys in key order for every
 // range form, and its first and last entries, reading or taking them; the
 // bounds are keys of any ordered type. Identical on every tier.
+#[derive(PartialOrd, Ord)]
 struct Pt { x: i64, y: i64 }
+#[derive(PartialOrd, Ord)]
 enum Level { Low, Mid(i64), High }
 
 fn pairs(m: BTreeMap<i64, String>, lo: i64, hi: i64) -> Vec<(i64, String)> {

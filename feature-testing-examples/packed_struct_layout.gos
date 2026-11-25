@@ -4,6 +4,7 @@
 
 use std::sync::channel
 
+#[derive(PartialOrd, Ord)]
 struct Pixel {
     r: u8
     g: u8

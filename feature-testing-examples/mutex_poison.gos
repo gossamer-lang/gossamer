@@ -1,0 +1,49 @@
+// A Mutex released while a panic unwinds is poisoned: every later `lock()`
+// panics naming the earlier panic, whether the release was a deferred
+// `unlock()` or a guard's scope.
+use std::sync::{Mutex, Shared}
+
+fn post(lock: Mutex, debits: Shared<i64>) {
+    lock.lock()
+    defer lock.unlock()
+    debits.update(|d| d + 50)
+    panic("crash mid-update")
+}
+
+fn post_guarded(lock: Mutex, debits: Shared<i64>) {
+    let guard = lock.lock()
+    debits.update(|d| d + 50)
+    panic("guarded crash")
+}
+
+fn take(lock: Mutex) -> String {
+    let guard = lock.lock()
+    "locked"
+}
+
+fn report(outcome: Result<String, String>) {
+    match outcome {
+        Ok(text) => println(text)
+        Err(message) => println(f"lock failed: {message}")
+    }
+}
+
+fn main() {
+    let lock = Mutex::new()
+    let debits = Shared::new(0)
+    let worker = spawn(|| post(lock, debits))
+    println(worker.join().is_err())
+    let attempt = spawn(|| take(lock))
+    report(attempt.join())
+
+    let other = Mutex::new()
+    let guarded = spawn(|| post_guarded(other, debits))
+    println(guarded.join().is_err())
+    let second = spawn(|| take(other))
+    report(second.join())
+
+    let healthy = Mutex::new()
+    let third = spawn(|| take(healthy))
+    report(third.join())
+    println(debits.get())
+}

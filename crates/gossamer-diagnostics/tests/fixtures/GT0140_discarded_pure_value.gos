@@ -1,0 +1,7 @@
+// ERROR: GT0140
+
+fn main() {
+    let name = "ada"
+    name.to_uppercase()
+    println(name)
+}

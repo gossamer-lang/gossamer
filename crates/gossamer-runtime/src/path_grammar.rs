@@ -73,6 +73,37 @@ pub fn join(base: &str, segment: &str) -> String {
     out
 }
 
+/// Joins `base` with `segment` as [`join`] does, refusing a `segment` that
+/// would name a path outside `base`: an absolute one, one that names a drive
+/// (`C:x`), or one whose `..` components climb above where it starts. The
+/// check is lexical, as every function here is, and reads no file system.
+///
+/// # Errors
+///
+/// The message naming the segment and why it leaves `base`.
+pub fn join_within(base: &str, segment: &str) -> Result<String, String> {
+    let bytes = segment.as_bytes();
+    let names_drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if is_absolute(segment) || names_drive {
+        return Err(format!(
+            "path::join: `{segment}` is absolute, so it names a path outside `{base}`"
+        ));
+    }
+    let mut depth: usize = 0;
+    for part in segment.split(is_separator) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                depth = depth.checked_sub(1).ok_or_else(|| {
+                    format!("path::join: `{segment}` climbs above `{base}` with `..`")
+                })?;
+            }
+            _ => depth += 1,
+        }
+    }
+    Ok(join(base, segment))
+}
+
 /// Splits `path` into `(directory, file)` at its last separator. The
 /// directory keeps the root whole and carries no other trailing separator.
 #[must_use]

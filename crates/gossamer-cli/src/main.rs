@@ -11,10 +11,14 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     gossamer_cli::prepare_main_thread();
-    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    if let Err(err) = gossamer_cli::install_bindings_for_args(&args) {
-        eprintln!("error: {err:#}");
-        return ExitCode::FAILURE;
-    }
-    gossamer_cli::run_main_with_args(&args)
+    // Every subcommand runs on one growable stack, so the compiler and the
+    // program it runs share the pages either touches.
+    gossamer_coro::on_growable_stack(gossamer_coro::stack_limit_bytes(), || {
+        let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+        if let Err(err) = gossamer_cli::install_bindings_for_args(&args) {
+            eprintln!("error: {err:#}");
+            return ExitCode::FAILURE;
+        }
+        gossamer_cli::run_main_with_args(&args)
+    })
 }

@@ -6,7 +6,7 @@
 use std::{env, errors, fs, path}
 
 fn write_file(dir: String, name: String, body: String) -> Result<String, errors::Error> {
-    let target = path::join(dir, name)
+    let target = path::join(dir, name)?
     fs::write(target, body.as_bytes())?
     Ok(target)
 }
@@ -15,8 +15,8 @@ fn main() -> Result<(), errors::Error> {
     let root = fs::temp_dir("gos-fs-portable")?
     assert(fs::is_dir(root), "temp_dir creates a directory")
 
-    let nested = path::join(root, "a")
-    let deep = path::join(nested, "b")
+    let nested = path::join(root, "a")?
+    let deep = path::join(nested, "b")?
     fs::create_dir_all(deep)?
     assert(fs::is_dir(deep), "create_dir_all builds every level")
 
@@ -46,11 +46,11 @@ fn main() -> Result<(), errors::Error> {
     assert(fs::file_size(crlf) == 4, "CRLF is two bytes, unrewritten")
     assert(fs::read_to_string(crlf).unwrap_or("").byte_len() == 4, "and reads back as four")
 
-    let copied = path::join(root, "copy.txt")
+    let copied = path::join(root, "copy.txt")?
     fs::copy(hello, copied)?
     assert(fs::read_to_string(copied).unwrap_or("") == "hello", "copy duplicates content")
 
-    let renamed = path::join(root, "renamed.txt")
+    let renamed = path::join(root, "renamed.txt")?
     fs::rename(copied, renamed)?
     assert(!fs::exists(copied), "rename removes the source")
     assert(fs::exists(renamed), "rename creates the destination")

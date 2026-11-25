@@ -256,7 +256,7 @@ fn continue_binary(p: &mut Parser, lhs_in: Expr, max_prec: i64, allow_assign: bo
             let ty = parse::parse_type(p)
             let span = parse::join(p, lhs.span, ty.span)
             let id = parse::alloc(p)
-            lhs = parse::mk_expr(id, span, ExprKind::Cast { value: lhs, ty: ty })
+            lhs = parse::mk_expr(id, span, ExprKind::Cast { value: lhs, ty: ty, wrapping: false })
             continue
         }
         break

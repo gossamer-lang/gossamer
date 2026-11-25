@@ -62,7 +62,14 @@ impl<'src> Lexer<'src> {
         }
         let kind = self.dispatch(first, start);
         self.reject_bidi_controls(start);
-        Token::new(kind, self.span_from(start))
+        let span = self.span_from(start);
+        if kind == TokenKind::Ident
+            && let Some(text) = self.cursor.source().get(start as usize..span.end as usize)
+            && crate::identifiers::mixes_scripts(text)
+        {
+            self.diagnostics.push(LexError::MixedScriptIdent { span });
+        }
+        Token::new(kind, span)
     }
 
     /// Reports each bidirectional control character in the text of the

@@ -75,6 +75,22 @@ pub enum LexError {
         /// The character's scalar value.
         codepoint: u32,
     },
+    /// An identifier draws its letters from more than one script, so it can
+    /// render as a different name (Unicode UTS #39).
+    #[error("identifier mixes letters of more than one script")]
+    MixedScriptIdent {
+        /// Span of the identifier.
+        span: Span,
+    },
+    /// An identifier renders like a different identifier of the same file:
+    /// the two share a UTS #39 confusable skeleton.
+    #[error("identifier looks like another name in this file")]
+    ConfusableIdent {
+        /// Span of the identifier.
+        span: Span,
+        /// Span of the name it looks like.
+        other: Span,
+    },
     /// A numeric literal had no digits after its base prefix or `_` placeholder.
     #[error("numeric literal requires at least one digit after its base prefix")]
     EmptyNumericLiteral {
@@ -99,7 +115,9 @@ impl LexError {
             | Self::BadUnicodeEscape { span }
             | Self::BadNumericDigit { span }
             | Self::EmptyNumericLiteral { span }
-            | Self::BidiControl { span, .. } => span,
+            | Self::BidiControl { span, .. }
+            | Self::MixedScriptIdent { span }
+            | Self::ConfusableIdent { span, .. } => span,
         }
     }
 
@@ -120,8 +138,13 @@ impl LexError {
             | Self::BadUnicodeEscape { span }
             | Self::BadNumericDigit { span }
             | Self::EmptyNumericLiteral { span }
-            | Self::BidiControl { span, .. } => {
+            | Self::BidiControl { span, .. }
+            | Self::MixedScriptIdent { span } => {
                 *span = Span::new(span.file, span.start + offset, span.end + offset);
+            }
+            Self::ConfusableIdent { span, other } => {
+                *span = Span::new(span.file, span.start + offset, span.end + offset);
+                *other = Span::new(other.file, other.start + offset, other.end + offset);
             }
         }
         shifted

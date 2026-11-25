@@ -94,6 +94,7 @@ impl Parser<'_> {
             cfg: None,
             glob,
             group: None,
+            synthetic: false,
         }
     }
 

@@ -2948,7 +2948,7 @@ impl Parser<'_> {
             if matches!(err, gossamer_lex::LexError::BidiControl { .. }) {
                 continue;
             }
-            self.record(ParseError::from_lex(&err), err.span());
+            self.record(ParseError::from_lex(&err, self.source), err.span());
         }
         let saved_tokens = std::mem::replace(&mut self.tokens, stream);
         let saved_separator = self.newline_separator_at.take();

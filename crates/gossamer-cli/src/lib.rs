@@ -57,7 +57,7 @@ pub fn prepare_main_thread() {
 /// goroutine has.
 pub(crate) fn arm_main_thread_guard() {
     let remaining = gossamer_runtime::stack_guard::remaining_stack_bytes()
-        .unwrap_or(gossamer_coro::DEFAULT_STACK_BYTES);
+        .unwrap_or(gossamer_coro::UNKNOWN_STACK_BYTES);
     gossamer_coro::arm_stack_guard(remaining.saturating_sub(gossamer_coro::STACK_GUARD_MARGIN));
 }
 

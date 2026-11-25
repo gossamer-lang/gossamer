@@ -46,7 +46,7 @@ Defaults: 1000 connections, 60-second window, bundled harness.
 fn repo_root() -> String {
     let mut directory = env::current_dir().unwrap_or(".")
     loop {
-        if fs::is_dir(path::join(directory, "examples/projects/web_service_full")) {
+        if fs::is_dir(path::join(directory, "examples/projects/web_service_full").expect("relative segment")) {
             return directory
         }
         match path::parent(directory) {
@@ -106,7 +106,7 @@ fn parse_settings() -> Settings {
 /// or "" when it is on none.
 fn on_path(name: String) -> String {
     for directory in env::var("PATH").unwrap_or("").split(":") {
-        let candidate = path::join(directory, name)
+        let candidate = path::join(directory, name).expect("relative segment")
         if fs::is_file(candidate) {
             return candidate
         }
@@ -117,13 +117,13 @@ fn on_path(name: String) -> String {
 /// The service binary `gos build --release` produced, wherever the
 /// layout puts it.
 fn service_binary(service_dir: String) -> Option<String> {
-    let release = path::join(service_dir, "target/release")
+    let release = path::join(service_dir, "target/release").expect("relative segment")
     for entry in fs::read_dir(release).unwrap_or(#[]) {
         if entry.is_file {
             return Some(entry.path)
         }
     }
-    for candidate in #[path::join(service_dir, "main"), path::join(service_dir, "src/main")] {
+    for candidate in #[path::join(service_dir, "main").expect("relative segment"), path::join(service_dir, "src/main").expect("relative segment")] {
         if fs::is_file(candidate) {
             return Some(candidate)
         }
@@ -181,7 +181,7 @@ fn metric(body: String, name: String) -> String {
 fn main() {
     let settings = parse_settings()
     let root = repo_root()
-    let service_dir = path::join(root, "examples/projects/web_service_full")
+    let service_dir = path::join(root, "examples/projects/web_service_full").expect("relative segment")
     let log_dir = fs::temp_dir("gos-bench-").unwrap_or(env::temp_dir())
     println("[bench] log dir: {}", log_dir)
     println(
@@ -193,8 +193,8 @@ fn main() {
 
     // Release mode so DWARF and the write barriers are exercised end
     // to end.
-    let gos = path::join(root, "target/release/gos")
-    let source = path::join(service_dir, "src/main.gos")
+    let gos = path::join(root, "target/release/gos").expect("relative segment")
+    let source = path::join(service_dir, "src/main.gos").expect("relative segment")
     let build_env = #[("GOSSAMER_PROCS", format("{}", settings.procs))]
     match process::run_in(gos, #["build", "--release", source], root, build_env) {
         Ok(result) => {
@@ -233,7 +233,7 @@ fn main() {
     let vegeta = if settings.vegeta { on_path("vegeta") } else { "" }
     if vegeta.is_empty() {
         println("[bench] running bundled harness")
-        let harness = path::join(root, "benchmarks/web_service_load/harness.gos")
+        let harness = path::join(root, "benchmarks/web_service_load/harness.gos").expect("relative segment")
         let arguments = #[
             "run"
             harness
@@ -255,8 +255,8 @@ fn main() {
         // `vegeta attack` reads its targets from a file and writes its
         // binary result set to one, which `vegeta report` renders -
         // the same two stages the shell spelled as a pipe.
-        let targets = path::join(log_dir, "targets.txt")
-        let results = path::join(log_dir, "results.bin")
+        let targets = path::join(log_dir, "targets.txt").expect("relative segment")
+        let results = path::join(log_dir, "results.bin").expect("relative segment")
         let target_line = format("GET https://127.0.0.1:{}/notes\n", settings.port)
         let _ = fs::write(targets, target_line.as_bytes())
         let attack = #[

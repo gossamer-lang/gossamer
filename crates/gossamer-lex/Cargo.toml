@@ -15,6 +15,13 @@ workspace = true
 serde = { workspace = true }
 thiserror = { workspace = true }
 unicode-ident = { workspace = true }
+unicode-normalization = { workspace = true }
+unicode-security = { workspace = true }
+
+[build-dependencies]
+unicode-ident = { workspace = true }
+unicode-normalization = { workspace = true }
+unicode-security = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

@@ -29,25 +29,25 @@ fn main() {
         Ok(d) => d
         Err(e) => { println("temp_dir failed: {}", e); return }
     }
-    let nested = path::join(root, "nested")
+    let nested = path::join(root, "nested").expect("relative segment")
     if let Err(e) = fs::create_dir_all(nested) {
         println("mkdir failed: {}", e)
         return
     }
-    let _ = fs::write(path::join(root, "alpha.gos"), "a".as_bytes())
-    let _ = fs::write(path::join(root, "beta.gos"), "b".as_bytes())
-    let _ = fs::write(path::join(root, "gamma.txt"), "c".as_bytes())
-    let _ = fs::write(path::join(nested, "delta.gos"), "d".as_bytes())
+    let _ = fs::write(path::join(root, "alpha.gos").expect("relative segment"), "a".as_bytes())
+    let _ = fs::write(path::join(root, "beta.gos").expect("relative segment"), "b".as_bytes())
+    let _ = fs::write(path::join(root, "gamma.txt").expect("relative segment"), "c".as_bytes())
+    let _ = fs::write(path::join(nested, "delta.gos").expect("relative segment"), "d".as_bytes())
 
-    match path::glob(path::join(root, "*.gos")) {
+    match path::glob(path::join(root, "*.gos").expect("relative segment")) {
         Ok(found) => println("top={}", names_of(found).join(","))
         Err(e) => println("glob failed: {}", e)
     }
-    match path::glob(path::join(root, "**/*.gos")) {
+    match path::glob(path::join(root, "**/*.gos").expect("relative segment")) {
         Ok(found) => println("deep={}", names_of(found).join(","))
         Err(e) => println("glob failed: {}", e)
     }
-    match path::glob(path::join(root, "*.md")) {
+    match path::glob(path::join(root, "*.md").expect("relative segment")) {
         Ok(found) => println("none={}", found.len())
         Err(e) => println("glob failed: {}", e)
     }

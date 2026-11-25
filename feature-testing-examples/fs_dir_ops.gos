@@ -9,11 +9,11 @@ use std::fs
 use std::path
 
 fn main() {
-    let base = path::join(env::temp_dir(), "gossamer_parity_dirops")
+    let base = path::join(env::temp_dir(), "gossamer_parity_dirops").expect("relative segment")
     let _ = fs::remove_dir_all(base)
 
     // Non-recursive create on a missing parent fails.
-    let nested = path::join(base, "a/b")
+    let nested = path::join(base, "a/b").expect("relative segment")
     match fs::create_dir(nested) {
         Ok(_) => println("create_dir missing-parent: ok")
         Err(_) => println("create_dir missing-parent: err")
@@ -27,7 +27,7 @@ fn main() {
     println("nested is_dir: {}", fs::is_dir(nested))
 
     // Non-recursive create of a fresh leaf under an existing parent.
-    let leaf = path::join(base, "c")
+    let leaf = path::join(base, "c").expect("relative segment")
     match fs::create_dir(leaf) {
         Ok(_) => println("create_dir leaf: ok")
         Err(_) => println("create_dir leaf: err")

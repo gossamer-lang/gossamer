@@ -755,6 +755,7 @@ mod items;
 mod literals;
 pub use literals::is_map_literal_block;
 mod map_index;
+mod mutex_guard;
 mod patterns;
 mod simd;
 mod try_op;
@@ -2873,6 +2874,10 @@ impl Lowerer<'_> {
     fn lower_block(&mut self, block: &AstBlock, span: Span) -> HirBlock {
         let mut stmts = Vec::new();
         for stmt in &block.stmts {
+            if let Some(guard) = self.lower_guard_let(stmt) {
+                stmts.extend(guard);
+                continue;
+            }
             stmts.push(self.lower_stmt(stmt));
         }
         // A tail expression whose value is unit is statement-shaped

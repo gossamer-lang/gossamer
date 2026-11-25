@@ -8,6 +8,7 @@
 mod comment;
 mod cursor;
 mod diagnostic;
+mod identifiers;
 mod interpolation;
 mod lexer;
 mod number;
@@ -20,6 +21,7 @@ mod symbol;
 mod token;
 
 pub use diagnostic::LexError;
+pub use identifiers::{confusable_identifiers, mixes_scripts};
 pub use interpolation::{InterpolationPiece, Placeholder, interpolation_pieces, scan_placeholder};
 pub use lexer::{Lexer, mentions_comptime, tokenize};
 pub use positions::{SourcePositions, set_source_positions, source_position};

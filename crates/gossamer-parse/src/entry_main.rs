@@ -61,12 +61,15 @@ pub fn synthesize_entry_main(sf: &mut SourceFile) -> Vec<ParseDiagnostic> {
         (None, None)
     };
     if uses_try && !has_std_errors_use(sf) {
-        // The synthesized signature names `errors::Error`; bring it into scope.
-        sf.uses.push(UseDecl::simple(
-            id(),
+        // The synthesized signature names `errors::Error`; bring it into
+        // scope for that signature alone.
+        sf.uses.push(UseDecl::synthetic(
             span,
             UseTarget::Module(ModulePath::from_names(["std", "errors"])),
         ));
+        if let Some(ret) = &ret {
+            sf.desugared_paths.extend(error_type_ids(ret));
+        }
     }
 
     let body = Expr::new(
@@ -182,6 +185,29 @@ fn result_unit_error_type(id: &mut impl FnMut() -> NodeId, span: Span) -> Type {
             )],
         }),
     )
+}
+
+/// The ids of the `errors::Error` type nodes inside `ty`.
+fn error_type_ids(ty: &Type) -> Vec<NodeId> {
+    let TypeKind::Path(path) = &ty.kind else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if path
+        .segments
+        .first()
+        .is_some_and(|seg| seg.name.name == "errors")
+    {
+        out.push(ty.id);
+    }
+    for seg in &path.segments {
+        for arg in &seg.generics {
+            if let GenericArg::Type(inner) = arg {
+                out.extend(error_type_ids(inner));
+            }
+        }
+    }
+    out
 }
 
 /// Builds the `Ok(())` expression used as the implicit tail of a `?`-using

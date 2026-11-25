@@ -71,13 +71,32 @@ impl TokenStream {
                 _ => tokens.push(token),
             }
         }
+        let mut lex_errors = lexer.take_diagnostics();
+        let confusable = gossamer_lex::confusable_identifiers(source, &tokens);
+        // A name is reported once, at its first use, and a name that looks
+        // like another is reported as that, which says more than that it
+        // mixes scripts.
+        let text = |span: Span| source.get(span.start as usize..span.end as usize);
+        let mut reported: Vec<&str> = confusable.iter().filter_map(|c| text(c.span())).collect();
+        lex_errors.retain(|err| match err {
+            LexError::MixedScriptIdent { span } => match text(*span) {
+                Some(name) if reported.contains(&name) => false,
+                Some(name) => {
+                    reported.push(name);
+                    true
+                }
+                None => true,
+            },
+            _ => true,
+        });
+        lex_errors.extend(confusable);
         Self {
             file,
             tokens,
             position: 0,
             eof_span,
             comments,
-            lex_errors: lexer.take_diagnostics(),
+            lex_errors,
         }
     }
 

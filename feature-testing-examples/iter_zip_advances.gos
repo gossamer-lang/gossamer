@@ -2,6 +2,7 @@
 // and `for` walks it, over any element types, identically on every tier. A
 // set's walk and a `Vec` of enums answer `next` the same way.
 struct Pt { x: i64, y: i64 }
+#[derive(PartialOrd, Ord)]
 enum K { A(i64), B }
 fn main() {
     let a = #[1, 2, 3]

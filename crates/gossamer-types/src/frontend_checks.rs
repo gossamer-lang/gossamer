@@ -126,6 +126,16 @@ pub fn check_resolved_unit(
         for diag in crate::check_shadowed_mut(sf, resolutions) {
             fatal.push(diag.to_diagnostic());
         }
+        // A computed float compared with a literal it cannot hold exactly is
+        // false for the inputs that reach that decimal.
+        for diag in crate::check_float_equalities(sf, resolutions, &table, tcx) {
+            fatal.push(diag.to_diagnostic());
+        }
+        // A mutex guard is released by the block that binds it, so it is
+        // used for nothing but its own `unlock()`.
+        for diag in crate::check_guard_uses(sf, resolutions, &table, tcx) {
+            fatal.push(diag.to_diagnostic());
+        }
         // A parallel adapter's callback runs on many workers at once, so one
         // whose purity cannot be shown is refused on every tier.
         if !earlier_fatal && fatal.is_empty() {
@@ -200,6 +210,7 @@ pub fn typed_lints(
         cycles,
     ));
     out.extend(signed_remainders(sf, resolutions, table, tcx, &registry));
+    out.extend(float_and_task_lints(sf, resolutions, table, tcx, &registry));
     let split_updates = crate::find_split_shared_updates(sf, resolutions, table, tcx)
         .into_iter()
         .map(|found| {
@@ -281,6 +292,58 @@ fn checker_lints(
             vec![(diag.span, rendered.title, help)],
         ));
     }
+    out
+}
+
+/// `GL0025` for an inexact float literal compared with a value not computed
+/// in sight, and `GL0065` for a task handle `main` never joins, at the levels
+/// `registry` gives them.
+fn float_and_task_lints(
+    sf: &SourceFile,
+    resolutions: &Resolutions,
+    table: &TypeTable,
+    tcx: &TyCtxt,
+    registry: &gossamer_lint::Registry,
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let float_equalities = crate::find_inexact_float_equalities(sf, resolutions, table, tcx)
+        .into_iter()
+        .filter(|found| found.refusal.is_none())
+        .map(|found| {
+            (
+                found.span,
+                "equality against a float literal its type cannot hold exactly".to_string(),
+                Some("compare `(x - y).abs() < eps` with an explicit tolerance".to_string()),
+            )
+        })
+        .collect();
+    out.extend(gossamer_lint::leveled(
+        crate::FLOAT_EQ_LINT,
+        sf,
+        registry,
+        float_equalities,
+    ));
+    let unjoined = crate::find_unjoined_tasks(sf, resolutions)
+        .into_iter()
+        .map(|task| {
+            let name = task.name;
+            (
+                task.span,
+                format!(
+                    "`{name}` is never joined: nothing waits for its task, so the program goes on, and can finish, before the task's work is done"
+                ),
+                Some(format!(
+                    "call `{name}.join()` where the task's work must be done; a task meant to run on its own is spawned without a binding: `spawn(..)`"
+                )),
+            )
+        })
+        .collect();
+    out.extend(gossamer_lint::leveled(
+        crate::UNJOINED_TASK_LINT,
+        sf,
+        registry,
+        unjoined,
+    ));
     out
 }
 

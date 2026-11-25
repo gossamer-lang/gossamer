@@ -26,7 +26,7 @@ const FIXTURE_LIST: String = "scripts/cross_fixtures.txt"
 fn repo_root() -> String {
     let mut directory = env::current_dir().unwrap_or(".")
     loop {
-        if fs::is_file(path::join(directory, FIXTURE_LIST)) {
+        if fs::is_file(path::join(directory, FIXTURE_LIST).expect("relative segment")) {
             return directory
         }
         match path::parent(directory) {
@@ -40,7 +40,7 @@ fn repo_root() -> String {
 /// or "" when it is on none.
 fn on_path(name: String) -> String {
     for directory in env::var("PATH").unwrap_or("").split(":") {
-        let candidate = path::join(directory, name)
+        let candidate = path::join(directory, name).expect("relative segment")
         if fs::is_file(candidate) {
             return candidate
         }
@@ -108,8 +108,8 @@ fn main() {
     }
     let bins_root = args[0]
     let root = repo_root()
-    let gos = env::var("GOS_BIN").unwrap_or(path::join(target_dir(root), "debug/gos"))
-    let list = match fs::read_to_string(path::join(root, FIXTURE_LIST)) {
+    let gos = env::var("GOS_BIN").unwrap_or(path::join(target_dir(root), "debug/gos").expect("relative segment"))
+    let list = match fs::read_to_string(path::join(root, FIXTURE_LIST).expect("relative segment")) {
         Ok(text) => text
         Err(e) => {
             eprintln("qemu diff: reading the fixture list: {}", e)
@@ -120,9 +120,9 @@ fn main() {
 
     let mut failed = false
     for artifact in subdirectories(bins_root) {
-        let artifact_dir = path::join(bins_root, artifact)
+        let artifact_dir = path::join(bins_root, artifact).expect("relative segment")
         for triple in subdirectories(artifact_dir) {
-            let triple_dir = path::join(artifact_dir, triple)
+            let triple_dir = path::join(artifact_dir, triple).expect("relative segment")
             let arch = triple.split_once("-").map(|(arch, _)| arch).unwrap_or(triple)
             let runner = runner_for(arch)
             if runner == "SKIP" {
@@ -131,7 +131,7 @@ fn main() {
             }
             for src in sources {
                 let stem = path::file_stem(src).unwrap_or(src)
-                let binary = path::join(triple_dir, stem)
+                let binary = path::join(triple_dir, stem).expect("relative segment")
                 // `actions/upload-artifact` and `download-artifact` do
                 // not preserve Unix file permissions - every downloaded
                 // file lands as 644 - so the executable bit set at
@@ -144,7 +144,7 @@ fn main() {
                     failed = true
                     continue
                 }
-                let Some(vm_out) = output_of(gos, #["run", path::join(root, src)]) else {
+                let Some(vm_out) = output_of(gos, #["run", path::join(root, src).expect("relative segment")]) else {
                     println("::error::the VM could not run {}", src)
                     failed = true
                     continue
@@ -181,5 +181,5 @@ fn main() {
 /// `root` unless absolute, else `<root>/target`.
 fn target_dir(root: String) -> String {
     let dir = env::var("CARGO_TARGET_DIR").unwrap_or("target")
-    if path::is_absolute(dir) { dir } else { path::join(root, dir) }
+    if path::is_absolute(dir) { dir } else { path::join(root, dir).expect("relative segment") }
 }

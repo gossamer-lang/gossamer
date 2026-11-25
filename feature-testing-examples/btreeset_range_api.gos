@@ -1,7 +1,9 @@
 // A `BTreeSet` answers its elements between two bounds in order for every
 // range form, and its first and last elements, reading or taking them, over
 // any ordered element type. Identical on every tier.
+#[derive(PartialOrd, Ord)]
 struct Pt { x: i64, y: i64 }
+#[derive(PartialOrd, Ord)]
 enum Level { Low, Mid(i64), High }
 
 fn main() {

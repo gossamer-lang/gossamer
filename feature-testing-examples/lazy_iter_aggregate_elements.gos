@@ -4,6 +4,7 @@
 // pulled. The counts below are the proof - a chain that materialised its
 // source would run the closure once per element of the whole sequence.
 
+#[derive(PartialOrd, Ord)]
 struct Sample {
     id: i64
     weight: i64

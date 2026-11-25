@@ -9,10 +9,12 @@
 
 packed enum Direction { North, South, East, West }
 
+#[derive(PartialOrd, Ord)]
 enum Level: u16 { Debug, Info, Warn, Error }
 
 packed enum Bit: u1 { Off, On }
 
+#[derive(PartialOrd, Ord)]
 packed enum Nibble: u4 { Zero, One, Two, Three, Four, Five, Six, Seven }
 
 enum Wide { A, B, C }

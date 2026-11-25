@@ -228,13 +228,14 @@ mod autoderive_tests {
         );
     }
 
-    /// A field typed through a dependency's `pub type` alias renders and
-    /// compares as the declaration the alias names.
+    /// A field typed through a dependency's `pub type` alias renders,
+    /// compares, and orders as the declaration the alias names.
     #[test]
     fn a_field_typed_through_a_dependency_alias_renders_and_compares() {
         let source = "#[dependency(\"dev.gossamer/windowing\")]\nmod windowing {\n    \
                       pub type DragOperation = drag::DragOperation\n    \
-                      mod drag {\n        pub enum DragOperation { Copy, Move }\n    }\n}\n\
+                      mod drag {\n        #[derive(PartialOrd, Ord)]\n        pub enum DragOperation { Copy, Move }\n    }\n}\n\
+                      #[derive(PartialOrd, Ord)]\n\
                       enum Msg { Done(String, Option<windowing::DragOperation>) }\n";
         let augmented = super::augment_source(source);
         let msg = augmented.split("impl Msg {").nth(1).unwrap_or_default();
@@ -249,13 +250,13 @@ mod autoderive_tests {
     #[test]
     fn dependency_fields_through_crate_paths_and_imports_render_and_compare() {
         let source = "#[dependency(\"dev.gossamer/windowing\")]\nmod windowing {\n    \
-                      pub struct Rect { w: i64 }\n}\n\
+                      #[derive(PartialOrd, Ord)]\n    pub struct Rect { w: i64 }\n}\n\
                       #[dependency(\"dev.gossamer/gui\")]\nmod gui {\n    \
                       use crate::geometry::Rect\n    \
                       use crate::render::icons\n    \
-                      mod geometry {\n        pub struct Rect { x: i64 }\n    }\n    \
-                      mod render {\n        mod icons {\n            pub enum Icon { Add, Search }\n        }\n    }\n    \
-                      pub enum Msg { Moved(Rect), Shown(Option<crate::render::icons::Icon>), Picked(icons::Icon) }\n}\n";
+                      mod geometry {\n        #[derive(PartialOrd, Ord)]\n        pub struct Rect { x: i64 }\n    }\n    \
+                      mod render {\n        mod icons {\n            #[derive(PartialOrd, Ord)]\n            pub enum Icon { Add, Search }\n        }\n    }\n    \
+                      #[derive(PartialOrd, Ord)]\n    pub enum Msg { Moved(Rect), Shown(Option<crate::render::icons::Icon>), Picked(icons::Icon) }\n}\n";
         let augmented = super::augment_source(source);
         let msg = augmented.split("::Msg {\n").nth(1).unwrap_or_default();
         for method in ["fn to_string(&self)", "fn fmt(&self)", "fn eq(&self", "fn cmp(&self"] {

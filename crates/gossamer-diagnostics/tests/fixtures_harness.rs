@@ -70,6 +70,14 @@ fn collect_diagnostics(source: &str, file_name: &str) -> Vec<Diagnostic> {
         out.push(diag.to_diagnostic());
     }
 
+    for diag in gossamer_types::check_float_equalities(&sf, &resolutions, &table, &tcx) {
+        out.push(diag.to_diagnostic());
+    }
+
+    for diag in gossamer_types::check_guard_uses(&sf, &resolutions, &table, &tcx) {
+        out.push(diag.to_diagnostic());
+    }
+
     out.extend(typed_lints(&sf, &resolutions, &table, &tcx, &type_diags));
 
     out

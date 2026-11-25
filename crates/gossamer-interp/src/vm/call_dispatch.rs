@@ -217,7 +217,7 @@ impl Vm {
                 let mut resumed_fault: Option<RuntimeError> = None;
                 // Byte-precise native-stack guard, consulted before the frame
                 // count. A JIT-compiled body recurses on the real OS stack
-                // (not the heap frame pool `MAX_HEAP_FRAME_BYTES` bounds), so a
+                // (not the heap frame pool `heap_frame_limit` bounds), so a
                 // frame count alone cannot stop it before the guard page; the
                 // armed byte budget catches that recursion at the boundary and
                 // raises a clean stack-overflow, ending only the current
@@ -552,7 +552,7 @@ impl Vm {
                             let bytes =
                                 parent.heap_bytes() + std::mem::size_of::<VmCallStackFrame>();
                             let held = self.heap_frame_bytes.get();
-                            if held.saturating_add(bytes) > MAX_HEAP_FRAME_BYTES {
+                            if held.saturating_add(bytes) > crate::vm::heap_frame_limit() {
                                 let released = suspended.len().saturating_add(1);
                                 self.call_depth
                                     .set(self.call_depth.get().saturating_sub(released));

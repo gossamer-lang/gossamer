@@ -4718,7 +4718,7 @@ fn a_module_type_sharing_a_root_types_name_keeps_its_own_order() {
         &[
             (
                 "src/geo.gos",
-                "pub struct Point { x: i64 }\n\n\
+                "#[derive(PartialOrd, Ord)]\npub struct Point { x: i64 }\n\n\
                  pub fn ordered() -> Vec<Point> {\n\
                  \x20   let mut ps = #[Point { x: 9 }, Point { x: 3 }]\n\
                  \x20   ps.sort()\n\
@@ -4728,6 +4728,7 @@ fn a_module_type_sharing_a_root_types_name_keeps_its_own_order() {
             (
                 "src/main.gos",
                 "use geo\n\n\
+                 #[derive(PartialOrd, Ord)]\n\
                  struct Point { x: i64 }\n\n\
                  fn main() {\n\
                  \x20   let mut ps = #[Point { x: 2 }, Point { x: 1 }]\n\
@@ -5124,7 +5125,7 @@ fn a_project_module_named_like_a_std_module_keeps_its_own_items() {
                 "src/main.gos",
                 "use std::path\nuse crate::render::path::Path\nuse crate::other\n\n\
                  fn main() {\n    let p = Path::default()\n    let q = crate::render::path::Path { cmds: #[1.0] }\n\
-                 \x20   println(f\"{p.cmds.len()} {q.cmds.len()} {other::joined(\"/a\")} {path::join(\"/b\", \"c\")}\")\n}\n",
+                 \x20   println(f\"{p.cmds.len()} {q.cmds.len()} {other::joined(\"/a\")} {path::join(\"/b\", \"c\").unwrap_or(\"\")}\")\n}\n",
             ),
             ("src/render/mod.gos", "pub mod path\n"),
             (
@@ -5133,7 +5134,7 @@ fn a_project_module_named_like_a_std_module_keeps_its_own_items() {
             ),
             (
                 "src/other.gos",
-                "use std::path\n\npub fn joined(p: String) -> String { path::join(p, \"z\") }\n",
+                "use std::path\n\npub fn joined(p: String) -> String { path::join(p, \"z\").unwrap_or(\"\") }\n",
             ),
         ],
     );

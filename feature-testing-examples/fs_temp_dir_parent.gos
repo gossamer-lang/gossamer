@@ -25,7 +25,7 @@ fn run() -> Result<(), errors::Error> {
     println(f"distinct: {first != second}")
     println(f"both folders: {fs::is_dir(first) && fs::is_dir(second)}")
     println(f"made in rounds: {make_folders(cache, 20)}")
-    let missing = path::join(cache, "absent")
+    let missing = path::join(cache, "absent")?
     match fs::temp_dir("cfg", parent: Some(missing)) {
         Ok(_) => println("missing parent: created")
         Err(_) => println("missing parent: refused")

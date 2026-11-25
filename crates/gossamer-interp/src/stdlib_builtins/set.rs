@@ -652,6 +652,12 @@ struct LockState {
     /// among the program's pending handoffs, so the woken acquirer is not
     /// read as asleep before it runs.
     ready: bool,
+    /// The goroutine holding the lock. A VM goroutine is its own OS thread.
+    owner: Option<std::thread::ThreadId>,
+    /// Counts acquisitions, so a guard releases only the hold it took.
+    generation: i64,
+    /// The panic a holder unwound with while releasing the lock.
+    poisoned: Option<String>,
 }
 
 impl MutexCell {
@@ -660,10 +666,12 @@ impl MutexCell {
         self.state.lock().held
     }
 
-    /// Acquires the lock, parking until it is free. Answers `false`, holding
-    /// nothing, when every participant is waiting and nothing is left that
-    /// could release it.
-    pub(crate) fn lock(&self) -> bool {
+    /// Acquires the lock, parking until it is free, and answers the
+    /// acquisition's generation. Answers `Err(None)`, holding nothing, when
+    /// every participant is waiting and nothing is left that could release
+    /// it, and `Err(Some(cause))`, holding nothing, when a panic poisoned the
+    /// lock.
+    pub(crate) fn lock(&self) -> Result<i64, Option<String>> {
         let mut state = self.state.lock();
         while state.held {
             state.waiting += 1;
@@ -672,7 +680,7 @@ impl MutexCell {
                     || crate::stdlib_builtins::cohort::deadline_pending()
             }) else {
                 state.waiting -= 1;
-                return false;
+                return Err(None);
             };
             self.available.wait(&mut state);
             state.waiting -= 1;
@@ -681,13 +689,35 @@ impl MutexCell {
             state.ready = false;
             crate::vm::goroutine::adjust_pending_handoffs(false);
         }
+        if let Some(cause) = state.poisoned.clone() {
+            let waiting = state.waiting > 0;
+            drop(state);
+            if waiting {
+                self.available.notify_one();
+            }
+            return Err(Some(cause));
+        }
         state.held = true;
-        true
+        state.owner = Some(std::thread::current().id());
+        state.generation += 1;
+        Ok(state.generation)
     }
 
-    /// Releases the lock and wakes one parked acquirer.
+    /// The generation of the hold the calling goroutine has, if it holds
+    /// the lock.
+    pub(crate) fn held_generation(&self) -> Option<i64> {
+        let state = self.state.lock();
+        (state.held && state.owner == Some(std::thread::current().id())).then_some(state.generation)
+    }
+
+    /// Releases the lock and wakes one parked acquirer, poisoning it when a
+    /// panic is unwinding through the release.
     pub(crate) fn unlock(&self) {
         let mut state = self.state.lock();
+        if let Some(cause) = crate::vm::run::unwinding_panic() {
+            state.poisoned = Some(cause);
+        }
+        state.owner = None;
         state.held = false;
         if state.waiting > 0 && !state.ready {
             state.ready = true;

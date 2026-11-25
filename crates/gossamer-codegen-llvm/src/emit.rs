@@ -2041,8 +2041,14 @@ fn module_header(triple: &str) -> String {
     // instruction and has to walk out of it, and DWARF unwinding is not
     // async-signal-safe, so the frame chain has to be there. This must be
     // an IR attribute: `clang -x ir` ignores `-fno-omit-frame-pointer`,
-    // which only sets it when clang generates the IR itself.
-    writeln!(out, "attributes #0 = {{ \"frame-pointer\"=\"all\" }}").unwrap();
+    // which only sets it when clang generates the IR itself. A frame larger
+    // than a page probes each page it spans, top down, so it reaches the
+    // guard page below the stack instead of stepping over it.
+    writeln!(
+        out,
+        "attributes #0 = {{ \"frame-pointer\"=\"all\" \"probe-stack\"=\"inline-asm\" }}"
+    )
+    .unwrap();
     writeln!(out).unwrap();
     for d in LLVM_SPECIAL_DECLS {
         writeln!(out, "{d}").unwrap();

@@ -124,8 +124,9 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
         bound_methods: ORD_METHODS,
         signature: "{ fn cmp(&self, other: Self) -> i64 }",
         doc: "What `<`, `<=`, `>`, and `>=` answer: negative when the receiver \
-              orders first, zero when the two tie, positive otherwise. Values \
-              compare lexicographically by declaration order with no `impl`.",
+              orders first, zero when the two tie, positive otherwise. A struct \
+              or enum is ordered only through this `impl` or \
+              `#[derive(PartialOrd, Ord)]`, which orders by declaration order.",
         instead: "",
         example: "impl PartialOrd for Point { fn cmp(&self, other: Point) -> i64 { self.x - other.x } }",
     },

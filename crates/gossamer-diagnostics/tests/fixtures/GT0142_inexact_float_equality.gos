@@ -1,0 +1,10 @@
+// ERROR: GT0142
+
+fn total(x: f64, y: f64) -> bool {
+    let a = x + y
+    a == 0.3
+}
+
+fn main() {
+    println(total(0.1, 0.2))
+}

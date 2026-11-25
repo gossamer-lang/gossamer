@@ -22,7 +22,6 @@ use crate::naming;
 pub(crate) fn run_lint(id: &str, sf: &SourceFile, src: &str) -> Vec<Finding> {
     match id {
         "unused_variable" => lint_unused_variable(sf),
-        "unjoined_task" => lint_unjoined_task(sf),
         "unwrap_used" => lint_unwrap_used(sf),
         "unused_import" => lint_unused_import(sf),
         "unused_mut_variable" => lint_unused_mut_variable(sf),
@@ -76,7 +75,6 @@ pub(crate) fn run_lint(id: &str, sf: &SourceFile, src: &str) -> Vec<Finding> {
         "self_compare" => lint_self_compare(sf),
         "identity_op" => lint_identity_op(sf),
         "unit_let" => lint_unit_let(sf),
-        "float_eq_zero" => lint_float_eq_zero(sf),
         "empty_else" => lint_empty_else(sf),
         "match_bool" => lint_match_bool(sf),
         "needless_parens" => lint_needless_parens(sf, src),
@@ -382,6 +380,9 @@ fn unused_let_bindings(block: &Block) -> Vec<(String, Span, bool)> {
             && let Some((name, span, _)) = ident_name(pattern)
             && !name.starts_with('_')
         {
+            if init.as_ref().is_some_and(|init| is_lock_guard(init)) {
+                continue;
+            }
             let spawned = init.as_ref().is_some_and(|init| is_spawn_call(init));
             bindings.push((name.to_string(), span, spawned));
         }
@@ -393,6 +394,15 @@ fn unused_let_bindings(block: &Block) -> Vec<(String, Span, bool)> {
     }
     bindings.retain(|(name, _, _)| !used.contains(name));
     bindings
+}
+
+/// Whether `expr` takes a lock whose guard a `let` binds: the binding holds
+/// the lock to the end of its block, so it is in use without being named.
+pub(crate) fn is_lock_guard(expr: &Expr) -> bool {
+    matches!(
+        &expr.kind,
+        ExprKind::MethodCall { name, args, .. } if name.name == "lock" && args.is_empty()
+    )
 }
 
 /// Whether `expr` is a call of `spawn`, which answers the task's join handle.
@@ -416,29 +426,6 @@ fn lint_unused_variable(sf: &SourceFile) -> Vec<Finding> {
                     span,
                     format!("unused variable `{name}`"),
                     Some(format!("prefix with `_` to silence: `_{name}`")),
-                ));
-            }
-        }
-    });
-    out
-}
-
-fn lint_unjoined_task(sf: &SourceFile) -> Vec<Finding> {
-    let mut out = Vec::new();
-    each_fn_body(sf, |body| {
-        let Some(block) = as_block(body) else {
-            return;
-        };
-        for (name, span, spawned) in unused_let_bindings(block) {
-            if spawned {
-                out.push((
-                    span,
-                    format!(
-                        "`{name}` is never joined: nothing waits for its task, so the program goes on, and can finish, before the task's work is done"
-                    ),
-                    Some(format!(
-                        "call `{name}.join()` where the task's work must be done; a task meant to run on its own is spawned without a binding: `spawn(..)`"
-                    )),
                 ));
             }
         }
@@ -1109,7 +1096,6 @@ fn lint_self_assignment(sf: &SourceFile) -> Vec<Finding> {
 /// continuation the writer meant as part of the line above becomes a
 /// stand-alone expression whose value nothing reads.
 fn lint_no_effect_statement(sf: &SourceFile) -> Vec<Finding> {
-    let declared = declared_fn_names(&sf.items);
     let mut out = Vec::new();
     each_fn_body(sf, |body| {
         walk_expr(body, &mut |expr| {
@@ -1129,14 +1115,6 @@ fn lint_no_effect_statement(sf: &SourceFile) -> Vec<Finding> {
                         expr.span,
                         "this expression's value is not used".to_string(),
                         Some("bind it, or join it to the line above".to_string()),
-                    ));
-                } else if let Some(method) = discarded_value_method(expr, &declared) {
-                    out.push((
-                        expr.span,
-                        format!("`{method}` answers a new value, which is not used"),
-                        Some(format!(
-                            "`{method}` leaves its receiver unchanged; bind what it answers"
-                        )),
                     ));
                 }
             }
@@ -1159,51 +1137,6 @@ fn is_comparison(expr: &Expr) -> bool {
         } => is_comparison(lhs) && is_comparison(rhs),
         _ => false,
     }
-}
-
-/// Builtin methods that answer a new value and write nothing, so a call
-/// whose result is dropped does nothing. `sort`, `reverse`, `push`, and the
-/// other in-place writers are not here.
-const VALUE_ONLY_METHODS: &[&str] = &[
-    "dedup",
-    "rev",
-    "trim",
-    "trim_start",
-    "trim_end",
-    "to_uppercase",
-    "to_lowercase",
-    "replace",
-    "repeat",
-    "to_string",
-    "clone",
-    "len",
-    "is_empty",
-    "contains",
-    "starts_with",
-    "ends_with",
-    "flatten",
-    "concat",
-];
-
-/// The method a statement calls when it is a value-only builtin applied to
-/// operands that compute without effect. A name some function in the file
-/// declares may be a user method that writes its receiver, so it is left out.
-fn discarded_value_method<'a>(expr: &'a Expr, declared: &BTreeSet<&str>) -> Option<&'a str> {
-    let ExprKind::MethodCall {
-        receiver,
-        name,
-        args,
-        ..
-    } = &expr.kind
-    else {
-        return None;
-    };
-    let method = name.name.as_str();
-    (VALUE_ONLY_METHODS.contains(&method)
-        && !declared.contains(method)
-        && computes_without_effect(receiver)
-        && args.iter().all(computes_without_effect))
-    .then_some(method)
 }
 
 fn declared_fn_names(items: &[Item]) -> BTreeSet<&str> {
@@ -1708,40 +1641,6 @@ fn as_block_ref(expr: &Expr) -> Option<&Block> {
     } else {
         None
     }
-}
-
-fn lint_float_eq_zero(sf: &SourceFile) -> Vec<Finding> {
-    let mut out = Vec::new();
-    each_fn_body(sf, |body| {
-        walk_expr(body, &mut |expr| {
-            let ExprKind::Binary { op, lhs, rhs } = &expr.kind else {
-                return;
-            };
-            if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
-                return;
-            }
-            // Exact zero is a value arithmetic produces exactly and a guard
-            // (a divisor, an absent axis) tests exactly, so it is exempt.
-            let nonzero_float = |e: &Expr| match &e.kind {
-                ExprKind::Literal(Literal::Float(text)) => text
-                    .trim_end_matches("f32")
-                    .trim_end_matches("f64")
-                    .replace('_', "")
-                    .parse::<f64>()
-                    .is_ok_and(|v| v != 0.0),
-                _ => false,
-            };
-            if nonzero_float(lhs) || nonzero_float(rhs) {
-                out.push((
-                    expr.span,
-                    "equality against a nonzero float literal is almost never what you want"
-                        .to_string(),
-                    Some("compare `(x - y).abs() < eps` with an explicit tolerance".to_string()),
-                ));
-            }
-        });
-    });
-    out
 }
 
 fn lint_empty_else(sf: &SourceFile) -> Vec<Finding> {

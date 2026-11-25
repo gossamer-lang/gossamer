@@ -103,6 +103,7 @@ fn parse_with(mut parser: Parser<'_>, file: FileId) -> (SourceFile, Vec<ParseDia
     source_file.next_node_id = next_node_id;
     source_file.program_end = generated_section_start(parser.source);
     source_file.named_args = named_args;
+    source_file.desugared_paths = std::mem::take(&mut parser.desugared_paths);
     gossamer_ast::cfg::apply_package_features(&mut source_file);
     let diagnostics = parser.take_diagnostics();
     (source_file, diagnostics)
@@ -136,6 +137,7 @@ pub(crate) fn parse_appended(
     program.uses.extend(parser.take_hoisted_uses());
     program.next_node_id = parser.ids.issued();
     program.named_args.extend(parser.take_named_args());
+    program.desugared_paths.append(&mut parser.desugared_paths);
     program.program_end = generated_section_start(parser.source);
     // Settling is idempotent, so the program's own items, settled by its
     // own parse, come through unchanged.

@@ -1,0 +1,26 @@
+// Indexing past the end of a String names a string in its panic, on every
+// tier, the JIT-compiled body included.
+
+fn count_of(s: String, c: char, upto: i64) -> i64 {
+    let mut n = 0
+    for i in 0..upto {
+        if s[i] == c {
+            n += 1
+        }
+    }
+    n
+}
+
+fn main() {
+    println(count_of("héllo", 'l', 5))
+    let empty = spawn(|| count_of("", 'a', 1))
+    match empty.join() {
+        Ok(n) => println(f"counted {n}")
+        Err(message) => println(f"empty: {message}")
+    }
+    let past = spawn(|| count_of("abc", 'c', 8))
+    match past.join() {
+        Ok(n) => println(f"counted {n}")
+        Err(message) => println(f"past: {message}")
+    }
+}
