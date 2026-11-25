@@ -5452,3 +5452,28 @@ fn a_dependency_import_shadows_a_root_module_of_the_same_name() {
     assert_eq!(out.2, Some(0), "stderr: {}", out.1);
     assert_eq!(out.0.trim(), "1 4", "stdout: {:?}", out.0);
 }
+
+/// Top-level statements that use `?` beside a serde call answer
+/// `Result<(), errors::Error>` with no `use std::errors` in the program,
+/// while a program that names `errors::` itself still has to import it.
+#[test]
+fn top_level_try_beside_serde_calls_needs_no_errors_import() {
+    let dir = fresh_dir("toplevel-try-serde");
+    let accepted = write_source(
+        &dir,
+        "accepted",
+        "struct Rec { n: i64 }\n\nlet text = to_json::<Rec>(Rec { n: 2 })?\nlet back = from_json::<Rec>(text)?\nprintln(f\"{text} {back.n}\")\n",
+    );
+    let out = run_vm(&accepted);
+    assert_eq!(out.2, Some(0), "stderr: {}", out.1);
+    assert_eq!(out.0.trim(), "{\"n\":2} 2", "stdout: {:?}", out.0);
+    let refused = write_source(
+        &dir,
+        "refused",
+        "struct Rec { n: i64 }\n\nlet text = to_json::<Rec>(Rec { n: 2 })?\nlet e: errors::Error = errors::new(text)\nprintln(e)\n",
+    );
+    let out = run_vm(&refused);
+    let _ = fs::remove_dir_all(&dir);
+    assert_ne!(out.2, Some(0), "stdout: {}", out.0);
+    assert!(out.1.contains("error[GR0001]"), "stderr: {}", out.1);
+}

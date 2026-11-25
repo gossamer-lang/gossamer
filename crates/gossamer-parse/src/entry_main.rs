@@ -60,13 +60,17 @@ pub fn synthesize_entry_main(sf: &mut SourceFile) -> Vec<ParseDiagnostic> {
     } else {
         (None, None)
     };
-    if uses_try && !has_std_errors_use(sf) {
-        // The synthesized signature names `errors::Error`; bring it into
-        // scope for that signature alone.
-        sf.uses.push(UseDecl::synthetic(
-            span,
-            UseTarget::Module(ModulePath::from_names(["std", "errors"])),
-        ));
+    // The synthesized signature names `errors::Error`. Unless the program
+    // imports `errors` itself, the import that resolves it is one the
+    // toolchain adds (here, or for other code it generated), which reaches
+    // only the paths it writes.
+    if uses_try && !has_std_errors_use(sf, false) {
+        if !has_std_errors_use(sf, true) {
+            sf.uses.push(UseDecl::synthetic(
+                span,
+                UseTarget::Module(ModulePath::from_names(["std", "errors"])),
+            ));
+        }
         if let Some(ret) = &ret {
             sf.desugared_paths.extend(error_type_ids(ret));
         }
@@ -124,23 +128,28 @@ pub(crate) fn body_uses_try(stmts: &[Stmt]) -> bool {
 /// Returns `true` when `sf` already imports `errors` from `std` (as
 /// `use std::errors` or `use std::{ errors, ... }`), so synthesis does not
 /// add a duplicate import.
-fn has_std_errors_use(sf: &SourceFile) -> bool {
-    sf.uses.iter().any(|u| match &u.target {
-        UseTarget::Module(path) => {
-            let segs = &path.segments;
-            if segs.first().map(|s| s.name.as_str()) != Some("std") {
-                return false;
+/// Whether `sf` imports `std::errors`, counting the imports the toolchain
+/// added only when `with_synthetic` is set.
+fn has_std_errors_use(sf: &SourceFile, with_synthetic: bool) -> bool {
+    sf.uses
+        .iter()
+        .filter(|u| with_synthetic || !u.synthetic)
+        .any(|u| match &u.target {
+            UseTarget::Module(path) => {
+                let segs = &path.segments;
+                if segs.first().map(|s| s.name.as_str()) != Some("std") {
+                    return false;
+                }
+                if segs.len() == 2 && segs[1].name == "errors" {
+                    return true;
+                }
+                segs.len() == 1
+                    && u.list
+                        .as_ref()
+                        .is_some_and(|list| list.iter().any(|e| e.name.name == "errors"))
             }
-            if segs.len() == 2 && segs[1].name == "errors" {
-                return true;
-            }
-            segs.len() == 1
-                && u.list
-                    .as_ref()
-                    .is_some_and(|list| list.iter().any(|e| e.name.name == "errors"))
-        }
-        UseTarget::Project { .. } => false,
-    })
+            UseTarget::Project { .. } => false,
+        })
 }
 
 struct TryScanner {
