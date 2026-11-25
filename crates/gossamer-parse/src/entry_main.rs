@@ -60,13 +60,20 @@ pub fn synthesize_entry_main(sf: &mut SourceFile) -> Vec<ParseDiagnostic> {
     } else {
         (None, None)
     };
-    if uses_try && !has_std_errors_use(sf) {
-        // The synthesized signature names `errors::Error`; bring it into scope.
-        sf.uses.push(UseDecl::simple(
-            id(),
-            span,
-            UseTarget::Module(ModulePath::from_names(["std", "errors"])),
-        ));
+    // The synthesized signature names `errors::Error`. Unless the program
+    // imports `errors` itself, the import that resolves it is one the
+    // toolchain adds (here, or for other code it generated), which reaches
+    // only the paths it writes.
+    if uses_try && !has_std_errors_use(sf, false) {
+        if !has_std_errors_use(sf, true) {
+            sf.uses.push(UseDecl::synthetic(
+                span,
+                UseTarget::Module(ModulePath::from_names(["std", "errors"])),
+            ));
+        }
+        if let Some(ret) = &ret {
+            sf.desugared_paths.extend(error_type_ids(ret));
+        }
     }
 
     let body = Expr::new(
@@ -121,23 +128,28 @@ pub(crate) fn body_uses_try(stmts: &[Stmt]) -> bool {
 /// Returns `true` when `sf` already imports `errors` from `std` (as
 /// `use std::errors` or `use std::{ errors, ... }`), so synthesis does not
 /// add a duplicate import.
-fn has_std_errors_use(sf: &SourceFile) -> bool {
-    sf.uses.iter().any(|u| match &u.target {
-        UseTarget::Module(path) => {
-            let segs = &path.segments;
-            if segs.first().map(|s| s.name.as_str()) != Some("std") {
-                return false;
+/// Whether `sf` imports `std::errors`, counting the imports the toolchain
+/// added only when `with_synthetic` is set.
+fn has_std_errors_use(sf: &SourceFile, with_synthetic: bool) -> bool {
+    sf.uses
+        .iter()
+        .filter(|u| with_synthetic || !u.synthetic)
+        .any(|u| match &u.target {
+            UseTarget::Module(path) => {
+                let segs = &path.segments;
+                if segs.first().map(|s| s.name.as_str()) != Some("std") {
+                    return false;
+                }
+                if segs.len() == 2 && segs[1].name == "errors" {
+                    return true;
+                }
+                segs.len() == 1
+                    && u.list
+                        .as_ref()
+                        .is_some_and(|list| list.iter().any(|e| e.name.name == "errors"))
             }
-            if segs.len() == 2 && segs[1].name == "errors" {
-                return true;
-            }
-            segs.len() == 1
-                && u.list
-                    .as_ref()
-                    .is_some_and(|list| list.iter().any(|e| e.name.name == "errors"))
-        }
-        UseTarget::Project { .. } => false,
-    })
+            UseTarget::Project { .. } => false,
+        })
 }
 
 struct TryScanner {
@@ -182,6 +194,29 @@ fn result_unit_error_type(id: &mut impl FnMut() -> NodeId, span: Span) -> Type {
             )],
         }),
     )
+}
+
+/// The ids of the `errors::Error` type nodes inside `ty`.
+fn error_type_ids(ty: &Type) -> Vec<NodeId> {
+    let TypeKind::Path(path) = &ty.kind else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if path
+        .segments
+        .first()
+        .is_some_and(|seg| seg.name.name == "errors")
+    {
+        out.push(ty.id);
+    }
+    for seg in &path.segments {
+        for arg in &seg.generics {
+            if let GenericArg::Type(inner) = arg {
+                out.extend(error_type_ids(inner));
+            }
+        }
+    }
+    out
 }
 
 /// Builds the `Ok(())` expression used as the implicit tail of a `?`-using

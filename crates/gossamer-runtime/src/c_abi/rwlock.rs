@@ -163,8 +163,10 @@ fn acquire(lock: &GosRwLock, exclusive: bool) -> Held<'_> {
         lock.released.wait(&mut state);
     }
     take(&mut state);
-    drop(state);
+    // `main` stops waiting before its own hold can be seen, so a deadlock
+    // check never reads the lock `main` now holds as the one it waits for.
     crate::sched_global::end_main_wait();
+    drop(state);
     Held { lock, exclusive }
 }
 

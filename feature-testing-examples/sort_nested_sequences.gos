@@ -9,6 +9,7 @@ use std::{iter, sort}
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Level { Low, Mid, High }
 
+#[derive(PartialOrd, Ord)]
 struct Row { id: i64, tags: Vec<i64> }
 
 fn main() {

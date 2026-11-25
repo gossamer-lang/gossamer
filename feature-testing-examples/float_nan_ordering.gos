@@ -3,6 +3,7 @@
 // compare structurally in the same place on every tier. A plain `<` against a
 // NaN stays false.
 
+#[derive(PartialOrd, Ord)]
 struct P { x: f64 }
 
 fn main() {

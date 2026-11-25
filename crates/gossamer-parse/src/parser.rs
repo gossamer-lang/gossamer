@@ -70,6 +70,9 @@ pub struct Parser<'src> {
     /// the call expression so `ExprKind::Call` keeps one shape everywhere.
     pub(crate) named_args:
         std::collections::HashMap<gossamer_ast::NodeId, Vec<gossamer_ast::NamedArg>>,
+    /// Path expressions this parser wrote while desugaring, moved into
+    /// [`gossamer_ast::SourceFile::desugared_paths`].
+    pub(crate) desugared_paths: Vec<gossamer_ast::NodeId>,
     /// Token position at which a newline was last accepted as a list
     /// separator. A comma is consumed and so always advances the parser; a
     /// newline is not a token, so accepting the same one twice would let a
@@ -125,7 +128,7 @@ impl<'src> Parser<'src> {
         let diagnostics = tokens
             .take_lex_errors()
             .into_iter()
-            .map(|err| ParseDiagnostic::new(ParseError::from_lex(&err), err.span()))
+            .map(|err| ParseDiagnostic::new(ParseError::from_lex(&err, source), err.span()))
             .collect();
         Self {
             source,
@@ -146,6 +149,7 @@ impl<'src> Parser<'src> {
             module_inner_attrs: Vec::new(),
             mod_stack: Vec::new(),
             named_args: std::collections::HashMap::new(),
+            desugared_paths: Vec::new(),
             newline_separator_at: None,
         }
     }

@@ -187,16 +187,10 @@ jobs:
         # approach here) has no musl sysroot and fails to find `string.h`
         # - see the cross-from-linux job in ci.yml for the full story,
         # including why a hand-rolled `CC=zig cc` doesn't work either and
-        # `cargo zigbuild` is used instead. Installed via direct download,
-        # not `mlugg/setup-zig`: that action both runs on a deprecated
-        # Node 20 and 404s fetching any current Zig release.
-        run: |
-          set -euo pipefail
-          zig_ver=0.16.0
-          curl -fsSL -o /tmp/zig.tar.xz "https://ziglang.org/download/${zig_ver}/zig-x86_64-linux-${zig_ver}.tar.xz"
-          mkdir -p /tmp/zig-install
-          tar -xf /tmp/zig.tar.xz -C /tmp/zig-install --strip-components=1
-          echo "/tmp/zig-install" >> "$GITHUB_PATH"
+        # `cargo zigbuild` is used instead. Installed from Zig's community
+        # mirrors and checked against the official index's SHA-256, as the
+        # Zig project asks of automated downloads.
+        run: python3 -I scripts/ci/install_zig.py 0.16.0 "$RUNNER_TEMP/zig"
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-zigbuild

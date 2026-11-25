@@ -30,7 +30,7 @@ fn mk() -> Vec<f32> {
 fn arithmetic() {
     let a: f32 = 0.1
     let b: f32 = 0.2
-    println("{} {} {} {}", a, b, a + b, a + b == 0.3)
+    println("{} {} {} {}", a, b, a + b, (a + b - 0.3).abs() < 1e-6)
     println("{:?} {:.3} {}", a * 3.0, a, 1.0f32 / 3.0)
     let big: f32 = 16777217.0
     println("{} {}", big, 16777217 as f32)
@@ -99,7 +99,7 @@ fn encoding() {
     let f: f32 = 0.1
     println("{} {}", json::encode(f).unwrap(), json::encode(#[f]).unwrap())
     match from_json::<Pt>("{\"x\": 0.1, \"y\": 0.1, \"v\": [0.2], \"o\": 0.7}") {
-        Ok(q) => println("{} {} {}", q.x as f64, q.x + 0.2 == 0.3, q.o.unwrap_or(0.0) as f64)
+        Ok(q) => println("{} {} {}", q.x as f64, (q.x + 0.2 - 0.3).abs() < 1e-6, q.o.unwrap_or(0.0) as f64)
         Err(e) => println("err {}", e)
     }
 }

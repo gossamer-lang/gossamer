@@ -157,6 +157,60 @@ fn swap_out_of_bounds(a: i64, b: i64, len: usize) -> RuntimeError {
     ))
 }
 
+thread_local! {
+    /// The panics the landing pads running on this goroutine are unwinding
+    /// with, innermost last. A VM goroutine is its own OS thread.
+    static PAD_PANICS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The panic the innermost landing pad on this goroutine is running its
+/// deferred expressions for; `None` outside a landing pad.
+pub(crate) fn unwinding_panic() -> Option<String> {
+    PAD_PANICS.with(|stack| stack.borrow().last().cloned())
+}
+
+/// The fault a frame's landing pad is running for, published on this
+/// goroutine while it is held so a deferred release can see it.
+#[derive(Default)]
+struct PadFault(Option<RuntimeError>);
+
+impl PadFault {
+    fn set(&mut self, err: RuntimeError) {
+        let text = match &err {
+            RuntimeError::Panic(message) => message.clone(),
+            other => other.to_string(),
+        };
+        PAD_PANICS.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            if self.0.is_some() {
+                stack.pop();
+            }
+            stack.push(text);
+        });
+        self.0 = Some(err);
+    }
+
+    fn take(&mut self) -> Option<RuntimeError> {
+        let held = self.0.take();
+        if held.is_some() {
+            PAD_PANICS.with(|stack| stack.borrow_mut().pop());
+        }
+        held
+    }
+
+    fn is_none(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+impl Drop for PadFault {
+    fn drop(&mut self) {
+        if self.0.is_some() {
+            PAD_PANICS.with(|stack| stack.borrow_mut().pop());
+        }
+    }
+}
+
 /// Element count of a receiver holding the flat-swap invariant, for the
 /// cold path that reports a negative index before the receiver is matched.
 #[cold]
@@ -613,7 +667,7 @@ impl Vm {
         }
         // The fault a landing pad is running this frame's pending deferred
         // expressions for, and the call-stack depth the pad started at.
-        let mut unwinding: Option<RuntimeError> = None;
+        let mut unwinding = PadFault::default();
         let mut pad_stack_len = 0usize;
         let mut injected = unwind_from;
         loop {
@@ -5087,12 +5141,12 @@ impl Vm {
                 Some(entry) if entry.kind == crate::bytecode::UnwindKind::Cleanup => {
                     traceback_location.freeze(fault);
                     pad_stack_len = self.call_stack.borrow().len();
-                    unwinding = Some(err);
+                    unwinding.set(err);
                     pc = entry.landing;
                 }
                 Some(entry) => {
                     if let Some(held) = unwinding.take() {
-                        unwinding = Some(held.with_unwind_note(&err));
+                        unwinding.set(held.with_unwind_note(&err));
                     }
                     self.call_stack.borrow_mut().truncate(pad_stack_len);
                     pc = entry.landing;

@@ -8,12 +8,12 @@ use std::fs
 use std::path
 
 fn main() {
-    let dir = path::join(env::temp_dir(), "gossamer-fsops-demo")
+    let dir = path::join(env::temp_dir(), "gossamer-fsops-demo").expect("relative segment")
     let _ = fs::remove_dir_all(dir)
     let _ = fs::create_dir_all(dir)
 
-    let a = path::join(dir, "a.txt")
-    let b = path::join(dir, "b.txt")
+    let a = path::join(dir, "a.txt").expect("relative segment")
+    let b = path::join(dir, "b.txt").expect("relative segment")
     let _ = fs::write(a, "hello world".as_bytes())
 
     println("a_is_file={}", fs::is_file(a))
@@ -27,7 +27,7 @@ fn main() {
     }
     println("b_is_file={}", fs::is_file(b))
     println("b_size={}", fs::file_size(b))
-    println("missing_is_file={}", fs::is_file(path::join(dir, "nope.txt")))
+    println("missing_is_file={}", fs::is_file(path::join(dir, "nope.txt").expect("relative segment")))
 
     let _ = fs::remove_dir_all(dir)
     println("cleaned_dir_exists={}", fs::exists(dir))

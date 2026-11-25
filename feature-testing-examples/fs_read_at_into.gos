@@ -3,7 +3,7 @@
 use std::{env, fs, path}
 
 fn main() {
-    let file_path = path::join(env::temp_dir(), "gos_fs_read_at_into.bin")
+    let file_path = path::join(env::temp_dir(), "gos_fs_read_at_into.bin").expect("relative segment")
     let mut data: Vec<u8> = #[]
     for i in 0..300 { data.push((i % 251) as u8) }
     fs::write(file_path, data).unwrap()

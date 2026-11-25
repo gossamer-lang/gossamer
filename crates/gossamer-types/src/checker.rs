@@ -135,6 +135,7 @@ impl TypeChecker<'_> {
         self.check_deferred_type_mismatches();
         self.check_deferred_conversion_targets();
         self.check_deferred_hash_keys();
+        self.check_deferred_orders();
         self.check_deferred_const_exprs();
         self.check_deferred_rendered_options();
         self.check_deferred_into_conversions();
@@ -1254,6 +1255,16 @@ struct TypeChecker<'a> {
     /// `impl` answers rather than the field-by-field one. A container that
     /// orders its elements internally cannot reach it.
     user_ordered_types: std::collections::HashSet<String>,
+    /// Where each user struct and enum is declared, for a rewrite that adds
+    /// an attribute to the declaration.
+    type_decl_spans: HashMap<DefId, Span>,
+    /// User types whose `#[derive(..)]` asks for an order.
+    derived_order_defs: Vec<(DefId, Span)>,
+    /// Types an ordering operation needs ordered, with what needs it, checked
+    /// once inference settles.
+    deferred_orders: Vec<(Ty, String, Span)>,
+    /// The ordered container types already in [`Self::deferred_orders`].
+    noted_ordered_containers: HashSet<Ty>,
     /// Every method name a trait declares, defaults included, in declaration
     /// order. An `impl` of the trait may define these and nothing else.
     trait_declared_methods: HashMap<String, Vec<String>>,
@@ -1511,6 +1522,10 @@ impl<'a> TypeChecker<'a> {
             trait_required_methods: builtin_trait_required_methods(),
             trait_fn_decls: HashMap::new(),
             user_ordered_types: std::collections::HashSet::new(),
+            type_decl_spans: HashMap::new(),
+            derived_order_defs: Vec::new(),
+            deferred_orders: Vec::new(),
+            noted_ordered_containers: HashSet::new(),
             trait_declared_methods: HashMap::new(),
             claimed_trait_impls: HashMap::new(),
             claimed_methods: HashMap::new(),
@@ -1959,13 +1974,7 @@ impl<'a> TypeChecker<'a> {
                 if self.bound_is_satisfied(bound, &ty_name) {
                     continue;
                 }
-                self.emit(
-                    TypeError::TraitBoundNotSatisfied {
-                        ty: crate::printer::public_type_name(&ty_name).into_owned(),
-                        bound: crate::printer::public_type_name(bound).into_owned(),
-                    },
-                    span,
-                );
+                self.report_unsatisfied_bound(bound, &ty_name, span);
             }
         }
     }
@@ -2571,16 +2580,29 @@ impl<'a> TypeChecker<'a> {
                     if self.bound_is_satisfied(bound, &ty_name) {
                         continue;
                     }
-                    self.emit(
-                        TypeError::TraitBoundNotSatisfied {
-                            ty: crate::printer::public_type_name(&ty_name).into_owned(),
-                            bound: crate::printer::public_type_name(bound).into_owned(),
-                        },
-                        span,
-                    );
+                    self.report_unsatisfied_bound(bound, &ty_name, span);
                 }
             }
         }
+    }
+
+    /// Reports `ty_name` failing `bound`: an order bound on a user type with
+    /// none is the missing order itself, with the rewrite that derives one.
+    fn report_unsatisfied_bound(&mut self, bound: &str, ty_name: &str, span: Span) {
+        if matches!(bound, "Ord" | "PartialOrd")
+            && !self.declared_trait_names.contains(bound)
+            && let Some(def) = self.user_type_defs.get(ty_name).copied()
+        {
+            self.report_missing_order(def, format!("the bound `{bound}`"), span);
+            return;
+        }
+        self.emit(
+            TypeError::TraitBoundNotSatisfied {
+                ty: crate::printer::public_type_name(ty_name).into_owned(),
+                bound: crate::printer::public_type_name(bound).into_owned(),
+            },
+            span,
+        );
     }
 
     /// Whether the concrete type named `ty_name` carries `bound`.
@@ -2592,6 +2614,14 @@ impl<'a> TypeChecker<'a> {
     /// built-in name (`Clone`, `Debug`, `Ord`, ...) names behaviour the
     /// language derives automatically and so is always satisfied.
     fn bound_is_satisfied(&self, bound: &str, ty_name: &str) -> bool {
+        // An order is a choice a type declares, so an `Ord` bound holds for a
+        // user type only once it derives or writes one.
+        if matches!(bound, "Ord" | "PartialOrd")
+            && !self.declared_trait_names.contains(bound)
+            && let Some(def) = self.user_type_defs.get(ty_name)
+        {
+            return self.user_type_has_order(*def);
+        }
         if known_builtin_trait(bound)
             && !self.declared_trait_names.contains(bound)
             && !builtin_trait_needs_impl(bound)
@@ -5434,11 +5464,15 @@ mod big_integers;
 mod calls;
 mod const_eval;
 mod deferred;
+mod discarded_values;
 mod foreign;
+mod guards;
+pub(crate) use guards::GUARD_TYPE;
 mod hash_keys;
 mod items;
 mod methods;
 mod operators;
+mod orders;
 mod patterns;
 mod rendered_options;
 mod stdlib;

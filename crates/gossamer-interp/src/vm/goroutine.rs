@@ -119,10 +119,10 @@ fn spawn_goroutine_thread<F: FnOnce() + Send + 'static>(
         .name(name.to_string())
         .stack_size(crate::vm::VM_THREAD_STACK_BYTES)
         .spawn(move || {
-            gossamer_coro::arm_stack_guard(
-                crate::vm::VM_THREAD_STACK_BYTES - gossamer_coro::STACK_GUARD_MARGIN,
-            );
-            body();
+            // The goroutine's interpreter and JIT-compiled frames run on a
+            // stack that grows to the goroutine limit, as a native goroutine's
+            // does.
+            gossamer_coro::on_growable_stack(gossamer_coro::stack_limit_bytes(), body);
         })
 }
 

@@ -375,6 +375,12 @@ impl TypeChecker<'_> {
         self.emit(TypeError::IterableWrapper { name, taken }, span);
     }
 
+    /// Whether `ty` resolves to `()`, a value nothing loses by dropping.
+    pub(super) fn is_unit_ty(&mut self, ty: Ty) -> bool {
+        let resolved = self.infer.resolve(self.tcx, ty);
+        matches!(self.tcx.kind(resolved), Some(TyKind::Unit))
+    }
+
     pub(super) fn is_result_ty(&mut self, ty: Ty) -> bool {
         let resolved = self.infer.resolve(self.tcx, ty);
         matches!(self.tcx.kind(resolved), Some(TyKind::Adt { def, .. })
@@ -521,6 +527,9 @@ impl TypeChecker<'_> {
                     self.emit(TypeError::ComparisonStatement, expr.span);
                 }
                 let expr_ty = self.check_discarded_expr(expr);
+                if !self.is_result_ty(expr_ty) && !self.is_unit_ty(expr_ty) {
+                    self.report_discarded_pure_value(expr);
+                }
                 // SPEC §9: a `Result<T, E>` value used as a statement (value
                 // discarded) is a compile error. The explicit discard form
                 // `let _ = expr` goes through `StmtKind::Let` and is not
@@ -561,7 +570,10 @@ impl TypeChecker<'_> {
             } else {
                 Expectation::None
             };
-            let init_ty = self.check_expr_expecting(init, expected);
+            let mut init_ty = self.check_expr_expecting(init, expected);
+            if let Some(guard) = self.mutex_guard_ty(init) {
+                init_ty = self.record(init.id, guard);
+            }
             if let Some(error) = self.option_value_mismatch(pattern, binding_ty, init, init_ty) {
                 self.emit(error, init.span);
             } else {

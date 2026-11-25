@@ -1675,13 +1675,28 @@ pub fn synthesize_derive_impls_with(
         ty_is_comparable(ty, set, &every_alias, 0)
     });
 
-    // Orderable types (drives `cmp`): comparable, minus any map or set field,
-    // which has no order. Such a type is still in `comparable` (it gets `eq`).
-    let mut cmp_seeds = explicit_with(&["PartialOrd", "Ord"]);
-    cmp_seeds.extend(user_cmp.iter().cloned());
+    // Ordered types (drives `cmp`): an order is a choice a type declares, by
+    // `#[derive(PartialOrd, Ord)]` or a `cmp` of its own, so only those carry
+    // one. Equality stays structural for every comparable type. A derived
+    // order whose field has none is refused by the type checker.
+    // The standard library's own value types, written as Gossamer wrappers,
+    // keep the field-by-field order they have always had.
+    let mut derived_order = explicit_with(&["PartialOrd", "Ord"]);
+    derived_order.extend(
+        field_tys
+            .keys()
+            .filter(|name| name.rsplit("::").next().is_some_and(|leaf| leaf.starts_with("__gos_")))
+            .cloned(),
+    );
+    let mut cmp_seeds: HashSet<String> = user_cmp.iter().cloned().collect();
     cmp_seeds.extend(outside.orderable.iter().cloned());
     cmp_seeds.extend(big_integers(&["Int"]));
-    let orderable = greatest_field_fixpoint(&field_tys, &type_params, &alias_ids, &imports, &cmp_seeds, |ty, set| {
+    let derived_fields: HashMap<String, Vec<&gossamer_ast::Type>> = field_tys
+        .iter()
+        .filter(|(name, _)| derived_order.contains(*name) && !cmp_seeds.contains(*name))
+        .map(|(name, tys)| (name.clone(), tys.clone()))
+        .collect();
+    let orderable = greatest_field_fixpoint(&derived_fields, &type_params, &alias_ids, &imports, &cmp_seeds, |ty, set| {
         ty_is_orderable(ty, set, &every_alias, 0)
     });
 
@@ -1747,6 +1762,11 @@ pub fn synthesize_derive_impls_with(
                 && !derives.iter().any(|d| d == "Ord" || d == "PartialOrd")
             {
                 derives.push("Ord".to_string());
+            }
+            // A derived order over a field with none has no `cmp` to build
+            // from; the type checker refuses the derive itself.
+            if !orderable.contains(tn) {
+                derives.retain(|d| d != "Ord" && d != "PartialOrd");
             }
         }
         if derives.is_empty() {
@@ -1827,13 +1847,10 @@ fn emit_comparators(
             ItemKind::Enum(decl) => (&decl.name.name, &decl.generics),
             _ => continue,
         };
-        let derives_ord = derive_list(&item.attrs)
-            .iter()
-            .any(|d| d == "Ord" || d == "PartialOrd");
         let identity = TyId::new(&module, name);
         let prefix = if user_cmp.contains(&identity.path) {
             USER_COMPARATOR_PREFIX
-        } else if orderable.contains(&identity.path) || derives_ord {
+        } else if orderable.contains(&identity.path) {
             STRUCTURAL_COMPARATOR_PREFIX
         } else {
             continue;

@@ -1,0 +1,58 @@
+// `let guard = m.lock()` holds the lock to the end of the block that binds
+// it, released on every exit: the block's end, `return`, `break`, `?`, and a
+// panic unwinding through it.
+use std::errors
+use std::sync::{Mutex, Shared}
+
+fn withdraw(lock: Mutex, balance: Shared<i64>, amount: i64) -> bool {
+    let guard = lock.lock()
+    if amount > balance.get() {
+        return false
+    }
+    balance.update(|b| b - amount)
+    true
+}
+
+fn first_over(lock: Mutex, xs: Vec<i64>, limit: i64) -> i64 {
+    for x in xs {
+        let guard = lock.lock()
+        if x > limit {
+            break
+        }
+    }
+    let guard = lock.lock()
+    limit
+}
+
+fn parse_locked(lock: Mutex, text: String) -> Result<i64, errors::Error> {
+    let guard = lock.lock()
+    match text.to_i64() {
+        Some(n) => Ok(n)
+        None => Err(errors::new(f"not a number: {text}"))
+    }
+}
+
+fn early(lock: Mutex, balance: Shared<i64>) {
+    let guard = lock.lock()
+    balance.update(|b| b + 1)
+    guard.unlock()
+    lock.lock()
+    balance.update(|b| b + 1)
+    lock.unlock()
+}
+
+fn main() {
+    let lock = Mutex::new()
+    let balance = Shared::new(100)
+    println(withdraw(lock, balance, 500))
+    println(withdraw(lock, balance, 30))
+    println(balance.get())
+    println(first_over(lock, #[1, 5, 9], 4))
+    println(parse_locked(lock, "12").is_ok())
+    println(parse_locked(lock, "x").is_err())
+    early(lock, balance)
+    println(balance.get())
+    let worker = spawn(|| withdraw(lock, balance, 10))
+    println(worker.join().unwrap_or(false))
+    println(balance.get())
+}

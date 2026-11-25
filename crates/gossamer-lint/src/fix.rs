@@ -14,7 +14,7 @@ use gossamer_ast::{
 use gossamer_lex::Span;
 
 use crate::Registry;
-use crate::lints::{block_reassigns, is_spawn_call, walk_block, walk_expr};
+use crate::lints::{block_reassigns, is_lock_guard, is_spawn_call, walk_block, walk_expr};
 
 /// An auto-applicable source edit.
 #[derive(Debug, Clone)]
@@ -78,6 +78,9 @@ pub fn apply(source: &str, fixes: &[Fix]) -> String {
     // Of two edits starting at one offset, the wider one is applied: it
     // rewrites the whole construct the narrower one sits inside.
     ordered.sort_by_key(|f| (f.span.start, std::cmp::Reverse(f.span.end)));
+    // Several findings can ask for one edit (one missing attribute, every
+    // use reporting it); it is made once.
+    ordered.dedup_by(|a, b| a.span == b.span && a.replacement == b.replacement);
     let mut out = String::with_capacity(source.len());
     let mut cursor: usize = 0;
     for fix in ordered {
@@ -88,6 +91,15 @@ pub fn apply(source: &str, fixes: &[Fix]) -> String {
         }
         out.push_str(&source[cursor..start]);
         out.push_str(&fix.replacement);
+        // A whole line inserted ahead of indented code takes that indentation,
+        // so the code it lands before keeps its own.
+        if start == end && fix.replacement.ends_with('\n') {
+            let line_start = source[..start].rfind('\n').map_or(0, |at| at + 1);
+            let indent = &source[line_start..start];
+            if indent.chars().all(|c| c == ' ' || c == '\t') {
+                out.push_str(indent);
+            }
+        }
         cursor = end;
     }
     out.push_str(&source[cursor..]);
@@ -130,7 +142,9 @@ fn fix_unused_variable(sf: &SourceFile, source: &str, out: &mut Vec<Fix>) {
             // A task's handle left unnamed is a task nothing joins; the
             // `unjoined_task` lint answers it with `join`, not a rename.
             if let StmtKind::Let { pattern, init, .. } = &stmt.kind
-                && !init.as_ref().is_some_and(|init| is_spawn_call(init))
+                && !init
+                    .as_ref()
+                    .is_some_and(|init| is_spawn_call(init) || is_lock_guard(init))
                 && let Some((name, span, _)) = ident_name(pattern)
                 && !name.starts_with('_')
             {

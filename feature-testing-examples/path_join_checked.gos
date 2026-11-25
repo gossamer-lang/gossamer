@@ -1,0 +1,27 @@
+// `path::join` answers a Result: a segment that names a path outside the
+// base, absolute or climbing above it with `..`, is an error on every tier.
+use std::path
+
+fn show(base: String, segment: String) {
+    match path::join(base, segment) {
+        Ok(joined) => println(f"ok  {segment:?} -> {joined}")
+        Err(e) => println(f"err {segment:?}: {e}")
+    }
+}
+
+fn main() {
+    let base = "/srv/app/uploads"
+    for segment in #["report.txt", "a/b/c.txt", "a/../b.txt", "./x", "", "/etc/passwd"
+        "../../../etc/passwd", "a/../../x", "C:/Windows", "\\\\host\\share"] {
+        show(base, segment)
+    }
+    let p = path::Path::new("/srv")
+    match p.join("www") {
+        Ok(joined) => println(joined.as_str())
+        Err(e) => println(f"{e}")
+    }
+    match p.join("../etc") {
+        Ok(joined) => println(joined.as_str())
+        Err(e) => println(f"{e}")
+    }
+}

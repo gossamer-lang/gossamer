@@ -2,6 +2,7 @@
 // each element by the language's rule for its type, and a sequence that is a
 // prefix of another orders first.
 
+#[derive(PartialOrd, Ord)]
 struct Row {
     id: i64
     name: String

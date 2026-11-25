@@ -366,7 +366,6 @@ impl<'a> Builder<'a> {
             | "gos_rt_http_response_content_type"
             | "gos_rt_http_response_location"
             | "gos_rt_fs_read_to_string"
-            | "gos_rt_path_join"
             | "gos_rt_http_request_path"
             | "gos_rt_http_request_method"
             | "gos_rt_http_request_query"

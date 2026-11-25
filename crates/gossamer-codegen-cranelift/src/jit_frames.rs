@@ -65,10 +65,13 @@ impl Drop for FrameRegistration {
 }
 
 /// Registers `functions`, each paired with the address its code was placed
-/// at.
+/// at. `place` copies bytes the unwinder reads into memory beside the code,
+/// answering their address, for a platform whose tables address them by an
+/// offset from the code.
 pub(crate) fn register(
     isa: &dyn TargetIsa,
     functions: Vec<(usize, FunctionFrames)>,
+    place: &dyn Fn(&[u8]) -> Option<usize>,
 ) -> FrameRegistration {
     let owner = NEXT_OWNER.fetch_add(1, Ordering::Relaxed);
     let unwind = platform::register(
@@ -76,6 +79,7 @@ pub(crate) fn register(
         functions
             .iter()
             .filter_map(|(start, frames)| Some((*start, frames.code_len, frames.unwind.as_ref()?))),
+        place,
     );
     let mut registry = REGISTRY.write();
     for (start, frames) in functions {
@@ -195,6 +199,7 @@ mod platform {
     pub(super) fn register<'a>(
         isa: &dyn TargetIsa,
         functions: impl Iterator<Item = (usize, u32, &'a UnwindInfo)>,
+        _place: &dyn Fn(&[u8]) -> Option<usize>,
     ) -> Option<Unwind> {
         let cie = isa.create_systemv_cie()?;
         let mut table = FrameTable::default();
@@ -283,11 +288,10 @@ mod platform {
         fn RtlDeleteFunctionTable(function_table: *const RuntimeFunction) -> u8;
     }
 
-    /// A function table and the unwind records it points into, both alive
-    /// for as long as the table is registered.
+    /// A registered function table. The unwind records it points into live
+    /// beside the code, which outlives the registration.
     pub(super) struct Unwind {
         table: Box<[RuntimeFunction]>,
-        _records: Box<[u8]>,
     }
 
     // SAFETY: the table and records are plain bytes never written after
@@ -298,8 +302,9 @@ mod platform {
     pub(super) fn register<'a>(
         _isa: &dyn TargetIsa,
         functions: impl Iterator<Item = (usize, u32, &'a UnwindInfo)>,
+        place: &dyn Fn(&[u8]) -> Option<usize>,
     ) -> Option<Unwind> {
-        let functions: Vec<(
+        let mut functions: Vec<(
             usize,
             u32,
             &cranelift_codegen::isa::unwind::winx64::UnwindInfo,
@@ -312,6 +317,9 @@ mod platform {
         if functions.is_empty() {
             return None;
         }
+        // The system binary-searches a function table, so its entries go in
+        // address order whatever order the code was placed in.
+        functions.sort_by_key(|(start, _, _)| *start);
         // Each record is padded to a four-byte boundary, as the loader
         // aligns them in an image.
         let mut offsets = Vec::with_capacity(functions.len());
@@ -320,11 +328,14 @@ mod platform {
             offsets.push(size);
             size += info.emit_size().next_multiple_of(4);
         }
-        let mut records = vec![0u8; size].into_boxed_slice();
+        let mut records = vec![0u8; size];
         for ((_, _, info), &offset) in functions.iter().zip(&offsets) {
             info.emit(&mut records[offset..offset + info.emit_size()]);
         }
-        let records_start = records.as_ptr() as usize;
+        // Every record is addressed by a 32-bit offset from the table's
+        // base, so the records go beside the code rather than on the heap,
+        // which may lie gigabytes away.
+        let records_start = place(&records)?;
         let base = functions
             .iter()
             .map(|(start, _, _)| *start)
@@ -340,9 +351,9 @@ mod platform {
             });
         }
         let table = table.into_boxed_slice();
-        // SAFETY: every entry's offsets lie within the live code and record
-        // allocations measured from `base`, and both outlive the
-        // registration, which the matching delete ends.
+        // SAFETY: every entry's offsets lie within the live code and records
+        // measured from `base`, and both outlive the registration, which the
+        // matching delete ends.
         let added = unsafe {
             RtlAddFunctionTable(
                 table.as_ptr(),
@@ -350,10 +361,7 @@ mod platform {
                 base as u64,
             )
         };
-        (added != 0).then_some(Unwind {
-            table,
-            _records: records,
-        })
+        (added != 0).then_some(Unwind { table })
     }
 
     impl Drop for Unwind {
@@ -379,6 +387,7 @@ mod platform {
     pub(super) fn register<'a>(
         _isa: &dyn TargetIsa,
         _functions: impl Iterator<Item = (usize, u32, &'a UnwindInfo)>,
+        _place: &dyn Fn(&[u8]) -> Option<usize>,
     ) -> Option<Unwind> {
         None
     }

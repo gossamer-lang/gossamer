@@ -1128,7 +1128,7 @@ use std::path
 
 fn main() -> Result<(), errors::Error> {
     let payload: Vec<u8> = [0, 255, 1, 254].to_vec()
-    let tmp = path::join(env::temp_dir(), "gos_rel_byte_sum_probe.bin")
+    let tmp = path::join(env::temp_dir(), "gos_rel_byte_sum_probe.bin")?
     fs::write(tmp, payload)?
     let mut bytes = fs::read(tmp)?
     fs::remove_file(tmp)?
@@ -1199,7 +1199,7 @@ use std::path
 
 fn main() -> Result<(), errors::Error> {
     let payload: Vec<u8> = [9, 3, 7, 3, 1].to_vec()
-    let tmp = path::join(env::temp_dir(), "gos_rel_packed_helpers.bin")
+    let tmp = path::join(env::temp_dir(), "gos_rel_packed_helpers.bin")?
     fs::write(tmp, payload)?
     let mut bytes = fs::read(tmp)?
     fs::remove_file(tmp)?

@@ -714,22 +714,6 @@ fn builtin_next(args: &[Value]) -> RuntimeResult<Value> {
     }
 }
 
-fn builtin_path_join_v(args: &[Value]) -> RuntimeResult<Value> {
-    let mut parts: Vec<String> = Vec::with_capacity(args.len());
-    for a in args {
-        if let Value::String(s) = a {
-            parts.push(s.as_str().to_string());
-        }
-    }
-    let mut p = std::path::PathBuf::new();
-    for part in &parts {
-        p.push(part);
-    }
-    Ok(Value::String(SmolStr::from(
-        p.to_string_lossy().into_owned(),
-    )))
-}
-
 fn builtin_btmap_new(_args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Map(Arc::new(parking_lot::Mutex::new(
         crate::vm_map::VmMap::ordered(crate::vm_map::KeyOrder::Natural),

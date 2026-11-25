@@ -109,11 +109,13 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
             Drop the `let`."
         }
         "float_eq_zero" => {
-            "Equality against a nonzero float literal is almost never what you\n\
-            want - floating-point arithmetic rarely produces the exact bit\n\
-            pattern. Compare `(x - y).abs() < eps` with an explicit tolerance.\n\
-            Exact zero is exempt: a guard such as `if d == 0.0` before a\n\
-            division tests the one value that matters exactly."
+            "Equality against a float literal its type cannot hold exactly,\n\
+            such as `0.1` or `0.3`, with a value that is not computed in sight\n\
+            (a parameter, a field). If that value comes from arithmetic, it\n\
+            rounds to a neighbour of the decimal and the comparison is false.\n\
+            Compare `(x - y).abs() < eps` with an explicit tolerance. A literal\n\
+            the type holds exactly (`0.0`, `0.5`, `1.0`) is not flagged, and a\n\
+            computed value against an inexact literal is the error `GT0142`."
         }
         "empty_else" => {
             "`else {}` adds no information. Drop the else and let the `if`\n\
@@ -365,9 +367,8 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
             these. Join it to that line (end the previous line with the\n\
             operator, or parenthesise), or bind what it computes.\n\
             A builtin method that answers a new value and writes nothing -\n\
-            `v.dedup()`, `s.trim()`, `s.to_uppercase()` - is reported the same\n\
-            way when its result is dropped: the receiver is unchanged, so bind\n\
-            the result (`v = v.dedup()`)."
+            `v.dedup()`, `s.trim()`, `s.to_uppercase()` - with its result\n\
+            dropped is the error `GT0140`."
         }
         _ => return None,
     })

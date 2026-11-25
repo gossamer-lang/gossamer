@@ -153,6 +153,13 @@ identifier = letter { letter | unicode_digit } .
 Identifiers are case-sensitive. `_` alone is the "discard" pattern and
 is not a binding.
 
+An identifier reads as the name it is (Unicode UTS #39). One that draws its
+letters from more than one script, such as `is_аdmin` with a Cyrillic `а`,
+or whose letters render like a different identifier of the same file, is
+GP0071: an editor shows the two alike, so the code a reader checks is not
+the code that runs. ASCII names, and the scripts written together (Han with
+Hiragana and Katakana, Han with Hangul), are one script.
+
 Visibility follows Rust: items are private by default. Public items use
 the `pub` keyword, and `pub(package)` restricts an item to the declaring
 package (§6.3a). Gossamer does not use Go's capitalization-based
@@ -521,6 +528,22 @@ the program's. The same holds for an integer method's second operand
 query asks about (`v.contains(x)`, `v.index_of(x)`, `v.count_of(x)`, a
 `Set`'s `contains`, `insert`, and `remove`): it takes the receiver's
 type. A shift's amount is the exception, since it counts bits.
+
+`&` and `|` (and `&=` / `|=`) take integer operands; on `bool` operands
+they are GT0141, since both sides would run where `&&` / `||` stop at the
+side that decides. `^` on `bool` stays legal: it has no short-circuit form.
+
+`==` / `!=` between a computed float (the result of `+ - * / %`, a call, or
+a binding some write of which computes) and a literal the float type
+cannot hold exactly (`0.1`, `0.3`) is GT0142: the computation rounds to a
+neighbour of the decimal and the comparison is false. A literal the type
+holds exactly (`0.5`, `0.0`, `1e3`) compares as written, and so does a
+binding every write of which is a literal.
+
+A statement whose only work is a built-in method answering a new value -
+`name.to_uppercase()`, `v.map(|x| x * 2)`, `n.abs()` on `String`, a
+sequence, `Map`, `Set`, a number, a `char`, an `Option`, or a `Result` - is
+GT0140: the value is dropped and the receiver is unchanged.
 
 An unsuffixed literal takes its type from where it is used, and must fit
 that type wherever that is (GT0009): `x == 300` with `x: u8`, `n > -1`
@@ -1483,7 +1506,12 @@ and `Ord`:
   requiring `PartialEq`.) Note structs / enums already compare by value with no
   derive (§3.12); the derive forces it for generic / container-field types.
 - `PartialOrd` / `Ord` - `<` `<=` `>` `>=` order field-by-field (structs) or by
-  variant rank then payload (enums); likewise automatic for plain types.
+  variant rank then payload (enums). Ordering is declared, not automatic: a
+  struct or enum is ordered - sorted, compared with `<`, passed to `min` /
+  `max`, used as a `BTreeMap` / `BTreeSet` key or heap element, or bound by
+  `Ord` - only with this derive or an `impl Ord` writing its own `cmp`
+  (GT0143, whose `gos check --fix` adds the derive). A derived order needs
+  every field ordered. Equality stays automatic for every type.
 - `Default` - `Type::default()` builds a zero-valued instance (`0` / `false` /
   `""` / `[]` / each field type's own default; skipped when a field type has no
   derivable default).
@@ -1932,8 +1960,9 @@ channel, a lock, or a join, with no timer, I/O, or outside thread able to
 act) can never finish, so the drain names them and exits at once. The exit
 status is the one `main` gave either way. `main` is exempt from `cohort { }`
 for this reason, and so it is also where a task can be forgotten: a handle
-bound by `let task = spawn(..)` and never used is the lint `GL0065`, since
-nothing waits for that task's work before `main` goes on.
+bound by `let task = spawn(..)` and never used is `GL0065`, an error unless
+an item's `#[lint(warn(unjoined_task))]` lowers it, since nothing waits for
+that task's work before `main` goes on.
 
 The root cohort is `main`'s alone. Its extent is the process, which is the
 same extent `main` has, and is longer than any other function's - so a
@@ -2933,11 +2962,17 @@ watchdog asks a goroutine that holds its worker too long to yield at its next
 safepoint. Compiled code has a safepoint at the head of the outermost loop of
 each loop nest; a nest that is counted all the way down and calls none of the
 program's functions runs to completion first. The bytecode VM polls every 1,024
-loop back edges. `spawn(|| expr)` starts one. Each goroutine owns a fixed-size
-mmap'd stack (default 1 MiB; override with `GOSSAMER_GOROUTINE_STACK`,
-clamped to a 32 KiB minimum). The operating system commits pages on demand.
-A byte-budget guard reports `GX0008` before the hardware guard page; the stack
-does not grow or shrink.
+loop back edges. `spawn(|| expr)` starts one. `main` and every goroutine run on a stack that
+grows on demand to the stack limit: 1 GiB, Go's limit for a goroutine, or
+half the memory the program may use (its control group's limit, else the
+host's) where that is less. The stack is reserved address space, committed a
+page at a time as frames reach it, so recursion is bounded by the memory its
+frames take rather than by a frame count, and the bytecode VM's heap frames
+take the same limit. Past it a recursion reports `GX0008`; a frame larger than
+a page probes each page it spans, so it reaches the guard page rather than
+stepping over it. A finished goroutine's stack returns to a shared pool with
+all but its top pages handed back to the system. `GOSSAMER_GOROUTINE_STACK`
+sets a goroutine's stack in bytes instead, clamped to a 32 KiB minimum.
 
 **Argument discipline.** After `spawn(|| f(x))` returns, the caller may continue to
 use `x`; Gossamer has no source-level ownership transfer. Every value a
@@ -3372,8 +3407,12 @@ disagree with the first if the directory changed underneath.
 `extension`, `is_absolute`, `normalize`, `starts_with`, `prefixes`,
 `unique_prefixes`, `matches`, `glob`, `walk`. Separator handling is
 per-platform, so a path built with `join` is correct on every supported
-target. `file_name`, `file_stem`, and `extension` return `Option<String>`
-because not every path has one.
+target. `join(base, segment)` answers `Result<String, errors::Error>`: a
+segment that names a path outside `base` - an absolute one (`/etc/passwd`,
+`C:/x`, `\\host\share`) or one whose `..` climbs above `base` - is an
+`Err`, so a name read from input cannot reach outside the directory it is
+joined under; `Path::join` answers the same way. `file_name`, `file_stem`,
+and `extension` return `Option<String>` because not every path has one.
 
 **`std::process`** - running other programs. `run(prog, args)` executes
 directly with no shell and returns `Result<{stdout, stderr, code},
@@ -3595,10 +3634,19 @@ transformation when the chain doesn't return from the enclosing fn.
 
 ### 10.8 `std::sync`
 
-- `Mutex`: `Mutex::new()`, `lock()`, `unlock()` (no poisoning). It guards
-  the code between the two calls, not a value. A goroutine that finds it
-  held parks until it is released, and a lock nothing left in the program
-  can release is reported as a deadlock (`GX0005`).
+- `Mutex`: `Mutex::new()`, `lock()`, `unlock()`. It guards code, not a
+  value. `let guard = m.lock()` holds it to the end of the block that binds
+  `guard` and releases it at every exit of that block - its end, `return`,
+  `break`, `?`, and a panic unwinding through it; `guard.unlock()`
+  releases it sooner, and a release of a hold already given up does
+  nothing. A guard is used for nothing but its `unlock()` (GT0144). A bare
+  `m.lock()` statement holds the lock until `m.unlock()`, which panics in
+  a goroutine that does not hold it. A lock released while a panic unwinds
+  is poisoned: every later `lock()` panics with `Mutex poisoned: a
+  goroutine panicked while holding it: <message>`, since what it guards
+  may be half written. A goroutine that finds the lock held parks until it
+  is released, and a lock nothing left in the program can release is
+  reported as a deadlock (`GX0005`).
 - `RwLock`, guarding an `i64`: `RwLock::new(v)`, `read()`, `write(v)`,
   `with_read(f)`, `with_write(f)`, where `f` is `Fn(i64) -> i64`.
 - `Once`: `Once::new()`, `call(f) -> bool`, true on the call that ran `f`.

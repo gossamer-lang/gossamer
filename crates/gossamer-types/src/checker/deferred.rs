@@ -473,6 +473,7 @@ impl TypeChecker<'_> {
         let ty = self.check_expr_kind(expr, expected);
         self.check_ffi_expr(expr, ty);
         self.note_hashed_container(ty, expr.span);
+        self.note_ordered_container(ty, expr.span);
         self.note_const_candidate(expr);
         self.check_expected_integer_literal_range(expr, expected, ty);
         self.leave_recursion();

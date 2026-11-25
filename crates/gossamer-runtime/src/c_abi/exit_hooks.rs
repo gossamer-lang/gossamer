@@ -219,6 +219,7 @@ mod tests {
             env.cast::<*const ()>().write(hook as *const ());
             gos_rt_at_exit(env);
             assert_eq!(super::super::rc::rc_strong_count(env), 2);
+            let _serial = crate::open_file::BUFFERED_FILES_TEST_LOCK.lock();
             run_exit_hooks();
             assert_eq!(super::super::rc::rc_strong_count(env), 1);
             super::super::rc::gos_rt_rc_release(env);

@@ -4,6 +4,7 @@
 
 use std::errors
 
+#[derive(PartialOrd, Ord)]
 struct Point {
     x: i64
     y: i64

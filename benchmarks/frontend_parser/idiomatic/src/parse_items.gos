@@ -46,6 +46,8 @@ pub fn parse_source_file(source: String, file: u32) -> (SourceFile, Vec<parse::D
         top_level_stmts: stmts,
         next_node_id: p.next_id as u32,
         named_args: p.named,
+        program_end: None,
+        desugared_paths: #[],
     }
     (sf, p.diags)
 }
@@ -288,7 +290,7 @@ fn parse_foreign_type(p: &mut Parser, item_start: Span, attrs_in: Attrs, visibil
         }
     }
     attrs.outer.push(Attribute { path: parse::path_single("__gos_foreign_type"), tokens: None })
-    let decl = StructDecl { name: name, generics: parse::empty_generics(), where_clause: parse::empty_where(), body: StructBody::Unit }
+    let decl = StructDecl { name: name, generics: parse::empty_generics(), where_clause: parse::empty_where(), body: StructBody::Unit, traits: #[], items: #[] }
     let end = parse::last_span(p)
     let span = parse::join(p, item_start, end)
     let id = parse::alloc(p)
@@ -352,7 +354,7 @@ fn parse_item_after(p: &mut Parser, start_span: Span, attrs: Attrs, visibility: 
 }
 
 fn unit_struct(name: Ident) -> ItemKind {
-    ItemKind::Struct(StructDecl { name: name, generics: parse::empty_generics(), where_clause: parse::empty_where(), body: StructBody::Unit })
+    ItemKind::Struct(StructDecl { name: name, generics: parse::empty_generics(), where_clause: parse::empty_where(), body: StructBody::Unit, traits: #[], items: #[] })
 }
 
 fn parse_declined_type_item(p: &mut Parser) -> Option<ItemKind> {
@@ -625,11 +627,11 @@ fn parse_struct_decl(p: &mut Parser) -> StructDecl {
     if parse::at(p, parse::KW_WHERE) {
         let where_clause = parse::parse_where_clause(p)
         let body = parse_struct_body(p)
-        return StructDecl { name: name, generics: generics, where_clause: where_clause, body: body }
+        return StructDecl { name: name, generics: generics, where_clause: where_clause, body: body, traits: #[], items: #[] }
     }
     let body = parse_struct_body(p)
     let where_clause = parse::parse_where_clause(p)
-    StructDecl { name: name, generics: generics, where_clause: where_clause, body: body }
+    StructDecl { name: name, generics: generics, where_clause: where_clause, body: body, traits: #[], items: #[] }
 }
 
 fn parse_named_fields(p: &mut Parser, stop_at_item: bool) -> Vec<StructField> {
@@ -641,7 +643,7 @@ fn parse_named_fields(p: &mut Parser, stop_at_item: bool) -> Vec<StructField> {
         let name = parse_ident_required(p)
         parse::expect(p, parse::P_COLON)
         let ty = parse::parse_type(p)
-        fields.push(StructField { attrs: attrs, visibility: visibility, name: name, ty: ty })
+        fields.push(StructField { attrs: attrs, visibility: visibility, name: name, ty: ty, default: None })
         if p.pos == before {
             parse::bump(p)
             continue
@@ -698,7 +700,7 @@ fn parse_enum_decl(p: &mut Parser, packed: bool) -> EnumDecl {
     let repr = EnumRepr { packed: packed, declared_bits: declared_bits }
     let where_clause = parse::parse_where_clause(p)
     if !parse::expect(p, parse::P_LBRACE) {
-        return EnumDecl { name: name, generics: generics, where_clause: where_clause, variants: #[], repr: repr }
+        return EnumDecl { name: name, generics: generics, where_clause: where_clause, variants: #[], repr: repr, traits: #[], items: #[] }
     }
     let mut variants: Vec<EnumVariant> = #[]
     while !parse::at(p, parse::P_RBRACE) && !parse::at_eof(p) {
@@ -723,7 +725,7 @@ fn parse_enum_decl(p: &mut Parser, packed: bool) -> EnumDecl {
         }
     }
     parse::expect(p, parse::P_RBRACE)
-    EnumDecl { name: name, generics: generics, where_clause: where_clause, variants: variants, repr: repr }
+    EnumDecl { name: name, generics: generics, where_clause: where_clause, variants: variants, repr: repr, traits: #[], items: #[] }
 }
 
 fn parse_enum_repr_width(p: &mut Parser) -> Option<u32> {
@@ -1012,7 +1014,7 @@ pub fn parse_use_decl(p: &mut Parser) -> UseDecl {
     let end_span = parse::last_span(p)
     let span = parse::join(p, start_span, end_span)
     let id = parse::alloc(p)
-    UseDecl { id: id, span: span, target: target, alias: alias, list: list, module: p.mod_stack, cfg: None, glob: glob }
+    UseDecl { id: id, span: span, target: target, alias: alias, list: list, module: p.mod_stack, cfg: None, glob: glob, group: None, synthetic: false }
 }
 
 pub fn at_attributed_use(p: &mut Parser) -> bool {

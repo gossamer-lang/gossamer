@@ -201,11 +201,9 @@ fn import_wrapper_modules(source: &str, sf: &mut SourceFile) {
     let offset = u32::try_from(at).unwrap_or(u32::MAX);
     let span = gossamer_lex::Span::new(sf.file, offset, offset);
     for module in modules {
-        let id = gossamer_ast::NodeId::from_raw(sf.next_node_id);
-        sf.next_node_id = sf.next_node_id.saturating_add(1);
         let path = gossamer_ast::ModulePath::from_names(module.split("::"));
         sf.uses
-            .push(gossamer_ast::UseDecl::simple(id, span, gossamer_ast::UseTarget::Module(path)));
+            .push(gossamer_ast::UseDecl::synthetic(span, gossamer_ast::UseTarget::Module(path)));
     }
 }
 

@@ -7,10 +7,12 @@
 newtype Id = u32
 type Meters = f64
 
+#[derive(PartialOrd, Ord)]
 enum Color { Red, Green }
 
 struct Tagged { id: Id, len: Meters }
 
+#[derive(PartialOrd, Ord)]
 enum Flat {
     A { c: Color, n: u8, label: String }
     B { x: f64, flag: bool }
@@ -36,6 +38,7 @@ enum Query {
     All
 }
 
+#[derive(PartialOrd, Ord)]
 struct Wrap<T> { v: T }
 
 fn main() {

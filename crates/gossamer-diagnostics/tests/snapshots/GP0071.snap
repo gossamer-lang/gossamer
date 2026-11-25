@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GP0071]: An identifier reads as a name it is not (Unicode UTS #39). Either it - here
+--- framed ---
+error[GP0071]: An identifier reads as a name it is not (Unicode UTS #39). Either it
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

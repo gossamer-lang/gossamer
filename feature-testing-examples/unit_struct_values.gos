@@ -1,5 +1,7 @@
+#[derive(PartialOrd, Ord)]
 struct Marker
 struct Empty {}
+#[derive(PartialOrd, Ord)]
 struct Holder { m: Marker, n: i64 }
 
 fn nothing() {}

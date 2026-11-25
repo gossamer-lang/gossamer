@@ -9,8 +9,7 @@
 //!
 //! These tests are deliberately conservative - they don't
 //! attempt to exercise migration across worker threads (that's
-//! `gossamer-runtime::sched`'s domain) or stack growth (the
-//! coro crate uses a fixed `DefaultStack`). They pin the two
+//! `gossamer-runtime::sched`'s domain). They pin the two
 //! invariants the crate documents:
 //!
 //!   1. A panic on the goroutine's stack propagates to the
@@ -30,6 +29,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use gossamer_coro::{Goroutine, clear_current_yielder, set_current_yielder, suspend};
 
+/// Held by every test here: finished stacks go to one pool all threads
+/// draw from, so a test that spawns would take the stack another test
+/// watches for reuse.
+static POOL_TESTS: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// Drives a goroutine to completion, calling `resume()` until it
 /// returns `true`. Returns the number of resume calls performed.
 fn drive_to_done(g: &mut Goroutine) -> u32 {
@@ -47,6 +51,7 @@ fn drive_to_done(g: &mut Goroutine) -> u32 {
 
 #[test]
 fn panic_inside_goroutine_is_isolated_per_audit_m9() {
+    let _pool = POOL_TESTS.lock();
     // a panic inside a spawned goroutine is
     // CAUGHT inside the coroutine body so the scheduler's
     // resume call returns cleanly. The panicked flag flips for
@@ -75,6 +80,7 @@ fn panic_inside_goroutine_is_isolated_per_audit_m9() {
 
 #[test]
 fn many_short_lived_goroutines_complete_serially() {
+    let _pool = POOL_TESTS.lock();
     // Spawn 1_000 short-lived goroutines back-to-back. A
     // regression in stack allocation/teardown (corosensei or
     // our wrapper) shows up as either a memory leak or a
@@ -96,13 +102,6 @@ fn many_short_lived_goroutines_complete_serially() {
 
 #[test]
 fn moderate_recursion_completes_within_default_stack() {
-    // 4_000 frames of trivial recursion. Each frame is small
-    // (a few words for return address + scalar locals), so
-    // 4_000 frames is well inside the default 1 MiB stack but
-    // far enough past the previous 16 KiB clamp that the
-    // older default would overflow. Catches a regression
-    // where the stack-size override gets re-introduced as a
-    // smaller default.
     fn recurse(n: u32, ack: &Arc<AtomicU64>) -> u32 {
         if n == 0 {
             ack.fetch_add(1, Ordering::Relaxed);
@@ -110,6 +109,7 @@ fn moderate_recursion_completes_within_default_stack() {
         }
         recurse(n - 1, ack) + 1
     }
+    let _pool = POOL_TESTS.lock();
     let observed = Arc::new(AtomicU64::new(0));
     let observed_for_main = Arc::clone(&observed);
     let mut g = Goroutine::new(Box::new(move || {
@@ -122,6 +122,7 @@ fn moderate_recursion_completes_within_default_stack() {
 
 #[test]
 fn yield_loop_through_many_resumes_does_not_corrupt_state() {
+    let _pool = POOL_TESTS.lock();
     // A goroutine that yields 1_000 times before completing,
     // pushing a per-iteration value into a shared counter.
     // Past stackful-coroutine regressions (`corosensei` 0.x)
@@ -161,7 +162,8 @@ fn body_stack_address() -> usize {
 }
 
 #[test]
-fn finished_goroutines_stack_serves_the_next_spawn_on_its_thread() {
+fn a_finished_goroutines_stack_serves_the_next_spawn() {
+    let _pool = POOL_TESTS.lock();
     let first = body_stack_address();
     let second = body_stack_address();
     assert_eq!(first, second, "the second goroutine ran on a fresh mapping");
@@ -169,6 +171,7 @@ fn finished_goroutines_stack_serves_the_next_spawn_on_its_thread() {
 
 #[test]
 fn a_suspended_goroutine_dropped_unfinished_releases_cleanly() {
+    let _pool = POOL_TESTS.lock();
     let mut g = Goroutine::new(Box::new(suspend));
     set_current_yielder(g.yielder_ptr());
     assert!(!g.resume());
@@ -179,6 +182,7 @@ fn a_suspended_goroutine_dropped_unfinished_releases_cleanly() {
 
 #[test]
 fn the_guard_band_lies_below_the_budget_of_a_goroutines_stack() {
+    let _pool = POOL_TESTS.lock();
     let seen = Arc::new(AtomicU64::new(0));
     let probe = Arc::clone(&seen);
     let mut g = Goroutine::new(Box::new(move || {

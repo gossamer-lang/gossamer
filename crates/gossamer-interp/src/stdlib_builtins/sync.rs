@@ -127,6 +127,8 @@ pub(crate) fn install_sync_extras(globals: &mut Vec<(&'static str, Value)>) {
         ("Mutex::new", builtin_mutex_new),
         ("Mutex::lock", builtin_mutex_lock),
         ("Mutex::unlock", builtin_mutex_unlock),
+        ("Mutex::__acquire", builtin_mutex_acquire),
+        ("Mutex::__release", builtin_mutex_release),
         ("Once::new", builtin_once_new),
         ("Map::new", builtin_sync_map_new),
         ("Map::insert", builtin_sync_map_set),
@@ -469,22 +471,56 @@ pub(crate) fn mutex_of(value: &Value) -> Option<Arc<MutexCell>> {
     crate::value::handle_state(value, "sync::Mutex", "__mutex")
 }
 
+/// Takes the mutex for the calling goroutine and answers the acquisition's
+/// generation. A poisoned mutex is released again and the call panics.
+fn take_mutex(cell: &crate::stdlib_builtins::set::MutexCell) -> RuntimeResult<i64> {
+    // A held mutex stays held on the browser build: the goroutine that
+    // would unlock it has already run to completion.
+    if !gossamer_runtime::platform::CAN_BLOCK && cell.would_block() {
+        return Err(crate::value::RuntimeError::WouldNeverWake("Mutex::lock"));
+    }
+    match cell.lock() {
+        Ok(generation) => Ok(generation),
+        Err(None) => Err(crate::value::deadlock_error("Mutex::lock")),
+        Err(Some(cause)) => Err(crate::value::RuntimeError::Panic(
+            gossamer_runtime::c_abi::mutex::poisoned_message(&cause),
+        )),
+    }
+}
+
 pub(crate) fn builtin_mutex_lock(args: &[Value]) -> RuntimeResult<Value> {
     if let Some(cell) = args.first().and_then(mutex_of) {
-        // A held mutex stays held on the browser build: the goroutine that
-        // would unlock it has already run to completion.
-        if !gossamer_runtime::platform::CAN_BLOCK && cell.would_block() {
-            return Err(crate::value::RuntimeError::WouldNeverWake("Mutex::lock"));
-        }
-        if !cell.lock() {
-            return Err(crate::value::deadlock_error("Mutex::lock"));
-        }
+        take_mutex(&cell)?;
     }
     Ok(Value::Unit)
 }
 
+pub(crate) fn builtin_mutex_acquire(args: &[Value]) -> RuntimeResult<Value> {
+    let Some(cell) = args.first().and_then(mutex_of) else {
+        return Ok(Value::Int(0));
+    };
+    Ok(Value::Int(take_mutex(&cell)?))
+}
+
 pub(crate) fn builtin_mutex_unlock(args: &[Value]) -> RuntimeResult<Value> {
     if let Some(cell) = args.first().and_then(mutex_of) {
+        if cell.held_generation().is_none() {
+            return Err(crate::value::RuntimeError::Panic(
+                gossamer_runtime::c_abi::mutex::NOT_HELD_MESSAGE.to_string(),
+            ));
+        }
+        cell.unlock();
+    }
+    Ok(Value::Unit)
+}
+
+pub(crate) fn builtin_mutex_release(args: &[Value]) -> RuntimeResult<Value> {
+    let generation = args.get(1).and_then(value_to_int);
+    if let Some(cell) = args.first().and_then(mutex_of)
+        && cell
+            .held_generation()
+            .is_some_and(|held| Some(held) == generation)
+    {
         cell.unlock();
     }
     Ok(Value::Unit)

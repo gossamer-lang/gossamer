@@ -75,7 +75,7 @@ fn main() {
     let dir = "benchmarks/comptime"
     let mut results: Map<String, Timing> = Map::new()
     for name in FIXTURES {
-        let src = path::join(dir, name)
+        let src = path::join(dir, name).expect("relative segment")
         let want = expected_stdout(name)
         let probe = match process::run(gos, #["run", src]) {
             Ok(v) => v
@@ -105,13 +105,13 @@ fn main() {
                 // fixture is copied into a scratch directory rather than
                 // built in place, and the parse cache is dropped first so
                 // every sample is a cold build.
-                let scratch = path::join(env::temp_dir(), format("gos-ct-{}-{}", name, r))
+                let scratch = path::join(env::temp_dir(), format("gos-ct-{}-{}", name, r)).expect("relative segment")
                 let _ = fs::remove_dir_all(scratch)
                 if let Err(e) = fs::create_dir_all(scratch) {
                     eprintln("comptime: scratch: {}", e)
                     process::exit(1)
                 }
-                let copy = path::join(scratch, name)
+                let copy = path::join(scratch, name).expect("relative segment")
                 if let Err(e) = fs::copy(src, copy) {
                     eprintln("comptime: copy {}: {}", name, e)
                     process::exit(1)

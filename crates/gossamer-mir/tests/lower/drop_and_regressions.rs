@@ -580,24 +580,10 @@ fn identity_fold_shift_zero_amount() {
 
 #[test]
 fn identity_fold_bool_operands() {
-    let body = optimised("fn f(b: bool) -> bool { b & true }\n");
-    assert!(!has_binary_op(&body), "b & true must fold to b");
-    let body = optimised("fn f(b: bool) -> bool { b | false }\n");
-    assert!(!has_binary_op(&body), "b | false must fold to b");
+    // `&` and `|` on `bool` are refused (GT0141), so `^` is the one
+    // bitwise operator a `bool` reaches MIR with.
     let body = optimised("fn f(b: bool) -> bool { b ^ false }\n");
     assert!(!has_binary_op(&body), "b ^ false must fold to b");
-    let body = optimised("fn f(b: bool) -> bool { b & false }\n");
-    assert!(!has_binary_op(&body), "b & false must fold to false");
-    assert_eq!(
-        const_value_of(&body, Local::RETURN),
-        Some(ConstValue::Bool(false))
-    );
-    let body = optimised("fn f(b: bool) -> bool { b | true }\n");
-    assert!(!has_binary_op(&body), "b | true must fold to true");
-    assert_eq!(
-        const_value_of(&body, Local::RETURN),
-        Some(ConstValue::Bool(true))
-    );
 }
 
 #[test]

@@ -258,6 +258,8 @@ pub struct EnumDecl {
     pub where_clause: WhereClause
     pub variants: Vec<EnumVariant>
     pub repr: EnumRepr
+    pub traits: Vec<TraitBound>
+    pub items: Vec<ImplItem>
 }
 
 pub fn encode_enum_decl(out: &mut Vec<u8>, v: EnumDecl) {
@@ -269,6 +271,14 @@ pub fn encode_enum_decl(out: &mut Vec<u8>, v: EnumDecl) {
         encode_enum_variant(out, e1)
     }
     encode_enum_repr(out, v.repr)
+    put_varint(out, v.traits.len() as u64)
+    for e2 in v.traits {
+        encode_trait_bound(out, e2)
+    }
+    put_varint(out, v.items.len() as u64)
+    for e3 in v.items {
+        encode_impl_item(out, e3)
+    }
 }
 
 pub struct EnumRepr {
@@ -329,7 +339,7 @@ pub enum ExprKind {
     Unary { op: UnaryOp, operand: Expr },
     Binary { op: BinaryOp, lhs: Expr, rhs: Expr },
     Assign { op: AssignOp, place: Expr, value: Expr },
-    Cast { value: Expr, ty: Type },
+    Cast { value: Expr, ty: Type, wrapping: bool },
     If { condition: Expr, then_branch: Expr, else_branch: Option<Expr> },
     Match { scrutinee: Expr, arms: Vec<MatchArm> },
     Loop { label: Option<Label>, body: Expr },
@@ -419,10 +429,11 @@ pub fn encode_expr_kind(out: &mut Vec<u8>, v: ExprKind) {
             encode_expr(out, f1)
             encode_expr(out, f2)
         }
-        ExprKind::Cast { value: f0, ty: f1 } => {
+        ExprKind::Cast { value: f0, ty: f1, wrapping: f2 } => {
             put_varint(out, 9)
             encode_expr(out, f0)
             encode_type(out, f1)
+            out.push(if f2 { 1 } else { 0 })
         }
         ExprKind::If { condition: f0, then_branch: f1, else_branch: f2 } => {
             put_varint(out, 10)
@@ -652,6 +663,7 @@ pub fn encode_field_selector(out: &mut Vec<u8>, v: FieldSelector) {
     }
 }
 
+#[derive(PartialOrd, Ord)]
 pub struct FileId(pub u32)
 
 pub fn encode_file_id(out: &mut Vec<u8>, v: FileId) {
@@ -1110,6 +1122,7 @@ pub fn encode_named_arg(out: &mut Vec<u8>, v: NamedArg) {
     encode_span(out, v.span)
 }
 
+#[derive(PartialOrd, Ord)]
 pub struct NodeId(pub u32)
 
 pub fn encode_node_id(out: &mut Vec<u8>, v: NodeId) {
@@ -1333,7 +1346,9 @@ pub struct SourceFile {
     pub items: Vec<Item>
     pub top_level_stmts: Vec<Stmt>
     pub next_node_id: u32
+    pub program_end: Option<u32>
     pub named_args: Map<NodeId, Vec<NamedArg>>
+    pub desugared_paths: Vec<NodeId>
 }
 
 pub fn encode_source_file(out: &mut Vec<u8>, v: SourceFile) {
@@ -1352,15 +1367,26 @@ pub fn encode_source_file(out: &mut Vec<u8>, v: SourceFile) {
         encode_stmt(out, e3)
     }
     put_varint(out, v.next_node_id as u64)
-    let mut e4 = v.named_args.keys()
-    e4.sort()
-    put_varint(out, e4.len() as u64)
-    for e5 in e4 {
-        encode_node_id(out, e5)
-        put_varint(out, v.named_args[e5].len() as u64)
-        for e6 in v.named_args[e5] {
-            encode_named_arg(out, e6)
+    match v.program_end {
+        Some(e4) => {
+            out.push(1)
+            put_varint(out, e4 as u64)
         }
+        None => out.push(0)
+    }
+    let mut e5 = v.named_args.keys()
+    e5.sort()
+    put_varint(out, e5.len() as u64)
+    for e6 in e5 {
+        encode_node_id(out, e6)
+        put_varint(out, v.named_args[e6].len() as u64)
+        for e7 in v.named_args[e6] {
+            encode_named_arg(out, e7)
+        }
+    }
+    put_varint(out, v.desugared_paths.len() as u64)
+    for e8 in v.desugared_paths {
+        encode_node_id(out, e8)
     }
 }
 
@@ -1476,6 +1502,8 @@ pub struct StructDecl {
     pub generics: Generics
     pub where_clause: WhereClause
     pub body: StructBody
+    pub traits: Vec<TraitBound>
+    pub items: Vec<ImplItem>
 }
 
 pub fn encode_struct_decl(out: &mut Vec<u8>, v: StructDecl) {
@@ -1483,6 +1511,14 @@ pub fn encode_struct_decl(out: &mut Vec<u8>, v: StructDecl) {
     encode_generics(out, v.generics)
     encode_where_clause(out, v.where_clause)
     encode_struct_body(out, v.body)
+    put_varint(out, v.traits.len() as u64)
+    for e1 in v.traits {
+        encode_trait_bound(out, e1)
+    }
+    put_varint(out, v.items.len() as u64)
+    for e2 in v.items {
+        encode_impl_item(out, e2)
+    }
 }
 
 pub struct StructExprField {
@@ -1518,6 +1554,7 @@ pub struct StructField {
     pub visibility: Visibility
     pub name: Ident
     pub ty: Type
+    pub default: Option<Expr>
 }
 
 pub fn encode_struct_field(out: &mut Vec<u8>, v: StructField) {
@@ -1525,6 +1562,13 @@ pub fn encode_struct_field(out: &mut Vec<u8>, v: StructField) {
     encode_visibility(out, v.visibility)
     encode_ident(out, v.name)
     encode_type(out, v.ty)
+    match v.default {
+        Some(e1) => {
+            out.push(1)
+            encode_expr(out, e1)
+        }
+        None => out.push(0)
+    }
 }
 
 pub struct TraitBound {
@@ -1760,6 +1804,8 @@ pub struct UseDecl {
     pub module: Vec<String>
     pub cfg: Option<String>
     pub glob: bool
+    pub group: Option<u32>
+    pub synthetic: bool
 }
 
 pub fn encode_use_decl(out: &mut Vec<u8>, v: UseDecl) {
@@ -1795,6 +1841,14 @@ pub fn encode_use_decl(out: &mut Vec<u8>, v: UseDecl) {
         None => out.push(0)
     }
     out.push(if v.glob { 1 } else { 0 })
+    match v.group {
+        Some(e6) => {
+            out.push(1)
+            put_varint(out, e6 as u64)
+        }
+        None => out.push(0)
+    }
+    out.push(if v.synthetic { 1 } else { 0 })
 }
 
 pub struct UseListEntry {

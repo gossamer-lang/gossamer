@@ -1,0 +1,23 @@
+// Recursion is bounded by memory, not by a fixed stack: `main` and a
+// goroutine each recurse far past the 8 MiB and 1 MiB stacks a thread and a
+// goroutine used to have, on every tier.
+
+fn walk(n: i64) -> i64 {
+    if n == 0 {
+        return 0
+    }
+    (walk(n - 1) * 31 + n) % 1000000007
+}
+
+fn depth(n: i64) -> i64 {
+    if n == 0 { 0 } else { depth(n - 1) + 1 }
+}
+
+fn main() {
+    println(walk(500000))
+    let deep = spawn(|| depth(200000))
+    match deep.join() {
+        Ok(n) => println(f"goroutine reached {n}")
+        Err(message) => println(f"goroutine failed: {message}")
+    }
+}

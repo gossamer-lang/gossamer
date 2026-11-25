@@ -266,6 +266,16 @@ impl Resolver {
             }
             self.resolve_item(item);
         }
+        let modules: std::collections::HashSet<String> = self
+            .local_module_paths
+            .iter()
+            .filter_map(|path| path.rsplit("::").next().map(str::to_string))
+            .collect();
+        for (name, span) in
+            crate::synthetic_imports::program_reaches_through_synthetic_imports(source, &modules)
+        {
+            self.emit(ResolveError::UnresolvedName { name }, span);
+        }
     }
 
     /// Binds each deferred `use "project-id" as alias` to the inlined

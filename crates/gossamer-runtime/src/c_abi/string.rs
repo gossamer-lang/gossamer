@@ -2401,21 +2401,21 @@ pub unsafe extern "C-unwind" fn gos_rt_str_byte_at(s: *const c_char, i: i64) -> 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_str_char_at(s: *const c_char, i: i64) -> i64 {
-    // `s[i]` is an indexed read, and an index outside `[0, len)` panics, in the
-    // wording every sequence access reports so a failure's text does not
-    // depend on the tier that ran it.
+    // `s[i]` is an indexed read, and an index outside `[0, len)` panics with
+    // the string wording the VM reports, so a failure's text does not depend
+    // on the tier that ran it.
     if s.is_null() {
-        crate::c_abi::panic::panic_oob_text("vec index", i, 0);
+        crate::c_abi::panic::panic_oob_text("string index", i, 0);
     }
     // SAFETY: `s` is non-null (checked above) and this shim's live string argument (C-ABI
     // contract).
     let char_len = unsafe { typed_str_char_len(s) };
     if i < 0 || i as usize >= char_len {
-        crate::c_abi::panic::panic_oob_text("vec index", i, char_len as i64);
+        crate::c_abi::panic::panic_oob_text("string index", i, char_len as i64);
     }
     // SAFETY: `s` is live, and `i` is below its char length (checked above).
     let Some(byte) = (unsafe { typed_str_char_boundary(s, i as usize) }) else {
-        crate::c_abi::panic::panic_oob_text("vec index", i, char_len as i64);
+        crate::c_abi::panic::panic_oob_text("string index", i, char_len as i64);
     };
     // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract) or null, which
     // `typed_str_bytes` accepts.
@@ -2671,7 +2671,7 @@ pub unsafe extern "C" fn gos_rt_str_concat_drop_a(
                 // SAFETY: `a` is a uniquely held builder (rc 1) with room for the new length
                 // (checked above).
                 unsafe {
-                    let dst = (a as *mut u8).add(len_a);
+                    let dst = a.cast::<u8>().cast_mut().add(len_a);
                     copy_small_bytes(b_bytes.as_ptr(), dst, len_b);
                     *dst.add(len_b) = 0;
                     let hdr_mut = hdr.cast_mut();
@@ -2754,7 +2754,7 @@ pub unsafe extern "C" fn gos_rt_str_append_bytes(
             // SAFETY: `acc` is a uniquely held builder (rc 1) with room for the new length
             // (checked above).
             unsafe {
-                let dst = (acc as *mut u8).add(len_a);
+                let dst = acc.cast::<u8>().cast_mut().add(len_a);
                 copy_small_bytes(b_bytes.as_ptr(), dst, len_b);
                 *dst.add(len_b) = 0;
                 let hdr_mut = hdr.cast_mut();

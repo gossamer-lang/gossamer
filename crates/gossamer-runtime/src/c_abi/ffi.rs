@@ -223,7 +223,7 @@ pub fn attach_foreign_thread() {
     }
     crate::stack_guard::install_stack_guard();
     let remaining =
-        crate::stack_guard::remaining_stack_bytes().unwrap_or(gossamer_coro::DEFAULT_STACK_BYTES);
+        crate::stack_guard::remaining_stack_bytes().unwrap_or(gossamer_coro::UNKNOWN_STACK_BYTES);
     gossamer_coro::arm_stack_guard(remaining.saturating_sub(gossamer_coro::STACK_GUARD_MARGIN));
 }
 

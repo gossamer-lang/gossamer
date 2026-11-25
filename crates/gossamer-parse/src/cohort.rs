@@ -344,8 +344,10 @@ impl Parser<'_> {
 
     /// `runtime::<name>(args...)` as an expression.
     fn runtime_call(&mut self, name: &str, args: &[i64], span: Span) -> Expr {
+        let id = self.alloc_id();
+        self.desugared_paths.push(id);
         let path = Expr::new(
-            self.alloc_id(),
+            id,
             span,
             ExprKind::Path(PathExpr::from_names(["runtime", name])),
         );

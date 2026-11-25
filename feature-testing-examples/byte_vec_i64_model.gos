@@ -54,7 +54,7 @@ fn main() -> Result<(), errors::Error> {
     // elem_bytes=1 vec from the runtime; indexing, element
     // writes, and for-loops must honour the header stride.
     let payload: Vec<u8> = Vec::from([0, 255, 1, 254])
-    let tmp = path::join(env::temp_dir(), "gos_byte_vec_i64_model.bin")
+    let tmp = path::join(env::temp_dir(), "gos_byte_vec_i64_model.bin")?
     fs::write(tmp, payload)?
     let mut bytes = fs::read(tmp)?
     fs::remove_file(tmp)?

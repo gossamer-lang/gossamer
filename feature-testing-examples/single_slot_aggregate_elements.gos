@@ -11,6 +11,7 @@
 
 use std::collections::{Deque, MinHeap, Queue, Stack}
 
+#[derive(PartialOrd, Ord)]
 struct Cell { n: i64 }
 
 fn fill_vec() -> Vec<Cell> {

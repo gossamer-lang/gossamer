@@ -297,6 +297,9 @@ fn system_wrappers(
     {
         out.push_str(SIGNAL_WRAPPERS);
     }
+    if source.contains("Mutex") && source.contains("lock") {
+        out.push_str(MUTEX_GUARD_WRAPPERS);
+    }
     if (source.contains("path::Path") && from_std("path")) || item_imported(PATH_WRAPPERS) {
         out.push_str(PATH_WRAPPERS);
     }
@@ -2334,6 +2337,21 @@ fn __gos_http_Http2Config_default() -> __gos_http_Http2Config {
 }
 ";
 
+/// The guard a `let`-bound `m.lock()` answers: the mutex and the
+/// acquisition it holds. The binding's scope releases it at every exit, and
+/// `unlock` releases it sooner; a release of a hold already given up does
+/// nothing.
+const MUTEX_GUARD_WRAPPERS: &str = r"
+struct __gos_sync_MutexGuard { mutex: sync::Mutex, generation: i64 }
+impl __gos_sync_MutexGuard {
+    fn unlock(&self) { self.mutex.__release(self.generation) }
+}
+fn __gos_sync_mutex_guard(mutex: sync::Mutex) -> __gos_sync_MutexGuard {
+    let generation = mutex.__acquire()
+    __gos_sync_MutexGuard { mutex: mutex, generation: generation }
+}
+";
+
 /// Immutable UTF-8 path value implemented in ordinary Gossamer so its
 /// representation and behavior are identical in VM, JIT, and AOT execution.
 const PATH_WRAPPERS: &str = r"
@@ -2341,7 +2359,7 @@ struct __gos_path_Path { value: String }
 impl __gos_path_Path {
     fn new(value: String) -> __gos_path_Path { __gos_path_Path { value: value } }
     fn as_str(&self) -> String { self.value }
-    fn join(&self, segment: String) -> __gos_path_Path { __gos_path_Path { value: path::join(self.value, segment) } }
+    fn join(&self, segment: String) -> Result<__gos_path_Path, errors::Error> { Ok(__gos_path_Path { value: path::join(self.value, segment)? }) }
     fn parent(&self) -> Option<__gos_path_Path> {
         match path::parent(self.value) { Some(value) => Some(__gos_path_Path { value: value }), None => None }
     }

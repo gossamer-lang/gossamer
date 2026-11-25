@@ -199,7 +199,7 @@ fn result_for(
     let mut peak_rss = 0
     let mut index = 0
     while index < runs {
-        let rss_path = path::join(scratch, format("rss-{}-{}.txt", tier, index))
+        let rss_path = path::join(scratch, format("rss-{}-{}.txt", tier, index)).expect("relative segment")
         let elapsed, rss = measured_run(command, expected, rss_path)
         samples.push(elapsed)
         peak_rss = max(peak_rss, rss)
@@ -274,7 +274,7 @@ fn on_path(name: String) -> String {
         return if fs::is_file(name) { name } else { "" }
     }
     for directory in env::var("PATH").unwrap_or("").split(":") {
-        let candidate = path::join(directory, name)
+        let candidate = path::join(directory, name).expect("relative segment")
         if fs::is_file(candidate) {
             return candidate
         }
@@ -349,35 +349,35 @@ fn main() {
 
     let mut results = #[]
     for workload in WORKLOADS {
-        let directory = path::join(root, workload)
-        let expected = match fs::read_to_string(path::join(directory, "expected.txt")) {
+        let directory = path::join(root, workload).expect("relative segment")
+        let expected = match fs::read_to_string(path::join(directory, "expected.txt").expect("relative segment")) {
             Ok(expected) => expected
             Err(e) => {
                 fail(format("reading the expected output for {}: {}", workload, e))
                 return
             }
         }
-        let source = path::join(directory, "main.gos")
-        let build_dir = path::join(scratch, workload)
-        let debug_dir = path::join(build_dir, "debug")
-        let release_dir = path::join(build_dir, "release")
+        let source = path::join(directory, "main.gos").expect("relative segment")
+        let build_dir = path::join(scratch, workload).expect("relative segment")
+        let debug_dir = path::join(build_dir, "debug").expect("relative segment")
+        let release_dir = path::join(build_dir, "release").expect("relative segment")
         let _ = fs::create_dir_all(debug_dir)
         let _ = fs::create_dir_all(release_dir)
 
-        let go_binary = path::join(build_dir, "go-main")
+        let go_binary = path::join(build_dir, "go-main").expect("relative segment")
         let go_compile = compile_command(#[
             go_binary_path
             "build"
             "-trimpath"
             "-o"
             go_binary
-            path::join(directory, "main.go")
+            path::join(directory, "main.go").expect("relative segment")
         ])
         let debug_compile = compile_command(#[gos, "build", "--out-dir", debug_dir, source])
         let release_compile =
             compile_command(#[gos, "build", "--release", "--out-dir", release_dir, source])
-        let debug_binary = path::join(debug_dir, "main")
-        let release_binary = path::join(release_dir, "main")
+        let debug_binary = path::join(debug_dir, "main").expect("relative segment")
+        let release_binary = path::join(release_dir, "main").expect("relative segment")
         if !fs::is_file(debug_binary) || !fs::is_file(release_binary) {
             fail(format("native output missing for {}", workload))
         }

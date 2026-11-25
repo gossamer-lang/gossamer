@@ -112,80 +112,81 @@ pub fn swap_joinable_spawn(joinable: bool) -> bool {
     IN_JOINABLE_SPAWN.with(|c| c.replace(joinable))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-use corosensei::stack::DefaultStack;
+mod stacks;
 #[cfg(not(target_arch = "wasm32"))]
 use corosensei::{Coroutine, CoroutineResult, Yielder};
-
-/// Finished goroutines' stacks a thread keeps for its next spawns, so a
-/// spawn reuses a mapping instead of paying `mmap`, the guard page's
-/// `mprotect`, and a later `munmap`. Bounded because a cached stack keeps
-/// the pages its last goroutine touched committed.
 #[cfg(not(target_arch = "wasm32"))]
-const STACK_CACHE_DEPTH: usize = 32;
+use stacks::ProgramStack;
+pub use stacks::{
+    MAX_STACK_BYTES, memory_bytes, on_growable_stack, on_growable_stack_now, stack_limit_bytes,
+};
+
+/// Finished goroutines' stacks, shared by every thread: a goroutine is
+/// spawned on one thread and finishes on whichever worker ran it last, so a
+/// per-thread cache would hold stacks where no spawn takes them. Reusing one
+/// saves `mmap`, the guard page's `mprotect`, the page tables a fresh
+/// reservation needs, and the later `munmap`.
+#[cfg(not(target_arch = "wasm32"))]
+const STACK_POOL_DEPTH: usize = 1024;
+
+/// Bytes at the top of a pooled goroutine stack left committed for the next
+/// goroutine to use; the rest is handed back to the system.
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+const RECYCLED_STACK_KEEP_BYTES: usize = 16 * 1024;
 
 #[cfg(not(target_arch = "wasm32"))]
-thread_local! {
-    static STACK_CACHE: std::cell::RefCell<Vec<DefaultStack>> =
-        const { std::cell::RefCell::new(Vec::new()) };
+static STACK_POOL: parking_lot::Mutex<Vec<ProgramStack>> = parking_lot::Mutex::new(Vec::new());
+
+/// A stack of [`stack_size`] bytes: a pooled one, else a fresh reservation.
+#[cfg(not(target_arch = "wasm32"))]
+fn take_stack() -> std::io::Result<ProgramStack> {
+    let pooled = STACK_POOL.lock().pop();
+    pooled.map_or_else(|| ProgramStack::new(stack_size()), Ok)
 }
 
-/// A stack of [`stack_size`] bytes, from this thread's cache when it has one.
+/// Returns a finished goroutine's stack to the pool, or unmaps it when the
+/// pool is full.
 #[cfg(not(target_arch = "wasm32"))]
-fn take_stack() -> std::io::Result<DefaultStack> {
-    let cached = STACK_CACHE
-        .try_with(|cache| cache.borrow_mut().pop())
-        .ok()
-        .flatten();
-    cached.map_or_else(|| DefaultStack::new(stack_size()), Ok)
+fn recycle_stack(stack: ProgramStack) {
+    // A pooled stack holds only the pages a shallow goroutine uses, whatever
+    // depth its last goroutine reached.
+    #[cfg(unix)]
+    stack.release_below(RECYCLED_STACK_KEEP_BYTES);
+    let mut pool = STACK_POOL.lock();
+    if pool.len() < STACK_POOL_DEPTH {
+        pool.push(stack);
+    }
 }
 
-/// Returns a finished goroutine's stack to this thread's cache, or unmaps
-/// it when the cache is full or the thread is shutting down.
-#[cfg(not(target_arch = "wasm32"))]
-fn recycle_stack(stack: DefaultStack) {
-    let _ = STACK_CACHE.try_with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if cache.len() < STACK_CACHE_DEPTH {
-            cache.push(stack);
-        }
-    });
-}
-
-/// Unmaps this thread's cached goroutine stacks beyond the first `keep`, so a
-/// thread that goes idle stops holding the pages their goroutines touched.
+/// Unmaps pooled goroutine stacks beyond the first `keep`, so a program
+/// that goes idle stops holding the pages and page tables they keep.
 pub fn trim_stack_cache(keep: usize) {
     #[cfg(not(target_arch = "wasm32"))]
-    let _ = STACK_CACHE.try_with(|cache| cache.borrow_mut().truncate(keep));
+    {
+        let surplus: Vec<ProgramStack> = {
+            let mut pool = STACK_POOL.lock();
+            let at = keep.min(pool.len());
+            pool.split_off(at)
+        };
+        drop(surplus);
+    }
     #[cfg(target_arch = "wasm32")]
     let _ = keep;
 }
 
-/// Default goroutine stack size in bytes (1 MiB). Override via the
-/// `GOSSAMER_GOROUTINE_STACK` environment variable, parsed at the
-/// first [`Goroutine::new`] call after process start.
-///
-/// 1 MiB is generous compared to Go's 8 KiB starting size, but Go
-/// grows stacks on demand via segmented + relocating allocation;
-/// our stacks are fixed. On 64-bit hosts the cost is virtual address
-/// space (cheap) - `mmap`'s on-demand committing keeps RSS
-/// proportional to *actual* depth used. 10 000 goroutines eat
-/// ~10 GiB of address space and typically tens of MiB of committed
-/// RAM. Compiled-tier code (HTTP handlers, JSON parsing, regex
-/// captures, format!) routinely uses tens of KiB of stack frames,
-/// so the previous 16 KiB default overflowed under real workloads
-/// and corrupted adjacent heap mappings.
-pub const DEFAULT_STACK_BYTES: usize = 1024 * 1024;
+/// The stack assumed for a thread whose bounds the platform does not report.
+pub const UNKNOWN_STACK_BYTES: usize = 1024 * 1024;
 
 /// Minimum allowed stack size in bytes (32 KiB). Overrides smaller
 /// than this are clamped up - anything less risks overflowing into
 /// the guard page from a single function prologue.
 pub const MIN_STACK_BYTES: usize = 32 * 1024;
 
-/// Reads the configured goroutine stack size. Honours
-/// `GOSSAMER_GOROUTINE_STACK` (parsed once and cached). Values
-/// below [`MIN_STACK_BYTES`] are clamped up so a stray override
-/// can't reintroduce the heap-corruption bug.
+/// Reads the configured goroutine stack size: [`stack_limit_bytes`],
+/// reserved as address space and committed as frames reach it, unless
+/// `GOSSAMER_GOROUTINE_STACK` (parsed once and cached) names another size.
+/// Values below [`MIN_STACK_BYTES`] are clamped up, since a smaller stack
+/// can overflow from a single function prologue.
 #[must_use]
 pub fn stack_size() -> usize {
     use std::sync::OnceLock;
@@ -194,7 +195,7 @@ pub fn stack_size() -> usize {
         std::env::var("GOSSAMER_GOROUTINE_STACK")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
-            .map_or(DEFAULT_STACK_BYTES, |n| n.max(MIN_STACK_BYTES))
+            .map_or_else(stack_limit_bytes, |n| n.max(MIN_STACK_BYTES))
     })
 }
 
@@ -317,7 +318,7 @@ pub fn disarm_stack_guard() {
 pub struct Goroutine {
     /// Taken out only by `drop`, which hands a finished coroutine's stack
     /// to [`recycle_stack`].
-    coro: std::mem::ManuallyDrop<Coroutine<(), (), (), DefaultStack>>,
+    coro: std::mem::ManuallyDrop<Coroutine<(), (), (), ProgramStack>>,
     yielder_slot: Arc<AtomicPtr<()>>,
     /// This goroutine's [`local_word`], held here while it is suspended.
     local: usize,

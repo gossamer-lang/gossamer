@@ -1,0 +1,7 @@
+// ERROR: GT0141
+
+fn main() {
+    let s = "abc"
+    let yes = (s.len() > 0) & (s[0] == 'a')
+    println(yes)
+}

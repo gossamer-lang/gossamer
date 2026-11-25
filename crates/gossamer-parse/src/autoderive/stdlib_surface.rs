@@ -471,25 +471,25 @@ fn bare_import_type(
     }
 }
 
-/// Redirects the user-facing stdlib struct surface
-/// (`encoding::pem::decode(..)`, the `pem::Block { .. }` literal,
-/// `pem::Block` type annotations) onto the injected real-struct
-/// wrappers. Mirrors `rewrite_serde_generic_calls` but covers
-/// multi-segment module paths in call, struct-literal, and type
-/// positions.
-pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
+mod struct_surface {
     use gossamer_ast::VisitorMut;
     use gossamer_ast::expr::{Expr, ExprKind};
     use gossamer_ast::ty::{Type, TypeKind};
     use gossamer_ast::visitor::{walk_expr_mut, walk_item_mut, walk_pattern_mut, walk_type_mut};
 
+    use super::{
+        ImportScopes, bare_import_expr, bare_import_pattern, bare_import_type, collapse_expr,
+        collapse_item_bounds, collapse_type, inline_module_name, pattern_type_path,
+        rewrite_form_file_method,
+    };
+
     /// Rewrites a bare name a `use std::<module>::<item>` bound, which
     /// reaches the same injected wrapper the qualified path does. Without
     /// it the imported spelling type-checks and then finds no such name at
     /// run time.
-    struct BareImportRewriter<'s> {
-        scopes: &'s ImportScopes,
-        module: Vec<String>,
+    pub(super) struct BareImportRewriter<'s> {
+        pub(super) scopes: &'s ImportScopes,
+        pub(super) module: Vec<String>,
     }
 
     impl VisitorMut for BareImportRewriter<'_> {
@@ -524,9 +524,12 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
         }
     }
 
-    struct Rewriter<'s> {
-        scopes: &'s ImportScopes,
-        module: Vec<String>,
+    pub(super) struct Rewriter<'s> {
+        pub(super) scopes: &'s ImportScopes,
+        pub(super) module: Vec<String>,
+        /// Type nodes respelled onto `errors::Error`, which the program
+        /// reaches through the import the toolchain adds for it.
+        pub(super) respelled_errors: Vec<gossamer_ast::NodeId>,
     }
     impl VisitorMut for Rewriter<'_> {
         fn visit_item(&mut self, item: &mut gossamer_ast::Item) {
@@ -567,7 +570,11 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
         fn visit_type(&mut self, ty: &mut Type) {
             walk_type_mut(self, ty);
             if let TypeKind::Path(tp) = &mut ty.kind {
+                let was_errors = tp.segments.first().is_some_and(|s| s.name.name == "errors");
                 collapse_type(tp, self.scopes.modules_in(&self.module));
+                if !was_errors && tp.segments.first().is_some_and(|s| s.name.name == "errors") {
+                    self.respelled_errors.push(ty.id);
+                }
             }
         }
         fn visit_pattern(&mut self, pattern: &mut gossamer_ast::Pattern) {
@@ -577,12 +584,25 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
             }
         }
     }
+}
+
+use struct_surface::{BareImportRewriter, Rewriter};
+
+/// Redirects the user-facing stdlib struct surface
+/// (`encoding::pem::decode(..)`, the `pem::Block { .. }` literal,
+/// `pem::Block` type annotations) onto the injected real-struct
+/// wrappers. Mirrors `rewrite_serde_generic_calls` but covers
+/// multi-segment module paths in call, struct-literal, and type
+/// positions.
+pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
     let scopes = ImportScopes::of(sf);
-    Rewriter {
+    let mut rewriter = Rewriter {
         scopes: &scopes,
         module: Vec::new(),
-    }
-    .visit_source_file(sf);
+        respelled_errors: Vec::new(),
+    };
+    rewriter.visit_source_file(sf);
+    sf.desugared_paths.append(&mut rewriter.respelled_errors);
     if scopes.wrappers.values().any(|bare| !bare.is_empty()) {
         BareImportRewriter {
             scopes: &scopes,
@@ -1869,8 +1889,7 @@ pub fn inject_synthetic_uses(sf: &mut SourceFile, file: FileId) {
     // `arena { ... }` and `cohort { }` desugar to `runtime::` calls;
     // make the module available without requiring an explicit import.
     if uses_runtime_regions(sf) && !already_imports(&sf.uses, &["std", "runtime"]) {
-        sf.uses.push(UseDecl::simple(
-            NodeId::DUMMY,
+        sf.uses.push(UseDecl::synthetic(
             Span::new(file, 0, 0),
             UseTarget::Module(ModulePath::from_names(["std", "runtime"])),
         ));
@@ -1895,8 +1914,7 @@ pub fn inject_synthetic_uses(sf: &mut SourceFile, file: FileId) {
         &["std", "encoding", "yaml"][..],
     ] {
         if !already_imports(&sf.uses, segs) {
-            sf.uses.push(UseDecl::simple(
-                NodeId::DUMMY,
+            sf.uses.push(UseDecl::synthetic(
                 dummy_span,
                 UseTarget::Module(ModulePath::from_names(segs.iter().copied())),
             ));
@@ -1910,8 +1928,7 @@ pub fn inject_synthetic_uses(sf: &mut SourceFile, file: FileId) {
     if has_term {
         for segs in [&["std", "runtime"][..], &["std", "ffi"][..]] {
             if !already_imports(&sf.uses, segs) {
-                sf.uses.push(UseDecl::simple(
-                    NodeId::DUMMY,
+                sf.uses.push(UseDecl::synthetic(
                     dummy_span,
                     UseTarget::Module(ModulePath::from_names(segs.iter().copied())),
                 ));
@@ -1923,8 +1940,7 @@ pub fn inject_synthetic_uses(sf: &mut SourceFile, file: FileId) {
         matches!(&item.kind, ItemKind::Fn(decl) if decl.name.name == "__gos_process_spawn_piped")
     });
     if has_command && !already_imports(&sf.uses, &["std", "fs"]) {
-        sf.uses.push(UseDecl::simple(
-            NodeId::DUMMY,
+        sf.uses.push(UseDecl::synthetic(
             dummy_span,
             UseTarget::Module(ModulePath::from_names(["std", "fs"])),
         ));
@@ -1945,8 +1961,7 @@ pub fn inject_synthetic_uses(sf: &mut SourceFile, file: FileId) {
             &["std", "net", "url"][..],
         ] {
             if !already_imports(&sf.uses, segs) {
-                sf.uses.push(UseDecl::simple(
-                    NodeId::DUMMY,
+                sf.uses.push(UseDecl::synthetic(
                     dummy_span,
                     UseTarget::Module(ModulePath::from_names(segs.iter().copied())),
                 ));

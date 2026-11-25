@@ -167,6 +167,11 @@ impl Drop for OpenFile {
     }
 }
 
+/// Held by the tests that write out every buffered file, and by those that
+/// watch one file's writes land, which the former would otherwise reach.
+#[cfg(test)]
+pub(crate) static BUFFERED_FILES_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// Writes out every buffered file still open. Runs as the program ends.
 pub fn write_out_buffered() {
     let files = std::mem::take(&mut *BUFFERED.lock());
@@ -188,6 +193,7 @@ mod tests {
 
     #[test]
     fn buffered_writes_reach_the_file_on_flush_and_on_drop() {
+        let _serial = BUFFERED_FILES_TEST_LOCK.lock();
         let (path, file) = scratch("flush");
         file.buffer_writes(64).expect("buffer");
         file.write_all(b"one ").expect("write");
@@ -202,6 +208,7 @@ mod tests {
 
     #[test]
     fn a_cursor_call_sees_every_buffered_write_first() {
+        let _serial = BUFFERED_FILES_TEST_LOCK.lock();
         let (path, file) = scratch("cursor");
         file.buffer_writes(64).expect("buffer");
         file.write_all(b"abc").expect("write");
@@ -214,6 +221,7 @@ mod tests {
 
     #[test]
     fn a_write_past_the_capacity_goes_straight_through() {
+        let _serial = BUFFERED_FILES_TEST_LOCK.lock();
         let (path, file) = scratch("large");
         file.buffer_writes(4).expect("buffer");
         file.write_all(b"ab").expect("write");
@@ -224,6 +232,7 @@ mod tests {
 
     #[test]
     fn the_program_end_writes_out_files_still_open() {
+        let _serial = BUFFERED_FILES_TEST_LOCK.lock();
         let (path, file) = scratch("exit");
         file.buffer_writes(64).expect("buffer");
         file.write_all(b"kept").expect("write");

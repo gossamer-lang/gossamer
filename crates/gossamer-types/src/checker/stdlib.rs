@@ -1713,6 +1713,8 @@ impl TypeChecker<'_> {
         };
         let (params, ret) = match (owner.as_str(), method) {
             (_, "clone") => (Vec::new(), resolved),
+            ("sync::Mutex", "__acquire") => (Vec::new(), i64_ty),
+            ("sync::Mutex", "__release") => (vec![i64_ty], unit),
             ("sync::Mutex", "lock" | "unlock")
             | ("sync::WaitGroup", "done" | "wait")
             | ("sync::Barrier", "wait") => (Vec::new(), unit),
@@ -3818,6 +3820,7 @@ impl TypeChecker<'_> {
 
     /// Reports `op` ordering a value of `ty`, which has no order.
     pub(super) fn require_order(&mut self, ty: Ty, op: &str, span: Span) {
+        self.defer_order(ty, &format!("`{op}`"), span);
         if !self.lacks_order(ty) {
             return;
         }

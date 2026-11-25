@@ -9,11 +9,13 @@
 
 use std::iter
 
+#[derive(PartialOrd, Ord)]
 struct Part {
     id: i64
     w: f64
 }
 
+#[derive(PartialOrd, Ord)]
 enum Shape {
     Circle(f64)
     Square

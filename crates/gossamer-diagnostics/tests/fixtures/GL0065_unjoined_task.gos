@@ -1,0 +1,6 @@
+// ERROR: GL0065
+
+fn main() {
+    let task = spawn(|| 1)
+    println(1)
+}

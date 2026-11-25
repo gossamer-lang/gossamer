@@ -209,6 +209,20 @@ fn reachable(registry: &Registry, root: &str) -> BTreeSet<String> {
 }
 
 /// The Gossamer type a field of format `f` has.
+fn is_integer(f: &Format) -> bool {
+    matches!(
+        f,
+        Format::U8
+            | Format::U16
+            | Format::U32
+            | Format::U64
+            | Format::I8
+            | Format::I16
+            | Format::I32
+            | Format::I64
+    )
+}
+
 fn gossamer_type(f: &Format) -> Result<String> {
     Ok(match f {
         Format::TypeName(name) => name.clone(),
@@ -454,6 +468,11 @@ fn render_gossamer_ast(registry: &Registry, root: &str) -> Result<String> {
                 )?;
             }
             ContainerFormat::NewTypeStruct(inner) => {
+                // An id over an integer is ordered, as its Rust type derives
+                // `Ord`, so the parsers can sort ids.
+                if is_integer(inner) {
+                    writeln!(text, "#[derive(PartialOrd, Ord)]")?;
+                }
                 writeln!(text, "pub struct {name}(pub {})\n", gossamer_type(inner)?)?;
                 writeln!(
                     text,

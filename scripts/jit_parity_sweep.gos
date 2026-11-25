@@ -53,7 +53,7 @@ struct Divergence {
 fn repo_root() -> String {
     let mut directory = env::current_dir().unwrap_or(".")
     loop {
-        if fs::is_dir(path::join(directory, "feature-testing-examples")) {
+        if fs::is_dir(path::join(directory, "feature-testing-examples").expect("relative segment")) {
             return directory
         }
         match path::parent(directory) {
@@ -67,7 +67,7 @@ fn repo_root() -> String {
 /// or "" when it is on none.
 fn on_path(name: String) -> String {
     for directory in env::var("PATH").unwrap_or("").split(":") {
-        let candidate = path::join(directory, name)
+        let candidate = path::join(directory, name).expect("relative segment")
         if fs::is_file(candidate) {
             return candidate
         }
@@ -79,11 +79,11 @@ fn on_path(name: String) -> String {
 fn fixtures(root: String) -> Vec<String> {
     let mut files = #[]
     for directory in ROOTS {
-        let full = path::join(root, directory)
+        let full = path::join(root, directory).expect("relative segment")
         match fs::read_dir(full) {
             Ok(entries) => {
                 for entry in entries {
-                    let file = path::join(directory, entry.name)
+                    let file = path::join(directory, entry.name).expect("relative segment")
                     if entry.is_file && entry.name.ends_with(".gos") && !LEFT_TO_SERVER_TESTS.contains(file) {
                         files.push(file)
                     }
@@ -211,7 +211,7 @@ fn main() {
     }
     let root = repo_root()
     if gos.is_empty() {
-        gos = path::join(target_dir(root), "debug/gos")
+        gos = path::join(target_dir(root), "debug/gos").expect("relative segment")
     }
     if !fs::is_file(gos) {
         eprintln("jit parity sweep: no gos binary at {} (cargo build --bin gos)", gos)
@@ -269,5 +269,5 @@ fn main() {
 /// `root` unless absolute, else `<root>/target`.
 fn target_dir(root: String) -> String {
     let dir = env::var("CARGO_TARGET_DIR").unwrap_or("target")
-    if path::is_absolute(dir) { dir } else { path::join(root, dir) }
+    if path::is_absolute(dir) { dir } else { path::join(root, dir).expect("relative segment") }
 }

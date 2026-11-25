@@ -206,6 +206,7 @@ pub(crate) fn use_decl_module_with_list(segments: &[&str], list: Vec<UseListEntr
         cfg: None,
         glob: false,
         group: None,
+        synthetic: false,
     }
 }
 

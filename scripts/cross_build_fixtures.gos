@@ -24,9 +24,9 @@ fn gos_binary() -> String {
         Some(binary) => binary
         None => {
             if os::family() == "windows" {
-                path::join(target_dir("."), "debug/gos.exe")
+                path::join(target_dir("."), "debug/gos.exe").expect("relative segment")
             } else {
-                path::join(target_dir("."), "debug/gos")
+                path::join(target_dir("."), "debug/gos").expect("relative segment")
             }
         }
     }
@@ -41,7 +41,7 @@ fn gos_binary() -> String {
 fn repo_root() -> String {
     let mut directory = env::current_dir().unwrap_or(".")
     loop {
-        if fs::is_file(path::join(directory, FIXTURE_LIST)) {
+        if fs::is_file(path::join(directory, FIXTURE_LIST).expect("relative segment")) {
             return directory
         }
         match path::parent(directory) {
@@ -71,7 +71,7 @@ fn main() {
         process::exit(2)
     }
     let triple = args[0]
-    let out = path::join(args[1], triple)
+    let out = path::join(args[1], triple).expect("relative segment")
     let root = repo_root()
     let gos = gos_binary()
 
@@ -80,7 +80,7 @@ fn main() {
         process::exit(1)
     }
 
-    let list_path = path::join(root, FIXTURE_LIST)
+    let list_path = path::join(root, FIXTURE_LIST).expect("relative segment")
     let list = match fs::read_to_string(list_path) {
         Ok(text) => text
         Err(e) => {
@@ -91,7 +91,7 @@ fn main() {
 
     for src in fixtures(list) {
         println("cross-build {} -> {}", src, triple)
-        let source = path::join(root, src)
+        let source = path::join(root, src).expect("relative segment")
         let arguments = #[
             "build"
             "--release"
@@ -122,5 +122,5 @@ fn main() {
 /// `root` unless absolute, else `<root>/target`.
 fn target_dir(root: String) -> String {
     let dir = env::var("CARGO_TARGET_DIR").unwrap_or("target")
-    if path::is_absolute(dir) { dir } else { path::join(root, dir) }
+    if path::is_absolute(dir) { dir } else { path::join(root, dir).expect("relative segment") }
 }

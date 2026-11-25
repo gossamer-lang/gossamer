@@ -48,9 +48,9 @@ pub fn expr(p: &mut Parser, e: Expr) -> Expr {
             let pl = expr(p, place)
             ExprKind::Assign { op: op, place: pl, value: expr(p, value) }
         }
-        ExprKind::Cast { value, ty } => {
+        ExprKind::Cast { value, ty, wrapping } => {
             let v = expr(p, value)
-            ExprKind::Cast { value: v, ty: type_(p, ty) }
+            ExprKind::Cast { value: v, ty: type_(p, ty), wrapping: wrapping }
         }
         ExprKind::If { condition, then_branch, else_branch } => {
             let c = expr(p, condition)

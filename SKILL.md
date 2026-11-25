@@ -164,11 +164,17 @@ extend(&mut items)     // items is now #[1, 2, 1]
   name binds. `let`, `for`, and parameters take irrefutable patterns only
   (GT0047): `let Some(x) = opt` needs `else`. `use Kind::*` /
   `use Kind::{A, B}` import variants. Follow Rust's naming (`gos lint`).
+  A name that mixes scripts (`is_аdmin`, a Cyrillic `а`) or renders like
+  another name of the file is GP0071.
 - Exhaustive `match`, no `_ =>` unless every other case means the same.
   Labeled loops: `'outer: for .. { break 'outer }`.
 - `defer expr` runs at every exit of its block (end, `return`, `break`, `?`),
-  last first, and when a panic unwinds through it, so a deferred `unlock`
-  or `close` runs in a panicking goroutine too.
+  last first, and when a panic unwinds through it, so a deferred `close`
+  runs in a panicking goroutine too.
+- A statement whose only work is a method answering a new value is GT0140:
+  `name.to_uppercase()` alone leaves `name` as it was; bind or pass what it
+  answers. `&` / `|` (and `&=` / `|=`) on `bool` is GT0141: write `&&` /
+  `||`, which stop at the side that decides.
 - Named and default arguments: `fn volume(width: i64, height: i64 = 2)`
   then `volume(2)`, `volume(width: 2, height: 3)`, or `volume(2, height: 3)`.
   A default is any value known while compiling, data included
@@ -238,6 +244,10 @@ extend(&mut items)     // items is now #[1, 2, 1]
   `+%=`...) wrap at the declared width, and are the only way to wrap. Divide
   by zero panics, and so does a shift amount outside `0..BITS`; `<<%` /
   `>>%` take it modulo the width.
+- `==` / `!=` between a computed float and a literal it cannot hold
+  exactly (`a + b == 0.3`) is GT0142: compare within a tolerance,
+  `(a - 0.3).abs() < 1e-9`. Exact literals (`0.5`, `0.0`, `1.0`) compare as
+  written.
 - Both operands of `+`, `<`, `==`, `&`, `a.min(b)`, `v.contains(x)` share one
   type: `u32 < i64` is GT0001, fixed with the cast that loses nothing
   (`a as i64 < b`; `gos check --fix` writes it). A literal must fit its
@@ -263,7 +273,11 @@ extend(&mut items)     // items is now #[1, 2, 1]
   it out takes, built afresh per value; a default cannot read `self` or
   another field (GR0026). A struct whose fields all have defaults builds as
   `T {}` or `T::default()`, and a decode reads a missing key as the default.
-  Structs, enums, tuples, and sequences compare and order structurally; `impl` of `eq` / `cmp` overrides. Recursive enums work
+  Structs, enums, tuples, and sequences compare structurally (`impl` of
+  `eq` overrides). Ordering is declared: a struct or enum sorts, takes `<`,
+  `min` / `max`, or keys a `BTreeMap` only with `#[derive(PartialOrd, Ord)]`
+  (fields in declaration order) or an `impl Ord` writing `cmp` (GT0143;
+  `gos check --fix` adds the derive). Recursive enums work
   directly: `enum List { Cons(i64, List), Nil }`. Two enums may share a
   variant name (`Conn::Ready`, `Job::Ready`); write `Enum::Variant` where a
   bare name would be ambiguous (GR0009).
@@ -359,7 +373,9 @@ fn load(path: String) -> Result<String, errors::Error> {
 error prints its whole chain, `.message()` the top; `runtime::backtrace()`
 answers the call stack as text. A panic ends its
 goroutine; in `main` it exits 101. Recursion is bounded by memory, not a
-frame count, and runaway recursion is `GX0008` on every tier.
+frame count: `main`'s stack and every goroutine's grow on demand to 1 GiB
+(half the memory available where that is less), and past it a runaway
+recursion is `GX0008` on every tier.
 
 ## 9. Concurrency
 
@@ -397,9 +413,10 @@ fn main() {
   last `Sender` going closes the channel, so a `while let Some(v) =
   rx.recv()` drain ends once every producer is done.
 - In `main`, join what you name: `let task = spawn(..)` never joined is
-  GL0065, and `main` goes on (and can exit) before the task's work is
-  done. Goroutines `main` leaves running get up to 30 s at exit; ones
-  parked where nothing can wake them are named and left at once.
+  the error GL0065, since `main` would go on (and could exit) before the
+  task's work is done; spawn a task meant to run on its own unbound.
+  Goroutines `main` leaves running get up to 30 s at exit; ones parked
+  where nothing can wake them are named and left at once.
 - Headers: `cohort(policy: Policy::CollectAll)` / `Policy::Race`,
   `timeout: ms`, `isolation: Isolation::Thread`, `on_error: OnError::Log`.
   Cancellation is cooperative: a cancelled `recv` answers `None`, `sleep`
@@ -412,6 +429,24 @@ fn main() {
   (`static HITS: sync::AtomicI64 = sync::AtomicI64::new(0)`). A `static mut`
   is read and written only inside `unsafe { }` (GT0132), where the access
   vouches that nothing else touches it at the same time.
+- `let guard = m.lock()` holds a `sync::Mutex` to the end of the block and
+  releases it at every exit (`return`, `?`, `break`, a panic);
+  `guard.unlock()` releases it sooner, and a guard is used for nothing else
+  (GT0144). A bare `m.lock()` holds it until `m.unlock()`. A lock released
+  while a panic unwinds is poisoned: every later `lock()` panics naming
+  that panic.
+
+```gossamer
+use std::sync::{Mutex, Shared}
+
+fn withdraw(lock: Mutex, balance: Shared<i64>, amount: i64) -> bool {
+    let guard = lock.lock()
+    if amount > balance.get() { return false }
+    balance.update(|b| b - amount)
+    true
+}
+```
+
 - `std::sync` has `Mutex`, `RwLock`, atomics, `WaitGroup`, `Once`, and
   `Shared<i64>`, one integer under a lock: read-modify-write it with
   `x.update(|n| n + 1)`, never `x.set(x.get() + 1)`, which loses concurrent
@@ -430,7 +465,11 @@ fn main() {
 Discover signatures with `hover` / `gos doc std::<module>`. Areas:
 
 - Core: `fmt io env fs path os process time context flag errors bytes
-  bufio`. `process::run(prog, args)` executes without a shell;
+  bufio`. `path::join(base, segment)?` answers a `Result`: a segment that
+  leaves `base` (absolute, or `..` above it) is an `Err`. A path the user
+  typed, which may climb on purpose, resolves with
+  `path::normalize(f"{base}/{rel}")`.
+  `process::run(prog, args)` executes without a shell;
   `Command::new(p).arg(a).stdout(Stdio::Piped).spawn()?` (after
   `use std::process::{Command, Stdio}`; also `env`, `dir`, `status`,
   `output`) answers a `Child` that reads, writes, and waits;

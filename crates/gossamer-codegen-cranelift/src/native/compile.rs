@@ -236,6 +236,15 @@ pub(crate) fn build_native_isa(
     flag_builder
         .set("enable_llvm_abi_extensions", "true")
         .map_err(|e| anyhow!("flag enable_llvm_abi_extensions: {e}"))?;
+    // A frame larger than a page touches each page it spans, top down, so it
+    // reaches the guard page below the stack instead of stepping over it
+    // into whatever is mapped there.
+    flag_builder
+        .set("enable_probestack", "true")
+        .map_err(|e| anyhow!("flag enable_probestack: {e}"))?;
+    flag_builder
+        .set("probestack_strategy", "inline")
+        .map_err(|e| anyhow!("flag probestack_strategy: {e}"))?;
     let flags = settings::Flags::new(flag_builder);
     let isa_builder = cranelift_native::builder().map_err(|e| anyhow!("native isa: {e}"))?;
     let isa = isa_builder

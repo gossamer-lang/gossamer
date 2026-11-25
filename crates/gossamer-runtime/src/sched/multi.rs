@@ -292,9 +292,9 @@ const WATCHDOG_INTERVAL: Duration = Duration::from_millis(5);
 /// within the window keeps its workers.
 const IDLE_RETIRE_AFTER: Duration = Duration::from_secs(10);
 
-/// Finished goroutine stacks a parked worker keeps for its next spawns. A
-/// cached stack keeps the pages its last goroutine touched, so an idle worker
-/// holds a few for a quick restart rather than the full spawn cache.
+/// Finished goroutine stacks the pool keeps once workers retire. A pooled
+/// stack keeps a few pages and its page tables, so an idle program holds a
+/// few for a quick restart rather than the full pool.
 const PARKED_STACK_CACHE_DEPTH: usize = 4;
 
 thread_local! {
@@ -1353,7 +1353,6 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
             if retire_when_idle(&slot, &deque, &shared, since) {
                 continue;
             }
-            gossamer_coro::trim_stack_cache(PARKED_STACK_CACHE_DEPTH);
             // About to park: tell wait_until_idle to re-snapshot.
             // The Condvar is signalled inside park_worker after the
             // parked flag is set so the snapshot sees a consistent
@@ -1992,6 +1991,10 @@ fn retire_when_idle(
             Some(n.saturating_sub(1).max(1))
         });
     slot.retired.store(true, Ordering::SeqCst);
+    // A worker retires after the program has been idle for the retirement
+    // window, which is when pooled goroutine stacks stop paying for the
+    // pages they keep.
+    gossamer_coro::trim_stack_cache(PARKED_STACK_CACHE_DEPTH);
     true
 }
 

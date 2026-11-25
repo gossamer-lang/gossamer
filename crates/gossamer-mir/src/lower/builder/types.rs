@@ -2816,6 +2816,8 @@ pub(crate) fn sync_method_symbol(kind: &str, method: &str) -> Option<&'static st
     Some(match (kind, method) {
         ("sync::Mutex", "lock") => "gos_rt_mutex_lock",
         ("sync::Mutex", "unlock") => "gos_rt_mutex_unlock",
+        ("sync::Mutex", "__acquire") => "gos_rt_mutex_acquire",
+        ("sync::Mutex", "__release") => "gos_rt_mutex_release",
         ("sync::WaitGroup", "add") => "gos_rt_wg_add",
         ("sync::WaitGroup", "done") => "gos_rt_wg_done",
         ("sync::WaitGroup", "wait") => "gos_rt_wg_wait",

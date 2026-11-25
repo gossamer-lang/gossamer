@@ -3,10 +3,13 @@
 // by-value-comparable type, exactly as they already work on tuples. Output
 // must be bit-identical across the bytecode VM, Cranelift, and LLVM.
 
+#[derive(PartialOrd, Ord)]
 struct Point { x: i64, y: i64 }
 
+#[derive(PartialOrd, Ord)]
 struct Segment { from: Point, to: Point, label: String }
 
+#[derive(PartialOrd, Ord)]
 enum Shape {
     Dot
     Line(i64)

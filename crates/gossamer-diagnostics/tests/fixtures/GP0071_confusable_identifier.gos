@@ -1,0 +1,11 @@
+// ERROR: GP0071
+
+fn is_admin(user: String) -> bool {
+    user == "root"
+}
+
+fn is_аdmin(user: String) -> bool { true }
+
+fn main() {
+    println(is_аdmin("guest"))
+}

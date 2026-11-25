@@ -196,9 +196,14 @@ fn a_written_cmp_reaches_the_sites_that_can_read_it() {
                 Expect::Accept,
             ),
             (
-                "a type with no written cmp keeps every container",
-                "use std::collections::MinHeap\nstruct Q { x: i64 }\nfn main() { let h = MinHeap::from(#[Q { x: 1 }])\n println(\"{}\", h.len()) }\n",
+                "a type with a derived order keeps every container",
+                "use std::collections::MinHeap\n#[derive(PartialOrd, Ord)]\nstruct Q { x: i64 }\nfn main() { let h = MinHeap::from(#[Q { x: 1 }])\n println(\"{}\", h.len()) }\n",
                 Expect::Accept,
+            ),
+            (
+                "a type with no order is no heap element",
+                "use std::collections::MinHeap\nstruct Q { x: i64 }\nfn main() { let h = MinHeap::from(#[Q { x: 1 }])\n println(\"{}\", h.len()) }\n",
+                Expect::Reject("GT0143"),
             ),
         ],
     );
@@ -764,7 +769,8 @@ fn an_encode_over_a_type_parameter_is_gt0126() {
             .map(|d| d.code.as_str().to_string())
             .collect()
     };
-    let head = "use std::encoding::{json, toml, yaml}\nenum Op { Save(String), Idle }\n";
+    let head =
+        "use std::encoding::{json, toml, yaml}\nuse std::errors\nenum Op { Save(String), Idle }\n";
     for (body, arg) in [
         (
             "fn text<T>(v: T) -> String { json::encode(v).unwrap() }",

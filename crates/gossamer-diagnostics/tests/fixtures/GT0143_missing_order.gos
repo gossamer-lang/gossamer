@@ -1,0 +1,12 @@
+// ERROR: GT0143
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+fn main() {
+    let mut ps = #[Point { x: 3, y: 4 }, Point { x: 1, y: 2 }]
+    ps.sort()
+    println(ps[0].x)
+}

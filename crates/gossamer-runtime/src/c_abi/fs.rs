@@ -944,8 +944,10 @@ pub extern "C" fn gos_rt_os_family() -> *const c_char {
     alloc_cstring(std::env::consts::FAMILY.as_bytes()).cast_const()
 }
 
+/// `path::join(base, segment) -> Result<String, errors::Error>`: the joined
+/// path, or the error naming a segment that leaves `base`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_path_join(a: *const c_char, b: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn gos_rt_path_join(a: *const c_char, b: *const c_char) -> i128 {
     ffi_entry!({
         let a = if a.is_null() {
             ""
@@ -959,7 +961,13 @@ pub unsafe extern "C" fn gos_rt_path_join(a: *const c_char, b: *const c_char) ->
             // SAFETY: `b` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(b) }
         };
-        alloc_cstring(crate::path_grammar::join(a, b).as_bytes())
+        match crate::path_grammar::join_within(a, b) {
+            Ok(joined) => gos_rt_result_new(0, alloc_cstring(joined.as_bytes()) as i64),
+            Err(message) => {
+                let err = crate::c_abi::errors::error_new_from_bytes(message.as_bytes());
+                gos_rt_result_new(1, err as i64)
+            }
+        }
     })
 }
 

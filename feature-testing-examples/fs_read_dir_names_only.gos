@@ -11,9 +11,9 @@ fn label(e: fs::DirInfo) -> String {
 
 fn main() {
     let base = fs::temp_dir("gos-names-only").unwrap()
-    fs::create_dir(path::join(base, "sub")).unwrap()
-    fs::write(path::join(base, "b.txt"), "bee".bytes()).unwrap()
-    fs::write(path::join(base, "a.txt"), "a".bytes()).unwrap()
+    fs::create_dir(path::join(base, "sub").expect("relative segment")).unwrap()
+    fs::write(path::join(base, "b.txt").expect("relative segment"), "bee".bytes()).unwrap()
+    fs::write(path::join(base, "a.txt").expect("relative segment"), "a".bytes()).unwrap()
 
     let mut entries = fs::read_dir(base).unwrap()
     entries.sort_by_key(|e| e.name)

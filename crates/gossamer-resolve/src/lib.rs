@@ -26,6 +26,7 @@ mod resolutions;
 mod resolver;
 mod scope;
 mod stdlib_exports;
+mod synthetic_imports;
 
 pub use gossamer_ast::cfg::{
     cfg_target_family, cfg_target_key, item_is_active, set_cfg_target_triple, set_test_cfg,

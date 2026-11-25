@@ -10,5 +10,5 @@ fn main() {
         println(f"  file_name {path::file_name(p):?}")
         println(f"  components {path::components(p)}")
     }
-    println(f"replace {path::join("examples", "C:\\x")}")
+    println(f"refuse {path::join("examples", "C:\\x").is_err()}")
 }

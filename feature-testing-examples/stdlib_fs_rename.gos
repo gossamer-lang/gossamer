@@ -8,12 +8,12 @@ use std::fs
 use std::path
 
 fn main() {
-    let dir = path::join(env::temp_dir(), "gossamer-fs-rename-demo")
+    let dir = path::join(env::temp_dir(), "gossamer-fs-rename-demo").expect("relative segment")
     let _ = fs::remove_dir_all(dir)
     let _ = fs::create_dir_all(dir)
 
-    let src = path::join(dir, "src.txt")
-    let dst = path::join(dir, "dst.txt")
+    let src = path::join(dir, "src.txt").expect("relative segment")
+    let dst = path::join(dir, "dst.txt").expect("relative segment")
     let _ = fs::write(src, "payload\n".as_bytes())
 
     match fs::rename(src, dst) {

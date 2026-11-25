@@ -1469,6 +1469,9 @@ impl TypeChecker<'_> {
             self.pipe_stage_arg_tys.insert(rhs.id, lhs_ty);
         }
         let rhs_ty = self.check_pipe_rhs(op, lhs_ty, rhs);
+        if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr) {
+            self.report_bitwise_on_bool(op.as_str(), lhs_ty, rhs_ty, span);
+        }
         if let Some(ty) = self.check_simd_binary(op, lhs_ty, rhs_ty, span) {
             return ty;
         }
@@ -2886,6 +2889,7 @@ impl TypeChecker<'_> {
         {
             return self.tcx.unit();
         }
+        self.report_bitwise_assign(op, place_ty, value_ty, place.span.join(value.span));
         if self.check_special_compound(op, (place, place_ty), (value, value_ty)) {
             return self.tcx.unit();
         }
@@ -3683,6 +3687,38 @@ pub(super) fn integer_method_mismatch(
             casts,
             rewritten,
         }),
+    }
+}
+
+impl TypeChecker<'_> {
+    /// GT0141 for a `&=` / `|=` whose operands are `bool`.
+    fn report_bitwise_assign(
+        &mut self,
+        op: gossamer_ast::AssignOp,
+        place_ty: Ty,
+        value_ty: Ty,
+        span: Span,
+    ) {
+        let spelled = match op {
+            gossamer_ast::AssignOp::BitAndAssign => "&=",
+            gossamer_ast::AssignOp::BitOrAssign => "|=",
+            _ => return,
+        };
+        self.report_bitwise_on_bool(spelled, place_ty, value_ty, span);
+    }
+
+    /// GT0141 when `&`, `|`, `&=`, or `|=` has a `bool` operand: both sides
+    /// run, where `&&` / `||` stop at the first that decides.
+    fn report_bitwise_on_bool(&mut self, op: &'static str, lhs: Ty, rhs: Ty, span: Span) {
+        let is_bool = |this: &mut Self, ty: Ty| {
+            let ty = this.infer.resolve(this.tcx, ty);
+            matches!(this.tcx.kind(ty), Some(TyKind::Bool))
+        };
+        if !is_bool(self, lhs) && !is_bool(self, rhs) {
+            return;
+        }
+        let logical = if op.starts_with('&') { "&&" } else { "||" };
+        self.emit(TypeError::BitwiseOnBool { op, logical }, span);
     }
 }
 

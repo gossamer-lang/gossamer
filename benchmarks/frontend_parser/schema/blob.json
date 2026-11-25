@@ -505,6 +505,20 @@
           "repr": {
             "TYPENAME": "EnumRepr"
           }
+        },
+        {
+          "traits": {
+            "SEQ": {
+              "TYPENAME": "TraitBound"
+            }
+          }
+        },
+        {
+          "items": {
+            "SEQ": {
+              "TYPENAME": "ImplItem"
+            }
+          }
         }
       ]
     },
@@ -1049,6 +1063,9 @@
                 "ty": {
                   "TYPENAME": "Type"
                 }
+              },
+              {
+                "wrapping": "BOOL"
               }
             ]
           }
@@ -2440,6 +2457,11 @@
           "next_node_id": "U32"
         },
         {
+          "program_end": {
+            "OPTION": "U32"
+          }
+        },
+        {
           "named_args": {
             "MAP": {
               "KEY": {
@@ -2450,6 +2472,13 @@
                   "TYPENAME": "NamedArg"
                 }
               }
+            }
+          }
+        },
+        {
+          "desugared_paths": {
+            "SEQ": {
+              "TYPENAME": "NodeId"
             }
           }
         }
@@ -2616,6 +2645,20 @@
           "body": {
             "TYPENAME": "StructBody"
           }
+        },
+        {
+          "traits": {
+            "SEQ": {
+              "TYPENAME": "TraitBound"
+            }
+          }
+        },
+        {
+          "items": {
+            "SEQ": {
+              "TYPENAME": "ImplItem"
+            }
+          }
         }
       ]
     },
@@ -2665,6 +2708,13 @@
         {
           "ty": {
             "TYPENAME": "Type"
+          }
+        },
+        {
+          "default": {
+            "OPTION": {
+              "TYPENAME": "Expr"
+            }
           }
         }
       ]
@@ -3687,6 +3737,14 @@
         },
         {
           "glob": "BOOL"
+        },
+        {
+          "group": {
+            "OPTION": "U32"
+          }
+        },
+        {
+          "synthetic": "BOOL"
         }
       ]
     },

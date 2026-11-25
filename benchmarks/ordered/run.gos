@@ -61,17 +61,17 @@ fn main() {
         if args[i] == "--skip-rust" { skip_rust = true }
         i += 1
     }
-    let dir = path::join(env::temp_dir(), "gos-ordered-benchmarks")
+    let dir = path::join(env::temp_dir(), "gos-ordered-benchmarks").expect("relative segment")
     fs::create_dir_all(dir).unwrap()
-    let source = path::join("benchmarks", path::join("ordered", "btreemap.gos"))
+    let source = path::join("benchmarks", path::join("ordered", "btreemap.gos").expect("relative segment")).expect("relative segment")
     println("building {}", source)
     let _ = run_or_exit(gos, #["build", "--release", "--out-dir", dir, source])
-    let gossamer = parse(run_or_exit(path::join(dir, "btreemap"), #[]))
+    let gossamer = parse(run_or_exit(path::join(dir, "btreemap").expect("relative segment"), #[]))
 
     let mut rust: Vec<Reading> = #[]
     if !skip_rust {
-        let rs = path::join("benchmarks", path::join("ordered", "std_btreemap.rs"))
-        let exe = path::join(dir, "std_btreemap")
+        let rs = path::join("benchmarks", path::join("ordered", "std_btreemap.rs").expect("relative segment")).expect("relative segment")
+        let exe = path::join(dir, "std_btreemap").expect("relative segment")
         println("building {}", rs)
         let _ = run_or_exit("rustc", #["-O", "-o", exe, rs])
         rust = parse(run_or_exit(exe, #[]))

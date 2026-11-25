@@ -163,7 +163,11 @@ fn bitwise_operators_require_integers_and_shifts_reject_bool() {
             "`{body}` produced {errors:#?}"
         );
     }
-    accepted("let r = true & false");
+    assert!(matches!(
+        errors("let r = true & false").as_slice(),
+        [TypeError::BitwiseOnBool { .. }]
+    ));
+    accepted("let r = true ^ false");
     accepted("let r = a ^ 3");
 }
 

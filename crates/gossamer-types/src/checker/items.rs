@@ -69,6 +69,12 @@ impl TypeChecker<'_> {
                     self.validate_declared_bounds(&decl.generics, &decl.where_clause, item.span);
                     self.collect_trait_signatures(decl);
                 }
+                ItemKind::Struct(_) | ItemKind::Enum(_) => {
+                    self.note_type_decl(item);
+                }
+                _ => {}
+            }
+            match &item.kind {
                 ItemKind::Struct(decl) => {
                     self.validate_derives(&item.attrs, item.span);
                     self.validate_declared_bounds(&decl.generics, &decl.where_clause, item.span);

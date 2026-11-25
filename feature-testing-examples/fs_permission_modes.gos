@@ -19,10 +19,10 @@ fn writable(path: String) -> bool {
 }
 
 fn main() {
-    let base = path::join(env::temp_dir(), "gossamer_parity_modes")
+    let base = path::join(env::temp_dir(), "gossamer_parity_modes").expect("relative segment")
     let _ = fs::remove_dir_all(base)
 
-    let nested = path::join(base, "a/b")
+    let nested = path::join(base, "a/b").expect("relative segment")
     match fs::create_dir_all_mode(nested, 0o777) {
         Ok(_) => println("create_dir_all_mode: ok")
         Err(_) => println("create_dir_all_mode: err")
@@ -31,7 +31,7 @@ fn main() {
     println("nested mode: {:o}", fs::permissions(nested).unwrap_or(0))
     println("nested writable: {}", writable(nested))
 
-    let leaf = path::join(base, "c")
+    let leaf = path::join(base, "c").expect("relative segment")
     match fs::create_dir_mode(leaf, 0o750) {
         Ok(_) => println("create_dir_mode: ok")
         Err(_) => println("create_dir_mode: err")
@@ -45,7 +45,7 @@ fn main() {
     }
     println("leaf mode after: {:o}", fs::permissions(leaf).unwrap_or(0))
 
-    let file = path::join(base, "secret.txt")
+    let file = path::join(base, "secret.txt").expect("relative segment")
     match fs::write_mode(file, "hello".as_bytes(), 0o600) {
         Ok(_) => println("write_mode: ok")
         Err(_) => println("write_mode: err")
@@ -65,12 +65,12 @@ fn main() {
     // file cannot be deleted.
     let _ = fs::set_permissions(file, 0o644)
 
-    match fs::permissions(path::join(base, "nope")) {
+    match fs::permissions(path::join(base, "nope").expect("relative segment")) {
         Ok(_) => println("missing path: ok")
         Err(e) => println("missing path: {}", e)
     }
 
-    match fs::set_permissions(path::join(base, "nope"), 0o644) {
+    match fs::set_permissions(path::join(base, "nope").expect("relative segment"), 0o644) {
         Ok(_) => println("set on missing: ok")
         Err(e) => println("set on missing: {}", e)
     }

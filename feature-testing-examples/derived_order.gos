@@ -1,0 +1,66 @@
+// Ordering is a choice a type declares: `#[derive(PartialOrd, Ord)]` orders
+// by fields in declaration order, a written `cmp` orders as it says, and
+// equality stays structural for every type.
+use std::collections
+
+#[derive(PartialOrd, Ord)]
+struct Point {
+    x: i64
+    y: i64
+}
+
+#[derive(PartialOrd, Ord)]
+enum Level {
+    Low
+    Mid(i64)
+    High
+}
+
+struct Version {
+    major: i64
+    minor: i64
+}
+
+impl Ord for Version {
+    fn cmp(&self, other: Version) -> i64 {
+        if self.major != other.major { other.major - self.major } else { other.minor - self.minor }
+    }
+}
+
+struct Tag {
+    name: String
+}
+
+fn smallest<T: Ord>(xs: Vec<T>) -> Option<T> {
+    xs.iter().min()
+}
+
+fn main() {
+    let mut ps = #[Point { x: 3, y: 4 }, Point { x: 1, y: 9 }, Point { x: 1, y: 2 }]
+    ps.sort()
+    println(ps)
+    println(Point { x: 1, y: 2 } < Point { x: 1, y: 3 })
+    println(ps.iter().max())
+    let levels = #[Level::High, Level::Mid(2), Level::Low, Level::Mid(1)]
+    let mut sorted = levels.clone()
+    sorted.sort()
+    println(sorted)
+    let mut vs = #[Version { major: 1, minor: 2 }, Version { major: 2, minor: 0 }]
+    vs.sort()
+    println(vs[0].major)
+    let mut by_point = BTreeMap::new()
+    by_point.insert(Point { x: 2, y: 0 }, "b")
+    by_point.insert(Point { x: 1, y: 5 }, "a")
+    for (k, v) in by_point {
+        println(f"{k.x} {v}")
+    }
+    println(smallest(#[Point { x: 5, y: 5 }, Point { x: 0, y: 7 }]))
+    let tags = #[Tag { name: "b" }, Tag { name: "a" }]
+    let mut names = tags.map(|t| t.name)
+    names.sort()
+    println(names)
+    println(Tag { name: "a" } == Tag { name: "a" })
+    let mut keyed = tags.clone()
+    keyed.sort_by_key(|t| t.name)
+    println(keyed[0].name)
+}

@@ -7,7 +7,7 @@
  * malformed, expired, or incomplete CRL set is rejected.
  */
 
-use std::{crypto, fs}
+use std::{crypto, errors, fs}
 
 fn verify_private_https_peer(
     chain_path: String

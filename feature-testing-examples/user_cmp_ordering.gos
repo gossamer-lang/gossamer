@@ -14,6 +14,7 @@ impl Ord for Ranked {
     fn cmp(&self, other: Ranked) -> i64 { other.x - self.x }
 }
 
+#[derive(PartialOrd, Ord)]
 struct Plain { x: i64, tag: String }
 
 fn ranked() -> Vec<Ranked> {

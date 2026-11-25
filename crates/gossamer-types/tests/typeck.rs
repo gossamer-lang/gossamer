@@ -5880,6 +5880,27 @@ fn unit_checks(source: &str) -> gossamer_types::UnitChecks {
     )
 }
 
+/// [`unit_checks`] over the source `gos check` checks: the derives and
+/// standard-library wrappers the toolchain appends, included.
+fn augmented_unit_checks(source: &str) -> gossamer_types::UnitChecks {
+    let source = gossamer_parse::autoderive::augment_source(source);
+    let mut map = SourceMap::new();
+    let file = map.add_file("test.gos", source.clone());
+    let (mut sf, parse_diags) = gossamer_parse::autoderive::parse_with_autoderive(&source, file);
+    assert!(parse_diags.is_empty(), "parse errors: {parse_diags:?}");
+    let (mut resolutions, resolve_diags) = resolve_source_file(&sf);
+    let mut tcx = TyCtxt::new();
+    gossamer_types::check_resolved_unit(
+        &mut sf,
+        &mut resolutions,
+        &resolve_diags,
+        false,
+        false,
+        &mut tcx,
+        &mut (),
+    )
+}
+
 #[test]
 fn a_signed_remainder_refuses_the_program_with_a_rewrite_unless_allowed() {
     let source = "fn is_odd(n: i64) -> bool {\n    n % 2 == 1\n}\n\
@@ -5924,6 +5945,187 @@ fn a_signed_remainder_refuses_the_program_with_a_rewrite_unless_allowed() {
             .count(),
         2
     );
+}
+
+#[test]
+fn a_dropped_value_of_a_pure_method_is_refused() {
+    let checks = unit_checks(
+        "fn main() {\n    let v = #[1, 1, 2]\n    v.dedup()\n    let s = \" a \"\n    s.trim()\n    let n = -3\n    n.abs()\n    v.map(|x| x * 2)\n    println(f\"{v} {s}\")\n}\n",
+    );
+    let refused = checks
+        .fatal
+        .iter()
+        .filter(|diag| diag.code.as_str() == "GT0140")
+        .count();
+    assert_eq!(refused, 4, "{:?}", checks.fatal);
+    let kept = unit_checks(
+        "struct Bag { xs: Vec<i64> }\nimpl Bag {\n    fn dedup(&mut self) { self.xs.clear() }\n}\n\
+         fn main() {\n    let mut b = Bag { xs: #[1] }\n    b.dedup()\n    let mut v = #[2, 1]\n    v.sort()\n    v.push(3)\n    let mut total = 0\n    v.map(|x| total += x)\n    v.iter().for_each(println)\n    let _ = v.len()\n    println(f\"{b.xs} {v} {total}\")\n}\n",
+    );
+    assert!(
+        kept.fatal.iter().all(|diag| diag.code.as_str() != "GT0140"),
+        "{:?}",
+        kept.fatal
+    );
+}
+
+#[test]
+fn a_dropped_pure_value_is_refused_only_when_its_receiver_chain_has_no_effect() {
+    let checks = unit_checks(
+        "fn main() {\n    let s = \" a \"\n    s.trim().to_uppercase()\n    let mut v = #[1, 2]\n    v.remove(0).unwrap_or(9)\n    v.pop().unwrap_or(0)\n    println(f\"{s} {v}\")\n}\n",
+    );
+    let refused: Vec<_> = checks
+        .fatal
+        .iter()
+        .filter(|diag| diag.code.as_str() == "GT0140")
+        .collect();
+    assert_eq!(refused.len(), 1, "{:?}", checks.fatal);
+}
+
+#[test]
+fn bitwise_and_or_on_bools_are_refused_and_xor_is_not() {
+    let checks = unit_checks(
+        "fn main() {\n    let a = true\n    let b = false\n    let mut c = a & b\n    c |= a\n    let d = a | b\n    let e = a ^ b\n    let f = 6 & 3\n    println(f\"{c} {d} {e} {f}\")\n}\n",
+    );
+    let refused = checks
+        .fatal
+        .iter()
+        .filter(|diag| diag.code.as_str() == "GT0141")
+        .count();
+    assert_eq!(refused, 3, "{:?}", checks.fatal);
+}
+
+#[test]
+fn a_computed_float_against_an_inexact_literal_is_refused() {
+    let checks = unit_checks(
+        "fn f(x: f64, y: f64) -> bool {\n    let a = x + y\n    let b = 0.1\n    let mut c = 1.0\n    c *= x\n    (a == 0.3) || (b == 0.1) || (x == 0.1) || (a == 0.5) || (c != 0.2) || (a.sqrt() == 0.7)\n}\nfn main() { println(f(0.1, 0.2)) }\n",
+    );
+    let refused = checks
+        .fatal
+        .iter()
+        .filter(|diag| diag.code.as_str() == "GT0142")
+        .count();
+    assert_eq!(refused, 3, "{:?}", checks.fatal);
+    assert!(
+        checks
+            .advisory
+            .iter()
+            .any(|diag| diag.code.as_str() == "GL0025"),
+        "{:?}",
+        checks.advisory
+    );
+}
+
+#[test]
+fn ordering_a_user_type_needs_a_declared_order() {
+    let unordered = augmented_unit_checks(
+        "struct P { x: i64 }\nfn smallest<T: Ord>(xs: Vec<T>) -> Option<T> { xs.iter().min() }\n\
+         fn main() {\n    let mut ps = #[P { x: 2 }, P { x: 1 }]\n    ps.sort()\n    println(P { x: 1 } < P { x: 2 })\n    println(P { x: 1 } == P { x: 1 })\n    println(smallest(ps))\n}\n",
+    );
+    let refused: Vec<_> = unordered
+        .fatal
+        .iter()
+        .filter(|diag| diag.code.as_str() == "GT0143")
+        .collect();
+    assert_eq!(refused.len(), 3, "{:?}", unordered.fatal);
+    assert!(
+        refused.iter().all(|diag| diag
+            .suggestions
+            .iter()
+            .any(|s| s.replacement.contains("derive(PartialOrd, Ord)"))),
+        "{refused:?}"
+    );
+    let ordered = augmented_unit_checks(
+        "#[derive(PartialOrd, Ord)]\nstruct P { x: i64 }\nstruct V { n: i64 }\nimpl Ord for V { fn cmp(&self, other: V) -> i64 { other.n - self.n } }\n\
+         fn main() {\n    let mut ps = #[P { x: 2 }, P { x: 1 }]\n    ps.sort()\n    let mut vs = #[V { n: 1 }]\n    vs.sort()\n    println(P { x: 1 } < P { x: 2 })\n}\n",
+    );
+    assert!(
+        ordered
+            .fatal
+            .iter()
+            .all(|diag| diag.code.as_str() != "GT0143"),
+        "{:?}",
+        ordered.fatal
+    );
+}
+
+#[test]
+fn a_mutex_guard_is_used_only_for_its_unlock() {
+    let checks = augmented_unit_checks(
+        "use std::sync::Mutex\nfn main() {\n    let m = Mutex::new()\n    let guard = m.lock()\n    let copy = guard\n    guard.unlock()\n}\n",
+    );
+    assert!(
+        checks
+            .fatal
+            .iter()
+            .any(|diag| diag.code.as_str() == "GT0144"),
+        "{:?}",
+        checks.fatal
+    );
+}
+
+#[test]
+fn a_module_the_toolchain_imports_for_its_own_code_stays_out_of_the_programs_reach() {
+    // An ordered type gets a synthesized comparator and a `cohort` desugars
+    // onto `runtime::`; neither lends the program an import it did not write.
+    for source in [
+        "fn text(r: Result<String, errors::Error>) -> String { r.unwrap_or(\"\") }\n\
+         fn main() { println(text(Ok(\"x\"))) }\n",
+        "#[derive(PartialOrd, Ord)]\nenum Op { A, B }\n\
+         fn text(r: Result<String, errors::Error>) -> String { r.unwrap_or(\"\") }\n\
+         fn main() { println(text(Ok(\"x\"))) }\n",
+    ] {
+        let mut map = SourceMap::new();
+        let augmented = gossamer_parse::autoderive::augment_source(source);
+        let file = map.add_file("test.gos", augmented.clone());
+        let (sf, _) = gossamer_parse::autoderive::parse_with_autoderive(&augmented, file);
+        let (_, resolve_diags) = resolve_source_file(&sf);
+        assert!(
+            resolve_diags
+                .iter()
+                .any(|d| d.to_string().contains("errors")),
+            "{source}: {resolve_diags:?}"
+        );
+    }
+    let written = augmented_unit_checks(
+        "use std::errors\n#[derive(PartialOrd, Ord)]\nenum Op { A, B }\n\
+         fn text(r: Result<String, errors::Error>) -> String { r.unwrap_or(\"\") }\n\
+         fn main() {\n    println(text(Ok(\"x\")))\n    arena { let v = #[1] }\n}\n",
+    );
+    assert!(written.fatal.is_empty(), "{:?}", written.fatal);
+}
+
+#[test]
+fn a_task_handle_main_never_joins_refuses_the_program() {
+    let unjoined =
+        augmented_unit_checks("fn main() {\n    let task = spawn(|| 1i64)\n    println(1)\n}\n");
+    assert!(
+        unjoined
+            .fatal
+            .iter()
+            .any(|diag| diag.code.as_str() == "GL0065"),
+        "{:?}",
+        unjoined.fatal
+    );
+    for source in [
+        "fn main() {\n    let task = spawn(|| 1i64)\n    let _n = task.join()\n}\n",
+        "fn main() {\n    spawn(|| 1i64)\n}\n",
+        "fn main() {\n    let _task = spawn(|| 1i64)\n}\n",
+        "fn main() {\n    let task = spawn(|| 1i64)\n    let f = || task.join()\n    let _r = f()\n}\n",
+        "use std::errors\nfn work() -> Result<(), errors::Error> {\n    cohort {\n        let task = spawn(|| 1i64)\n    }\n}\n\
+         fn main() { let _r = work() }\n",
+        "#![lint(warn(unjoined_task))]\nfn main() {\n    let task = spawn(|| 1i64)\n}\n",
+    ] {
+        let checks = augmented_unit_checks(source);
+        assert!(
+            checks
+                .fatal
+                .iter()
+                .all(|diag| diag.code.as_str() != "GL0065"),
+            "{source}: {:?}",
+            checks.fatal
+        );
+    }
 }
 
 #[test]

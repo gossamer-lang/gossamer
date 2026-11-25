@@ -76,7 +76,7 @@ pub(crate) fn read_entry_unit(file: &Path) -> Result<EntryUnit> {
 /// Refuses a program whose declared dependencies are not all on disk,
 /// naming each and how to get it, rather than letting its imports fail as
 /// modules that do not exist.
-fn require_prepared_dependencies(entry: &Path) -> Result<()> {
+pub(crate) fn require_prepared_dependencies(entry: &Path) -> Result<()> {
     use gossamer_pkg::bundle::Unprepared;
     let missing = gossamer_pkg::bundle::unprepared_dependencies(entry);
     if missing.is_empty() {

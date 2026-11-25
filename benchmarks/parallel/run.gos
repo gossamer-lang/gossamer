@@ -40,12 +40,12 @@ fn timed(binary: String, workers: i64, runs: i64) -> Result<i64, String> {
 /// Builds `name` with the release pipeline into `scratch`, answering the
 /// binary's path.
 fn build(gos: String, scratch: String, name: String) -> Result<String, String> {
-    let src = path::join("benchmarks/parallel", name)
+    let src = path::join("benchmarks/parallel", name)?
     let out = process::run(gos, #["build", "--release", "--out-dir", scratch, src])?
     if out.code != 0 {
         return Err(format("build {}: {}", name, out.stderr))
     }
-    Ok(path::join(scratch, name.replace(".gos", "")))
+    Ok(path::join(scratch, name.replace(".gos", ""))?)
 }
 
 fn main() {
@@ -63,7 +63,7 @@ fn main() {
         i += 1
     }
     let cores = thread::num_cpus()
-    let scratch = path::join(env::temp_dir(), "gos-parallel-bench")
+    let scratch = path::join(env::temp_dir(), "gos-parallel-bench").expect("relative segment")
     let _ = fs::remove_dir_all(scratch)
     if let Err(e) = fs::create_dir_all(scratch) {
         eprintln("parallel: scratch: {}", e)

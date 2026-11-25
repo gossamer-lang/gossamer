@@ -6,8 +6,8 @@ use std::path
 
 fn main() {
     let base = fs::temp_dir("gos-names-meta").unwrap()
-    fs::write(path::join(base, "three.txt"), "abc".bytes()).unwrap()
-    fs::write(path::join(base, "five.txt"), "abcde".bytes()).unwrap()
+    fs::write(path::join(base, "three.txt").expect("relative segment"), "abc".bytes()).unwrap()
+    fs::write(path::join(base, "five.txt").expect("relative segment"), "abcde".bytes()).unwrap()
 
     let mut entries = fs::read_dir(base).unwrap()
     entries.sort_by_key(|e| e.name)

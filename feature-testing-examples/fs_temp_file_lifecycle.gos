@@ -8,7 +8,7 @@ use std::fs
 use std::path
 
 fn temp_path(name: String) -> String {
-    path::join(env::temp_dir(), format("gossamer_test_{}", name))
+    path::join(env::temp_dir(), format("gossamer_test_{}", name)).expect("relative segment")
 }
 
 fn write_and_read(path: String, content: String) -> Result<String, errors::Error> {

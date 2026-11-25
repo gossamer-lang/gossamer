@@ -69,11 +69,13 @@ fn guarded(xs: Vec<i64>) -> i64 {
 }
 
 fn run() -> Result<(), errors::Error> {
-    let m = sync::Mutex::new()
+    // One lock per worker: the panic in `b` poisons its own lock only, so
+    // each worker's answer does not depend on which ran first.
+    let ma, mb, mc = sync::Mutex::new(), sync::Mutex::new(), sync::Mutex::new()
     cohort(policy: Policy::CollectAll) {
-        let a = spawn(|| risky(m, 1))
-        let b = spawn(|| risky(m, 2))
-        let c = spawn(|| risky(m, 3))
+        let a = spawn(|| risky(ma, 1))
+        let b = spawn(|| risky(mb, 2))
+        let c = spawn(|| risky(mc, 3))
         println("{} {} {}", a.join(), b.join(), c.join())
         let d = spawn(|| noisy())
         println("{}", d.join())
@@ -90,9 +92,14 @@ fn main() {
     println("{}", h.join())
     let g = spawn(|| guarded(#[1, 2, 3]))
     println("{}", g.join())
-    m.lock()
-    println("main took the lock")
-    m.unlock()
+    // The panic that unwound through `risky` released the lock and poisoned
+    // it, so a later locker panics naming that panic.
+    let retry = spawn(|| {
+        m.lock()
+        m.unlock()
+        "took the lock"
+    })
+    println("{}", retry.join())
     let mut log = #[]
     defer println("main defer saw {:?}", log)
     for i in 0..10 {

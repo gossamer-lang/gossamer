@@ -6,6 +6,7 @@ impl Ord for Ranked {
     fn cmp(&self, other: Ranked) -> i64 { other.x - self.x }
 }
 
+#[derive(PartialOrd, Ord)]
 struct Plain { x: i64 }
 
 enum Level { Low, Mid, High }

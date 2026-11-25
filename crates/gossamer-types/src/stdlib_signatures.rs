@@ -2819,7 +2819,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::path",
         name: "join",
-        signature: "fn join(base: String, segment: String) -> String",
+        signature: "fn join(base: String, segment: String) -> Result<String, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::path",

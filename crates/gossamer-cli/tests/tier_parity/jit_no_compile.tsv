@@ -505,3 +505,5 @@ feature-testing-examples/map_literal_distinct_keys.gos	no hot body
 feature-testing-examples/bidi_escapes_in_literals.gos	no hot body
 feature-testing-examples/static_mut_through_unsafe_block.gos	no hot body
 feature-testing-examples/hash_keys_by_definition.gos	no hot body
+feature-testing-examples/mutex_guard_scope.gos	cross-goroutine
+feature-testing-examples/mutex_poison.gos	cross-goroutine

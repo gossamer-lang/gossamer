@@ -4718,7 +4718,7 @@ fn a_module_type_sharing_a_root_types_name_keeps_its_own_order() {
         &[
             (
                 "src/geo.gos",
-                "pub struct Point { x: i64 }\n\n\
+                "#[derive(PartialOrd, Ord)]\npub struct Point { x: i64 }\n\n\
                  pub fn ordered() -> Vec<Point> {\n\
                  \x20   let mut ps = #[Point { x: 9 }, Point { x: 3 }]\n\
                  \x20   ps.sort()\n\
@@ -4728,6 +4728,7 @@ fn a_module_type_sharing_a_root_types_name_keeps_its_own_order() {
             (
                 "src/main.gos",
                 "use geo\n\n\
+                 #[derive(PartialOrd, Ord)]\n\
                  struct Point { x: i64 }\n\n\
                  fn main() {\n\
                  \x20   let mut ps = #[Point { x: 2 }, Point { x: 1 }]\n\
@@ -5124,7 +5125,7 @@ fn a_project_module_named_like_a_std_module_keeps_its_own_items() {
                 "src/main.gos",
                 "use std::path\nuse crate::render::path::Path\nuse crate::other\n\n\
                  fn main() {\n    let p = Path::default()\n    let q = crate::render::path::Path { cmds: #[1.0] }\n\
-                 \x20   println(f\"{p.cmds.len()} {q.cmds.len()} {other::joined(\"/a\")} {path::join(\"/b\", \"c\")}\")\n}\n",
+                 \x20   println(f\"{p.cmds.len()} {q.cmds.len()} {other::joined(\"/a\")} {path::join(\"/b\", \"c\").unwrap_or(\"\")}\")\n}\n",
             ),
             ("src/render/mod.gos", "pub mod path\n"),
             (
@@ -5133,7 +5134,7 @@ fn a_project_module_named_like_a_std_module_keeps_its_own_items() {
             ),
             (
                 "src/other.gos",
-                "use std::path\n\npub fn joined(p: String) -> String { path::join(p, \"z\") }\n",
+                "use std::path\n\npub fn joined(p: String) -> String { path::join(p, \"z\").unwrap_or(\"\") }\n",
             ),
         ],
     );
@@ -5450,4 +5451,29 @@ fn a_dependency_import_shadows_a_root_module_of_the_same_name() {
     let _ = fs::remove_dir_all(&root);
     assert_eq!(out.2, Some(0), "stderr: {}", out.1);
     assert_eq!(out.0.trim(), "1 4", "stdout: {:?}", out.0);
+}
+
+/// Top-level statements that use `?` beside a serde call answer
+/// `Result<(), errors::Error>` with no `use std::errors` in the program,
+/// while a program that names `errors::` itself still has to import it.
+#[test]
+fn top_level_try_beside_serde_calls_needs_no_errors_import() {
+    let dir = fresh_dir("toplevel-try-serde");
+    let accepted = write_source(
+        &dir,
+        "accepted",
+        "struct Rec { n: i64 }\n\nlet text = to_json::<Rec>(Rec { n: 2 })?\nlet back = from_json::<Rec>(text)?\nprintln(f\"{text} {back.n}\")\n",
+    );
+    let out = run_vm(&accepted);
+    assert_eq!(out.2, Some(0), "stderr: {}", out.1);
+    assert_eq!(out.0.trim(), "{\"n\":2} 2", "stdout: {:?}", out.0);
+    let refused = write_source(
+        &dir,
+        "refused",
+        "struct Rec { n: i64 }\n\nlet text = to_json::<Rec>(Rec { n: 2 })?\nlet e: errors::Error = errors::new(text)\nprintln(e)\n",
+    );
+    let out = run_vm(&refused);
+    let _ = fs::remove_dir_all(&dir);
+    assert_ne!(out.2, Some(0), "stdout: {}", out.0);
+    assert!(out.1.contains("error[GR0001]"), "stderr: {}", out.1);
 }
