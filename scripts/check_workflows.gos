@@ -23,7 +23,7 @@ const ACTIONS: String = ".github/actions"
 fn repo_root() -> String {
     let mut directory = env::current_dir().unwrap_or(".")
     loop {
-        if fs::is_dir(path::join(directory, WORKFLOWS).expect("relative segment")) {
+        if fs::is_dir(path::join(directory, WORKFLOWS)) {
             return directory
         }
         match path::parent(directory) {
@@ -98,12 +98,12 @@ fn check(file: String, needs_jobs: bool) -> bool {
 fn main() {
     let root = repo_root()
     let mut failed = false
-    for file in yaml_files(path::join(root, WORKFLOWS).expect("relative segment")) {
+    for file in yaml_files(path::join(root, WORKFLOWS)) {
         if !check(file, true) {
             failed = true
         }
     }
-    for file in yaml_files(path::join(root, ACTIONS).expect("relative segment")) {
+    for file in yaml_files(path::join(root, ACTIONS)) {
         if !check(file, false) {
             failed = true
         }

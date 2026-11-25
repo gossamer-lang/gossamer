@@ -5125,7 +5125,7 @@ fn a_project_module_named_like_a_std_module_keeps_its_own_items() {
                 "src/main.gos",
                 "use std::path\nuse crate::render::path::Path\nuse crate::other\n\n\
                  fn main() {\n    let p = Path::default()\n    let q = crate::render::path::Path { cmds: #[1.0] }\n\
-                 \x20   println(f\"{p.cmds.len()} {q.cmds.len()} {other::joined(\"/a\")} {path::join(\"/b\", \"c\").unwrap_or(\"\")}\")\n}\n",
+                 \x20   println(f\"{p.cmds.len()} {q.cmds.len()} {other::joined(\"/a\")} {path::join(\"/b\", \"c\")}\")\n}\n",
             ),
             ("src/render/mod.gos", "pub mod path\n"),
             (
@@ -5134,7 +5134,7 @@ fn a_project_module_named_like_a_std_module_keeps_its_own_items() {
             ),
             (
                 "src/other.gos",
-                "use std::path\n\npub fn joined(p: String) -> String { path::join(p, \"z\").unwrap_or(\"\") }\n",
+                "use std::path\n\npub fn joined(p: String) -> String { path::join(p, \"z\") }\n",
             ),
         ],
     );

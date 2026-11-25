@@ -7,7 +7,7 @@
 use std::{bufio, env, errors, fs, path}
 
 fn scratch(name: String) -> String {
-    path::join(env::temp_dir(), f"gossamer_bufio_{name}").expect("relative segment")
+    path::join(env::temp_dir(), f"gossamer_bufio_{name}")
 }
 
 fn write_flushed(target: String) -> Result<(), errors::Error> {

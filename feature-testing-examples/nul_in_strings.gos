@@ -92,7 +92,7 @@ fn main() {
     println("set={} {}", seen.len(), seen.contains("x\0y"))
 
     // File round-trip: the bytes written must be the bytes read back.
-    let target = path::join(env::temp_dir(), "gossamer_test_nul_in_strings.bin").expect("relative segment")
+    let target = path::join(env::temp_dir(), "gossamer_test_nul_in_strings.bin")
     match fs::write(target, literal.as_bytes()) {
         Ok(_) => match fs::read_to_string(target) {
             Ok(back) => println("file={} {}", back.len(), sha256::hex(back.as_bytes()))

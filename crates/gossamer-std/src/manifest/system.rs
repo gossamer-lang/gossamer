@@ -556,7 +556,7 @@ pub const PATH: StdModule = StdModule {
         StdItem {
             name: "join",
             kind: StdItemKind::Function,
-            doc: "`join(base, segment) -> Result<String, errors::Error>`: `base` and the relative `segment` joined by `/`. A segment that names a path outside `base` is an `Err`: an absolute one (`/etc/passwd`, `C:/x`) or one whose `..` climbs above `base` (`../../etc`). A relative path meant to climb, such as a folder the user typed, resolves with `normalize(f\"{base}/{rel}\")`.",
+            doc: "Joins two path fragments with `/`; an absolute second fragment replaces the first.",
         },
         StdItem {
             name: "walk",

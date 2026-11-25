@@ -61,10 +61,10 @@ fn output_of(result: Result<process::Output, errors::Error>) -> String {
 
 fn main() {
     let program, flag = shell()
-    let root = path::join(env::temp_dir(), "gossamer_run_in_fixture").expect("relative segment")
+    let root = path::join(env::temp_dir(), "gossamer_run_in_fixture")
     let _ = fs::remove_dir_all(root)
     let _ = fs::create_dir_all(root)
-    let _ = fs::write(path::join(root, "marker.txt").expect("relative segment"), "inside".as_bytes())
+    let _ = fs::write(path::join(root, "marker.txt"), "inside".as_bytes())
 
     // The child starts where the caller said, so a relative path it
     // reads is relative to that directory.
@@ -92,7 +92,7 @@ fn main() {
     println("inherited env: {}", !output_of(inherited_env).is_empty())
 
     // A command that does not exist is an Err, as it is for run.
-    let missing = path::join(root, "no-such-command").expect("relative segment")
+    let missing = path::join(root, "no-such-command")
     match process::run_in(missing, #[], "", #[]) {
         Ok(output) => println("missing: code={}", output.code)
         Err(_) => println("missing: error")

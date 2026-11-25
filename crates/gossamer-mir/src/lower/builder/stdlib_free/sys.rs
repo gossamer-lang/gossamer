@@ -234,10 +234,7 @@ impl<'a> Builder<'a> {
         _args: &[HirExpr],
     ) -> Option<(&'static str, gossamer_types::Ty)> {
         Some(match joined {
-            "path::join" => {
-                let s = self.tcx.string_ty();
-                ("gos_rt_path_join", self.result_of(s))
-            }
+            "path::join" => ("gos_rt_path_join", self.tcx.string_ty()),
             "path::split" => {
                 let s = self.tcx.string_ty();
                 let tup = self.tcx.intern(gossamer_types::TyKind::Tuple(vec![s, s]));

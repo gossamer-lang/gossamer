@@ -31,7 +31,7 @@ const TIME_BINARY: String = "/usr/bin/time"
 fn repo_root() -> String {
     let mut directory = env::current_dir().unwrap_or(".")
     loop {
-        if fs::is_file(path::join(directory, "benchmarks/idle/empty.gos").expect("relative segment")) {
+        if fs::is_file(path::join(directory, "benchmarks/idle/empty.gos")) {
             return directory
         }
         match path::parent(directory) {
@@ -54,7 +54,7 @@ fn millis_of(seconds: String) -> Option<i64> {
 
 fn main() {
     let root = repo_root()
-    let gos = env::var("GOS").unwrap_or(path::join(root, "target/release/gos").expect("relative segment"))
+    let gos = env::var("GOS").unwrap_or(path::join(root, "target/release/gos"))
     let threshold_ms = env::var("IDLE_CPU_THRESHOLD_MS").unwrap_or("400").to_i64().unwrap_or(400)
     if !fs::is_file(gos) {
         eprintln("error: gos binary not found at {} - set GOS or build first", gos)
@@ -65,7 +65,7 @@ fn main() {
         process::exit(2)
     }
 
-    let program = path::join(root, "benchmarks/idle/empty.gos").expect("relative segment")
+    let program = path::join(root, "benchmarks/idle/empty.gos")
     let arguments = #["-f", "%U %S", gos, "run", program]
     let measured = match process::run(TIME_BINARY, arguments) {
         Ok(measured) => measured

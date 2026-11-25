@@ -76,7 +76,7 @@ fn repo_root() -> String {
     }
     let mut directory = env::current_dir().unwrap_or(".")
     loop {
-        if fs::is_dir(path::join(directory, "example-external-libraries").expect("relative segment")) {
+        if fs::is_dir(path::join(directory, "example-external-libraries")) {
             return directory
         }
         match path::parent(directory) {
@@ -95,7 +95,7 @@ fn fail(message: String, code: i64) {
 fn main() {
     let root = repo_root()
     let tuigoose = env::var("TUIGOOSE_ROOT")
-        .unwrap_or(path::join(root, "../tuigoose").expect("relative segment"))
+        .unwrap_or(path::join(root, "../tuigoose"))
     if !fs::is_dir(tuigoose) {
         eprintln("test_rust_binding_e2e: tuigoose not found at {}", tuigoose)
         eprintln("  Set TUIGOOSE_ROOT or place tuigoose at <GOSSAMER_ROOT>/../tuigoose.")
@@ -112,7 +112,7 @@ fn main() {
         }
         Err(e) => fail(format("cargo build: {}", e), 2)
     }
-    let gos = path::join(target_dir(root), "debug/gos").expect("relative segment")
+    let gos = path::join(target_dir(root), "debug/gos")
     if !fs::is_file(gos) {
         fail(format("gos binary not produced at {}", gos), 2)
     }
@@ -129,8 +129,8 @@ fn main() {
         println("test_rust_binding_e2e: leaving {} for inspection", work)
     }
 
-    let project = path::join(work, "sample-app").expect("relative segment")
-    let _ = fs::create_dir_all(path::join(project, "src").expect("relative segment"))
+    let project = path::join(work, "sample-app")
+    let _ = fs::create_dir_all(path::join(project, "src"))
     let manifest = format(
         """
         [project]
@@ -144,8 +144,8 @@ fn main() {
         """
         tuigoose
     )
-    let _ = fs::write(path::join(project, "project.toml").expect("relative segment"), manifest.as_bytes())
-    let _ = fs::write(path::join(project, "src/main.gos").expect("relative segment"), SAMPLE_SOURCE.as_bytes())
+    let _ = fs::write(path::join(project, "project.toml"), manifest.as_bytes())
+    let _ = fs::write(path::join(project, "src/main.gos"), SAMPLE_SOURCE.as_bytes())
 
     println("=> running gos in {}...", project)
     // The runner builds synchronously and its output is forwarded, so a
@@ -184,5 +184,5 @@ fn main() {
 /// `root` unless absolute, else `<root>/target`.
 fn target_dir(root: String) -> String {
     let dir = env::var("CARGO_TARGET_DIR").unwrap_or("target")
-    if path::is_absolute(dir) { dir } else { path::join(root, dir).expect("relative segment") }
+    if path::is_absolute(dir) { dir } else { path::join(root, dir) }
 }

@@ -33,7 +33,7 @@ fn read_f64(page: Vec<u8>, at: i64) -> f64 {
 
 fn main() -> Result<(), errors::Error> {
     let dir = fs::temp_dir("gossamer-fs-positional")?
-    let db = path::join(dir, "pages.db")?
+    let db = path::join(dir, "pages.db")
 
     let writer = fs::create(db)?
     let page = build_page(13, 3.141592653589793)

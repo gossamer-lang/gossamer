@@ -102,6 +102,7 @@ object = { version = "0.39", default-features = false, features = ["read"] }
 gossamer-std = { workspace = true }
 
 [dev-dependencies]
+object = { version = "0.39", default-features = false, features = ["read", "write"] }
 # Bounds how long a liveness test waits for a program that would hang.
 wait-timeout = { workspace = true }
 # Reads the zlib-compressed debug sections a `-g` build links.

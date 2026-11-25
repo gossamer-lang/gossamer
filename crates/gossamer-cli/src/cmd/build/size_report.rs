@@ -45,7 +45,11 @@ pub(super) fn bytes_by_owner(binary: &[u8], program: &ProgramSymbols) -> Vec<(St
         if section.file_range().is_none() {
             continue;
         }
-        let end = section.address() + section.size();
+        let start = section.address();
+        let end = start + section.size();
+        // A linker can attach a symbol to a section at an address outside it
+        // (an end marker past padding); such a symbol owns none of its bytes.
+        symbols.retain(|(address, _, _)| (start..end).contains(address));
         symbols.sort_by_key(|(address, _, _)| *address);
         symbols.dedup_by_key(|(address, _, _)| *address);
         for (i, (address, size, name)) in symbols.iter().enumerate() {
@@ -246,6 +250,36 @@ mod tests {
                 String::from_utf8_lossy(name)
             );
         }
+    }
+
+    #[test]
+    fn a_symbol_outside_its_section_owns_none_of_its_bytes() {
+        use object::write::{Object, Symbol, SymbolSection};
+        use object::{
+            Architecture, BinaryFormat, Endianness, SectionKind, SymbolFlags, SymbolScope,
+        };
+
+        let mut obj = Object::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+        let text = obj.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+        obj.append_section_data(text, &[0x90; 16], 16);
+        for (name, value, size) in [(&b"pick"[..], 0, 8), (&b"past_the_end"[..], 32, 0)] {
+            obj.add_symbol(Symbol {
+                name: name.to_vec(),
+                value,
+                size,
+                kind: SymbolKind::Text,
+                scope: SymbolScope::Linkage,
+                weak: false,
+                section: SymbolSection::Section(text),
+                flags: SymbolFlags::None,
+            });
+        }
+        let binary = obj.write().expect("write object");
+        let program: ProgramSymbols = [b"pick".to_vec()].into();
+        assert_eq!(
+            bytes_by_owner(&binary, &program),
+            vec![("program".to_string(), 8)]
+        );
     }
 
     #[test]

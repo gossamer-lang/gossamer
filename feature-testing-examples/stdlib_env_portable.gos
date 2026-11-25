@@ -68,7 +68,7 @@ fn main() -> Result<(), errors::Error> {
     // arguments of its own sees none. `path::join` on the answers above is
     // the only path construction here, and it round-trips on every host.
     assert(env::args().len() == 0, "no arguments were passed to this program")
-    let joined = path::join(temp, "leaf")?
+    let joined = path::join(temp, "leaf")
     assert(joined.byte_len() > temp.byte_len(), "join extends its base")
 
     println("env portable ok")

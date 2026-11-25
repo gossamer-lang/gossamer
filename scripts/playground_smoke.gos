@@ -105,15 +105,15 @@ fn site_programs(site: String, dir: String) -> Vec<String> {
     }
     let mut written = #[]
     let mut programs = #[]
-    for (slug, code) in tour_lessons(read_site_source(path::join(site, "landing/tour/tour.js").expect("relative segment"))) {
+    for (slug, code) in tour_lessons(read_site_source(path::join(site, "landing/tour/tour.js"))) {
         programs.push((f"tour-{slug}.gos", code))
     }
-    let page = read_site_source(path::join(site, "landing/index.html").expect("relative segment"))
+    let page = read_site_source(path::join(site, "landing/index.html"))
     for (index, code) in landing_listings(page).iter().enumerate() {
         programs.push((f"listing-{index}.gos", code))
     }
     for (name, code) in programs {
-        let file = path::join(dir, name).expect("relative segment")
+        let file = path::join(dir, name)
         if let Err(e) = fs::write(file, code.as_bytes()) {
             eprintln("playground_smoke: writing {}: {}", file, e)
             process::exit(1)
@@ -145,7 +145,7 @@ fn build_runtime(dir: String) -> bool {
         }
     }
     let target = env::var("CARGO_TARGET_DIR").unwrap_or("target")
-    let wasm = path::join(target, "wasm32-unknown-unknown/release/gossamer_playground.wasm").expect("relative segment")
+    let wasm = path::join(target, "wasm32-unknown-unknown/release/gossamer_playground.wasm")
     match process::run("wasm-bindgen", #[wasm, "--out-dir", dir, "--target", "nodejs"]) {
         Ok(out) => {
             if out.code != 0 {
@@ -176,7 +176,7 @@ fn main() {
         }
     }
     if dir == "" {
-        dir = path::join(env::temp_dir(), "gos-playground-smoke").expect("relative segment")
+        dir = path::join(env::temp_dir(), "gos-playground-smoke")
         let _ = fs::remove_dir_all(dir)
         if let Err(e) = fs::create_dir_all(dir) {
             eprintln("playground_smoke: creating {}: {}", dir, e)
@@ -197,7 +197,7 @@ fn main() {
     }
     if site != "" {
         argv.push("--must-run")
-        for file in site_programs(site, path::join(dir, "site").expect("relative segment")) {
+        for file in site_programs(site, path::join(dir, "site")) {
             argv.push(file)
             count += 1
         }

@@ -83,7 +83,7 @@ fn main() {
         Err(e) => println("proxy_post error: {}", e)
     }
 
-    let file = path::join(env::temp_dir(), "gossamer_serve_file_fixture.txt").expect("relative segment")
+    let file = path::join(env::temp_dir(), "gossamer_serve_file_fixture.txt")
     let _ = fs::write(file, "served-from-disk".as_bytes())
     match static_files::serve_file(file) {
         Ok(r) => println("serve_file status={} body={}", r.status, r.body)
