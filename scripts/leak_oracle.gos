@@ -461,9 +461,9 @@ fn peak_rss_kb(argv: Vec<String>) -> Option<i64> {
 /// directory and the binary keeps the source's stem - so the two counts of
 /// one probe would otherwise land on the same path.
 fn peak_at(gos: String, dir: String, name: String, source: String, count: i64) -> Option<i64> {
-    let out = path::join(dir, format("{}_{}", name, count)).expect("relative segment")
-    let src = path::join(out, format("{}.gos", name)).expect("relative segment")
-    let bin = path::join(out, name).expect("relative segment")
+    let out = path::join(dir, format("{}_{}", name, count))
+    let src = path::join(out, format("{}.gos", name))
+    let bin = path::join(out, name)
     if let Err(e) = fs::create_dir_all(out) {
         eprintln("leak_oracle: creating {}: {}", out, e)
         return None
@@ -489,8 +489,8 @@ fn peak_at(gos: String, dir: String, name: String, source: String, count: i64) -
 
 fn main() {
     let args = env::args()
-    let gos = if args.len() > 0 { args[0] } else { path::join(target_dir("."), "debug/gos").expect("relative segment") }
-    let dir = path::join(env::temp_dir(), "gos-leak-oracle").expect("relative segment")
+    let gos = if args.len() > 0 { args[0] } else { path::join(target_dir("."), "debug/gos") }
+    let dir = path::join(env::temp_dir(), "gos-leak-oracle")
     // A binary left by an earlier run would be measured instead of the one
     // this run builds, so the tree starts empty.
     let _ = fs::remove_dir_all(dir)
@@ -536,5 +536,5 @@ fn main() {
 /// `root` unless absolute, else `<root>/target`.
 fn target_dir(root: String) -> String {
     let dir = env::var("CARGO_TARGET_DIR").unwrap_or("target")
-    if path::is_absolute(dir) { dir } else { path::join(root, dir).expect("relative segment") }
+    if path::is_absolute(dir) { dir } else { path::join(root, dir) }
 }

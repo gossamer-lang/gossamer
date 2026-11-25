@@ -3407,12 +3407,8 @@ disagree with the first if the directory changed underneath.
 `extension`, `is_absolute`, `normalize`, `starts_with`, `prefixes`,
 `unique_prefixes`, `matches`, `glob`, `walk`. Separator handling is
 per-platform, so a path built with `join` is correct on every supported
-target. `join(base, segment)` answers `Result<String, errors::Error>`: a
-segment that names a path outside `base` - an absolute one (`/etc/passwd`,
-`C:/x`, `\\host\share`) or one whose `..` climbs above `base` - is an
-`Err`, so a name read from input cannot reach outside the directory it is
-joined under; `Path::join` answers the same way. `file_name`, `file_stem`,
-and `extension` return `Option<String>` because not every path has one.
+target. `file_name`, `file_stem`, and `extension` return `Option<String>`
+because not every path has one.
 
 **`std::process`** - running other programs. `run(prog, args)` executes
 directly with no shell and returns `Result<{stdout, stderr, code},

@@ -1649,7 +1649,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_path_glob", (Ptr) -> I128, Both, "path::glob(pattern) -> Result<Vec<String>, errors::Error>; sorted filesystem matches for a `*` / `?` / `[abc]` / `**` pattern."),
     rt!("gos_rt_path_has_prefix", (Ptr, Ptr) -> I32, Cranelift, "path::starts_with(p, prefix) -> bool."),
     rt!("gos_rt_path_is_absolute", (Ptr) -> I32, Cranelift, "path::is_absolute(p) -> bool."),
-    rt!("gos_rt_path_join", (Ptr, Ptr) -> I128, Cranelift, "Join a path and a relative segment, returning Result<String, errors::Error> that refuses an absolute segment or a `..` above the base."),
+    rt_str!("gos_rt_path_join", (Ptr, Ptr) -> Ptr, Cranelift, "Join two path strings with the OS separator."),
     rt!("gos_rt_path_matches", (Ptr, Ptr) -> I64, Both, "path::matches(pattern, name) -> bool; single-segment shell-glob match (Go filepath.Match)."),
     rt!("gos_rt_path_parent", (Ptr) -> I128, Cranelift, "Return Option<String> of the path's parent directory."),
     rt_vec!("gos_rt_path_prefixes", (Ptr) -> Ptr, Cranelift, "Return cumulative Rust-like lexical path prefixes as Vec<String>."),

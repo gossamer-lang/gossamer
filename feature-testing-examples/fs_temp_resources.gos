@@ -10,7 +10,7 @@ fn main() {
         Err(err) => { println("temp dir error: {}", err)
             return }
     }
-    let nested = path::join(dir, "roundtrip.txt").expect("relative segment")
+    let nested = path::join(dir, "roundtrip.txt")
     match fs::write(nested, "temporary contents".as_bytes()) {
         Ok(_) => println("temp dir writable: true")
         Err(err) => { println("temp write error: {}", err)

@@ -10,7 +10,7 @@ use {
 fn main() {
     println(math::abs(-4.5))
     println(text::repeat("ab", 3))
-    println(path::join("dir", "file.txt").expect("relative segment"))
+    println(path::join("dir", "file.txt"))
     let mut m: BTreeMap<String, i64> = BTreeMap::new()
     m.insert("b", 2)
     m.insert("a", 1)

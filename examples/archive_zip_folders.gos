@@ -57,7 +57,7 @@ fn zip_each_folder(root: String) -> Result<Vec<String>, errors::Error> {
     let children = fs::read_dir(root).map_err(|e| errors::wrap(e, f"listing {root}"))?
     for child in children {
         if child.is_dir {
-            let dest = path::join(root, child.name + ".zip")?
+            let dest = path::join(root, child.name + ".zip")
             let size = zip_folder(child.path, dest)?
             made.push(f"{child.name}.zip: {size} bytes")
         }
@@ -66,7 +66,7 @@ fn zip_each_folder(root: String) -> Result<Vec<String>, errors::Error> {
     Ok(made)
 }
 
-let root = path::join(env::temp_dir(), "gossamer-zip-folders")?
+let root = path::join(env::temp_dir(), "gossamer-zip-folders")
 let _ = fs::remove_dir_all(root)
 
 let tree = #[
@@ -77,7 +77,7 @@ let tree = #[
     ("notes/todo.md", "- ship it\n")
 ]
 for (name, body) in tree {
-    let full = path::join(root, name)?
+    let full = path::join(root, name)
     let dir, _ = path::split(full)
     fs::create_dir_all(dir).map_err(|e| errors::wrap(e, f"mkdir {dir}"))?
     fs::write(full, body.as_bytes()).map_err(|e| errors::wrap(e, f"write {full}"))?
@@ -87,7 +87,7 @@ for line in zip_each_folder(root)? {
     println(line)
 }
 
-let packed = fs::read(path::join(root, "images.zip")?)
+let packed = fs::read(path::join(root, "images.zip"))
     .map_err(|e| errors::wrap(e, "reading images.zip"))?
 println("images.zip holds:")
 for entry in archive::zip::read(packed)? {

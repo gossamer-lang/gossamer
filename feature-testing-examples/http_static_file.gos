@@ -29,7 +29,7 @@ use std::time
 // idempotent create_dir_all + overwrite + remove_all, so a stable name
 // is collision-free without relying on a per-process suffix.
 fn doc_root() -> String {
-    path::join(env::temp_dir(), "gossamer_static_fixture").expect("relative segment")
+    path::join(env::temp_dir(), "gossamer_static_fixture")
 }
 
 fn serve_files(root: String) {
@@ -66,11 +66,11 @@ fn header_of(headers: Vec<(String, String)>, name: String) -> String {
 fn main() {
     let root = doc_root()
     let _ = fs::create_dir_all(root)
-    let _ = fs::write(path::join(root, "hello.txt").expect("relative segment"), "static file ok".as_bytes())
-    let _ = fs::write(path::join(root, "index.html").expect("relative segment"), "root index".as_bytes())
-    let tour = path::join(root, "tour").expect("relative segment")
+    let _ = fs::write(path::join(root, "hello.txt"), "static file ok".as_bytes())
+    let _ = fs::write(path::join(root, "index.html"), "root index".as_bytes())
+    let tour = path::join(root, "tour")
     let _ = fs::create_dir_all(tour)
-    let _ = fs::write(path::join(tour, "index.html").expect("relative segment"), "tour index".as_bytes())
+    let _ = fs::write(path::join(tour, "index.html"), "tour index".as_bytes())
 
     spawn(|| serve_files(root))
     await_ready("http://127.0.0.1:23883/hello.txt")

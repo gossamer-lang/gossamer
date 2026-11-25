@@ -2359,7 +2359,7 @@ struct __gos_path_Path { value: String }
 impl __gos_path_Path {
     fn new(value: String) -> __gos_path_Path { __gos_path_Path { value: value } }
     fn as_str(&self) -> String { self.value }
-    fn join(&self, segment: String) -> Result<__gos_path_Path, errors::Error> { Ok(__gos_path_Path { value: path::join(self.value, segment)? }) }
+    fn join(&self, segment: String) -> __gos_path_Path { __gos_path_Path { value: path::join(self.value, segment) } }
     fn parent(&self) -> Option<__gos_path_Path> {
         match path::parent(self.value) { Some(value) => Some(__gos_path_Path { value: value }), None => None }
     }

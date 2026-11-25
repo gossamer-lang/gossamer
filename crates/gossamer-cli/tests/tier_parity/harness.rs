@@ -1527,8 +1527,6 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/process_run_in.gos"),
     spec("feature-testing-examples/path_split.gos"),
     spec("feature-testing-examples/path_value.gos"),
-    // `path::join` answers an error for a segment that leaves its base.
-    spec("feature-testing-examples/path_join_checked.gos"),
     // Indexing past a String's end names a string in its panic.
     spec("feature-testing-examples/string_index_oob_message.gos"),
     spec("feature-testing-examples/base32_decode.gos"),

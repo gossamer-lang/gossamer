@@ -1,12 +1,11 @@
 # Changelog
 
-## 0.85.0 - Declared orders, scoped mutex guards, checked path joins, and more compile-time refusals
+## 0.85.0 - Declared orders, scoped mutex guards, and more compile-time refusals
 
 - A struct or enum is ordered only when it declares an order, with `#[derive(PartialOrd, Ord)]` or an `impl Ord`: sorting one, comparing it with `<`, `min` / `max`, a `BTreeMap` / `BTreeSet` key, a heap element, or an `Ord` bound on a type with none is `GT0143`, and `gos check --fix` adds the derive to the type and to each field type it needs. Equality stays automatic. Sorting such a type compiled before, and the VM then failed with "`cmp` is not bound" while native code left the `Vec` unsorted.
 - `let guard = m.lock()` holds a `sync::Mutex` to the end of the block that binds it and releases it at every exit: the block's end, `return`, `break`, `?`, and a panic. `guard.unlock()` releases it sooner; a guard used for anything else is `GT0144`. A bare `m.lock()` still holds the lock until `m.unlock()`.
 - A `Mutex` released while a panic unwinds through its holder is poisoned: every later `lock()` panics with `Mutex poisoned: a goroutine panicked while holding it: <message>`.
 - `m.unlock()` in a goroutine that does not hold the lock panics in that goroutine on every tier, where the VM released the lock and native code aborted the process.
-- `path::join(base, segment)` and `Path::join` answer `Result<String, errors::Error>`, refusing a segment that names a path outside `base`: an absolute one (`/etc/passwd`, `C:/x`, a UNC share) or one whose `..` climbs above `base`. An absolute segment used to replace the base, and `..` reached outside it.
 - A `let task = spawn(..)` in `main` that nothing joins is an error (`GL0065`), where it was a warning; `#[lint(warn(unjoined_task))]` keeps it a warning.
 - A statement that calls a method answering a new value and drops it, such as `name.to_uppercase()` or `xs.map(|x| x * 2)` on its own line, is `GT0140`, for the value-only methods of `String`, sequences, `Map`, `Set`, numbers, `char`, `Option`, and `Result`.
 - `&` and `|` (and `&=` / `|=`) on `bool` operands are `GT0141`, pointing to `&&` / `||`, since both sides ran where the short-circuit forms stop.

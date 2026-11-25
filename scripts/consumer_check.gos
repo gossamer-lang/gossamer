@@ -30,7 +30,7 @@ fn repo_root() -> String {
     }
     let mut directory = env::current_dir().unwrap_or(".")
     loop {
-        if fs::is_file(path::join(directory, "scripts/consumers.txt").expect("relative segment")) {
+        if fs::is_file(path::join(directory, "scripts/consumers.txt")) {
             return directory
         }
         match path::parent(directory) {
@@ -111,11 +111,11 @@ fn try_migration(gos: String, source: String, target: String, environment: Vec<(
 /// Checks one package, answering `None` when every step passed and the
 /// failure report otherwise.
 fn check_consumer(gos: String, consumer: Consumer, scratch: String) -> Option<String> {
-    let home = path::join(scratch, consumer.name).expect("relative segment")
-    let dir = path::join(home, "src").expect("relative segment")
+    let home = path::join(scratch, consumer.name)
+    let dir = path::join(home, "src")
     let environment = #[
-        ("GOS_CACHE_DIR", path::join(home, "gos-cache").expect("relative segment"))
-        ("XDG_CACHE_HOME", path::join(home, "xdg-cache").expect("relative segment"))
+        ("GOS_CACHE_DIR", path::join(home, "gos-cache"))
+        ("XDG_CACHE_HOME", path::join(home, "xdg-cache"))
     ]
     let cloned, clone_out = run(
         "git"
@@ -141,7 +141,7 @@ fn check_consumer(gos: String, consumer: Consumer, scratch: String) -> Option<St
         if !passed {
             let mut report = f"`gos {args.join(" ")}` failed:\n{tail(output, 40)}"
             if step == "check" {
-                let migration = try_migration(gos, dir, path::join(home, "migrated").expect("relative segment"), environment)
+                let migration = try_migration(gos, dir, path::join(home, "migrated"), environment)
                 report += f"\n{migration}"
             }
             return Some(report)
@@ -153,7 +153,7 @@ fn check_consumer(gos: String, consumer: Consumer, scratch: String) -> Option<St
 fn main() {
     let root = repo_root()
     let mut all = false
-    let mut gos = path::join(root, "target/release/gos").expect("relative segment")
+    let mut gos = path::join(root, "target/release/gos")
     for arg in env::args() {
         if arg == "--all" {
             all = true
@@ -164,13 +164,13 @@ fn main() {
     // Each step runs inside its clone, so the toolchain is named from the
     // root rather than from wherever the script was started.
     if !path::is_absolute(gos) {
-        gos = path::join(env::current_dir().unwrap_or("."), gos).expect("relative segment")
+        gos = path::join(env::current_dir().unwrap_or("."), gos)
     }
     if !fs::is_file(gos) {
         eprintln(f"consumer_check: no toolchain at {gos}")
         process::exit(2)
     }
-    let text = match fs::read_to_string(path::join(root, "scripts/consumers.txt").expect("relative segment")) {
+    let text = match fs::read_to_string(path::join(root, "scripts/consumers.txt")) {
         Ok(text) => text
         Err(e) => {
             eprintln(f"consumer_check: reading scripts/consumers.txt: {e}")

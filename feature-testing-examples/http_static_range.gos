@@ -23,7 +23,7 @@ use std::process
 use std::time
 
 fn doc_root() -> String {
-    path::join(env::temp_dir(), "gossamer_static_range_fixture").expect("relative segment")
+    path::join(env::temp_dir(), "gossamer_static_range_fixture")
 }
 
 fn serve_files(root: String) {
@@ -60,7 +60,7 @@ fn main() {
     let root = doc_root()
     let _ = fs::create_dir_all(root)
     // 16-byte body so range arithmetic is easy to read.
-    let _ = fs::write(path::join(root, "data.txt").expect("relative segment"), "0123456789ABCDEF".as_bytes())
+    let _ = fs::write(path::join(root, "data.txt"), "0123456789ABCDEF".as_bytes())
 
     spawn(|| serve_files(root))
     let url = "http://127.0.0.1:23912/data.txt"

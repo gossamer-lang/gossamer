@@ -465,11 +465,7 @@ fn withdraw(lock: Mutex, balance: Shared<i64>, amount: i64) -> bool {
 Discover signatures with `hover` / `gos doc std::<module>`. Areas:
 
 - Core: `fmt io env fs path os process time context flag errors bytes
-  bufio`. `path::join(base, segment)?` answers a `Result`: a segment that
-  leaves `base` (absolute, or `..` above it) is an `Err`. A path the user
-  typed, which may climb on purpose, resolves with
-  `path::normalize(f"{base}/{rel}")`.
-  `process::run(prog, args)` executes without a shell;
+  bufio`. `process::run(prog, args)` executes without a shell;
   `Command::new(p).arg(a).stdout(Stdio::Piped).spawn()?` (after
   `use std::process::{Command, Stdio}`; also `env`, `dir`, `status`,
   `output`) answers a `Child` that reads, writes, and waits;

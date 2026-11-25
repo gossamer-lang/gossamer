@@ -149,10 +149,7 @@ pub(crate) fn builtin_path_dir(args: &[Value]) -> RuntimeResult<Value> {
 pub(crate) fn builtin_path_join_two(args: &[Value]) -> RuntimeResult<Value> {
     let a = args.first().and_then(as_str).unwrap_or("");
     let b = args.get(1).and_then(as_str).unwrap_or("");
-    Ok(match path_std::join(a, b) {
-        Ok(joined) => ok_variant(Value::String(joined.into())),
-        Err(message) => err_variant(message),
-    })
+    Ok(Value::String(path_std::join(a, b).into()))
 }
 
 pub(crate) fn builtin_path_clean(args: &[Value]) -> RuntimeResult<Value> {

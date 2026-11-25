@@ -13,15 +13,15 @@ fn main() {
         None => println("home_nonempty=false")
     }
 
-    let dir = path::join(env::temp_dir(), "gossamer-alias-demo").expect("relative segment")
+    let dir = path::join(env::temp_dir(), "gossamer-alias-demo")
     let _ = fs::remove_dir_all(dir)
-    let nested = path::join(dir, "a").expect("relative segment")
+    let nested = path::join(dir, "a")
     match fs::create_dir_all(nested) {
         Ok(_) => println("mkdir_all_ok=true")
         Err(e) => println("mkdir_all_err={}", e)
     }
 
-    let file = path::join(dir, "data.bin").expect("relative segment")
+    let file = path::join(dir, "data.bin")
     let _ = fs::write(file, "abc".as_bytes())
     let bytes = fs::read(file).unwrap()
     println("read_file_len={}", bytes.len())
@@ -40,8 +40,8 @@ fn main() {
 
     // A module alias and an item import reach the same functions and types
     // as the qualified spellings above.
-    let _ = f::write(path::join(dir, "alias.txt").expect("relative segment"), "via alias".bytes())
-    match f::read_to_string(path::join(dir, "alias.txt").expect("relative segment")) {
+    let _ = f::write(path::join(dir, "alias.txt"), "via alias".bytes())
+    match f::read_to_string(path::join(dir, "alias.txt")) {
         Ok(text) => println("alias_read={}", text)
         Err(e) => println("alias_read_err={}", e)
     }

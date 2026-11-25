@@ -31,7 +31,7 @@ fn repo_root() -> String {
     }
     let mut directory = env::current_dir().unwrap_or(".")
     loop {
-        if fs::is_dir(path::join(directory, "example-external-libraries").expect("relative segment")) {
+        if fs::is_dir(path::join(directory, "example-external-libraries")) {
             return directory
         }
         match path::parent(directory) {
@@ -59,7 +59,7 @@ fn produced_binary(directory: String) -> Option<String> {
     if ordered.is_empty() {
         return None
     }
-    Some(path::join(directory, ordered[0]).expect("relative segment"))
+    Some(path::join(directory, ordered[0]))
 }
 
 /// Builds one example and runs what it produced, scrubbed.
@@ -72,7 +72,7 @@ fn build_and_run(
     markers: Vec<String>
 ) {
     println("=> {}", label)
-    let _ = fs::remove_dir_all(path::join(project, "target").expect("relative segment"))
+    let _ = fs::remove_dir_all(path::join(project, "target"))
     let environment = #[("XDG_CACHE_HOME", *cache)]
     match process::run_in(gos, #["build", entry], project, environment) {
         Ok(result) => {
@@ -84,7 +84,7 @@ fn build_and_run(
         }
         Err(e) => fail(format("{}: {}", label, e))
     }
-    let Some(binary) = produced_binary(path::join(project, "target/debug").expect("relative segment")) else {
+    let Some(binary) = produced_binary(path::join(project, "target/debug")) else {
         fail(format("build did not produce a binary in {}/target/debug", project))
         return
     }
@@ -119,7 +119,7 @@ fn main() {
         }
         Err(e) => fail(format("cargo build: {}", e))
     }
-    let gos = path::join(target_dir(root), "debug/gos").expect("relative segment")
+    let gos = path::join(target_dir(root), "debug/gos")
     if !fs::is_file(gos) {
         fail(format("gos binary not produced at {}", gos))
     }
@@ -131,11 +131,11 @@ fn main() {
         }
     }
 
-    let examples = path::join(root, "example-external-libraries").expect("relative segment")
+    let examples = path::join(root, "example-external-libraries")
     build_and_run(
         gos
         "example 01 (echo-binding) - gos build"
-        path::join(examples, "01-gossamer-aware").expect("relative segment")
+        path::join(examples, "01-gossamer-aware")
         "src/main.gos"
         cache
         #["HELLO, GOSSAMER", "sum: 15", "count: 3"]
@@ -143,7 +143,7 @@ fn main() {
     build_and_run(
         gos
         "example 02 (unic-segment wrapper) - gos build"
-        path::join(examples, "02-plain-rust-wrapped").expect("relative segment")
+        path::join(examples, "02-plain-rust-wrapped")
         "src/main.gos"
         cache
         #["count: 10", "grapheme: n", "grapheme: ï"]
@@ -156,5 +156,5 @@ fn main() {
 /// `root` unless absolute, else `<root>/target`.
 fn target_dir(root: String) -> String {
     let dir = env::var("CARGO_TARGET_DIR").unwrap_or("target")
-    if path::is_absolute(dir) { dir } else { path::join(root, dir).expect("relative segment") }
+    if path::is_absolute(dir) { dir } else { path::join(root, dir) }
 }

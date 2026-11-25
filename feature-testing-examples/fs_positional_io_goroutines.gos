@@ -10,7 +10,7 @@ fn expected(offset: i64, len: i64) -> Vec<u8> {
 }
 
 fn main() {
-    let file_path = path::join(env::temp_dir(), "gos_fs_positional_goroutines.bin").expect("relative segment")
+    let file_path = path::join(env::temp_dir(), "gos_fs_positional_goroutines.bin")
     fs::write(file_path, expected(0, 65536)).unwrap()
     let tx, rx = channel(8)
     cohort {
