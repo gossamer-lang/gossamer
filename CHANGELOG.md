@@ -17,6 +17,7 @@
 - A native frame larger than a page probes each page it spans, so a large stack frame reaches the guard page and reports `GX0008` rather than stepping over it into other memory.
 - `main` waiting on a `Mutex` or `RwLock` a goroutine holds no longer reports a deadlock, about once in a hundred contended runs, in the instant after it takes the lock.
 - Indexing past the end of a `String` panics with "string index out of bounds", where it said "vec index".
+- On Windows, `gos run` keeps each batch of JIT-compiled code and its data in one reserved region, where a batch could land in pieces more than 2 GiB apart and stop the program with a panic inside the JIT, and a panic raised in JIT-compiled code finds every compiled frame it unwinds through.
 - A module the program names without importing it, such as `errors::Error` with no `use std::errors`, is `GR0001` in every file: the imports the toolchain adds for the code it generates (an entry-point `Result`, a `cohort`, serde, standard-library wrappers) no longer reach the program's own text, which accepted the name in some files and refused it in others.
 - A binding project whose `project.lock` pins a dependency to another source than `project.toml` declares, or that has not fetched one, reports the dependency and `gos fetch --update` before building its Rust crate, where cargo failed on the missing source.
 - A suggested rewrite that inserts a line keeps the indentation of the code it lands before, and a rewrite several diagnostics share is made once.

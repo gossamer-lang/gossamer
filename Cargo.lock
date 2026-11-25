@@ -1545,10 +1545,14 @@ dependencies = [
  "gossamer-resolve",
  "gossamer-runtime",
  "gossamer-types",
+ "libc",
  "object 0.39.1",
  "parking_lot",
  "rayon",
+ "region",
  "target-lexicon",
+ "wasmtime-internal-jit-icache-coherence",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

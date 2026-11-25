@@ -119,8 +119,8 @@ fn page_size() -> usize {
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 impl GrowableStack {
     /// Reserves `size` bytes of stack plus a guard page. The reservation
-    /// commits nothing: `MAP_NORESERVE` keeps it out of the commit charge,
-    /// and a page is backed the first time a frame touches it.
+    /// commits nothing: it stays out of the commit charge, and a page is
+    /// backed the first time a frame touches it.
     ///
     /// # Errors
     ///
@@ -130,6 +130,13 @@ impl GrowableStack {
         let page = page_size();
         let size = size.div_ceil(page) * page;
         let len = size + page;
+        // Linux charges a private mapping against the commit limit when it is
+        // made writable unless it was reserved `MAP_NORESERVE`; other systems
+        // charge pages only as they are touched and take no such flag.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let reserve = libc::MAP_NORESERVE;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let reserve = 0;
         // SAFETY: an anonymous private mapping of `len` bytes at an address
         // the kernel chooses; no existing memory is touched.
         let base = unsafe {
@@ -137,7 +144,7 @@ impl GrowableStack {
                 std::ptr::null_mut(),
                 len,
                 libc::PROT_NONE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | reserve,
                 -1,
                 0,
             )
@@ -266,14 +273,114 @@ pub fn on_growable_stack<R>(bytes: usize, f: impl FnOnce() -> R) -> R {
     let Ok(stack) = ProgramStack::new(bytes) else {
         return f();
     };
-    corosensei::on_stack(stack, move || {
-        let _restore = GuardRestore(crate::set_stack_guard(
+    let fiber = asan_fiber::enter(&stack);
+    let outcome = corosensei::on_stack(stack, move || {
+        let caller = asan_fiber::entered(fiber);
+        let restore = GuardRestore(crate::set_stack_guard(
             crate::current_stack_ptr(),
             bytes.saturating_sub(crate::STACK_GUARD_MARGIN),
         ));
         ON_GROWABLE.with(|on| on.set(true));
-        f()
-    })
+        // The switch back is announced before the stack is left, a panic's
+        // included, so the panic travels out as a value.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        drop(restore);
+        asan_fiber::leave(caller);
+        outcome
+    });
+    asan_fiber::returned(fiber);
+    outcome.unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+}
+
+/// `AddressSanitizer` keeps shadow memory per stack and must be told of each
+/// switch between stacks, or a panic's unwinding on the growable stack
+/// clears shadow it attributes to the thread's own stack.
+#[cfg(all(asan, not(target_arch = "wasm32")))]
+mod asan_fiber {
+    use std::ffi::c_void;
+
+    unsafe extern "C" {
+        fn __sanitizer_start_switch_fiber(
+            fake_stack_save: *mut *mut c_void,
+            bottom: *const c_void,
+            size: usize,
+        );
+        fn __sanitizer_finish_switch_fiber(
+            fake_stack_save: *mut c_void,
+            bottom_old: *mut *const c_void,
+            size_old: *mut usize,
+        );
+    }
+
+    /// A switch from the caller's stack onto a growable one.
+    #[derive(Clone, Copy)]
+    pub(super) struct Switch(*mut c_void);
+
+    // SAFETY: the saved fake-stack pointer is only handed back to the
+    // sanitizer on the thread that made the switch.
+    unsafe impl Send for Switch {}
+
+    /// The caller's stack, recorded on the growable one for the switch back.
+    pub(super) struct Caller(*const c_void, usize);
+
+    /// Announces the switch onto `stack`, made right after this call.
+    pub(super) fn enter(stack: &impl corosensei::stack::Stack) -> Switch {
+        let bottom = stack.limit().get();
+        let size = stack.base().get() - bottom;
+        let mut fake_stack = std::ptr::null_mut();
+        // SAFETY: `bottom..bottom + size` is the mapped stack the switch
+        // after this call lands on.
+        unsafe {
+            __sanitizer_start_switch_fiber(&raw mut fake_stack, bottom as *const c_void, size);
+        }
+        Switch(fake_stack)
+    }
+
+    /// Completes the switch, first thing on the growable stack.
+    pub(super) fn entered(_switch: Switch) -> Caller {
+        let mut bottom = std::ptr::null();
+        let mut size = 0;
+        // SAFETY: called once, on the new stack, after `enter`.
+        unsafe {
+            __sanitizer_finish_switch_fiber(std::ptr::null_mut(), &raw mut bottom, &raw mut size);
+        }
+        Caller(bottom, size)
+    }
+
+    /// Announces the switch back to the caller's stack; the growable stack
+    /// is not entered again, so it keeps no fake stack.
+    pub(super) fn leave(caller: Caller) {
+        // SAFETY: the bounds `entered` read of the stack switched back to.
+        unsafe { __sanitizer_start_switch_fiber(std::ptr::null_mut(), caller.0, caller.1) }
+    }
+
+    /// Completes the switch back, first thing on the caller's stack.
+    pub(super) fn returned(switch: Switch) {
+        // SAFETY: the fake stack `enter` saved on this thread.
+        unsafe {
+            __sanitizer_finish_switch_fiber(switch.0, std::ptr::null_mut(), std::ptr::null_mut());
+        }
+    }
+}
+
+/// Without the sanitizer a stack switch needs announcing to nothing.
+#[cfg(all(not(asan), not(target_arch = "wasm32")))]
+mod asan_fiber {
+    #[derive(Clone, Copy)]
+    pub(super) struct Switch;
+    pub(super) struct Caller;
+
+    pub(super) fn enter(_stack: &impl corosensei::stack::Stack) -> Switch {
+        Switch
+    }
+
+    pub(super) fn entered(_switch: Switch) -> Caller {
+        Caller
+    }
+
+    pub(super) fn leave(_caller: Caller) {}
+
+    pub(super) fn returned(_switch: Switch) {}
 }
 
 /// Puts back the recursion guard a stack switch replaced, and leaves the

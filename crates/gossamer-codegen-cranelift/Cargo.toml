@@ -28,6 +28,14 @@ gossamer-runtime = { workspace = true }
 gossamer-types = { workspace = true }
 parking_lot = { workspace = true }
 rayon = { workspace = true }
+region = "3.0.2"
+wasmtime-jit-icache-coherence = { package = "wasmtime-internal-jit-icache-coherence", version = "=47.0.2" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Memory"] }
 
 [dev-dependencies]
 object = { version = "0.39", default-features = false, features = ["read"] }

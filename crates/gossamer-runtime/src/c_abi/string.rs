@@ -2671,7 +2671,7 @@ pub unsafe extern "C" fn gos_rt_str_concat_drop_a(
                 // SAFETY: `a` is a uniquely held builder (rc 1) with room for the new length
                 // (checked above).
                 unsafe {
-                    let dst = (a as *mut u8).add(len_a);
+                    let dst = a.cast::<u8>().cast_mut().add(len_a);
                     copy_small_bytes(b_bytes.as_ptr(), dst, len_b);
                     *dst.add(len_b) = 0;
                     let hdr_mut = hdr.cast_mut();
@@ -2754,7 +2754,7 @@ pub unsafe extern "C" fn gos_rt_str_append_bytes(
             // SAFETY: `acc` is a uniquely held builder (rc 1) with room for the new length
             // (checked above).
             unsafe {
-                let dst = (acc as *mut u8).add(len_a);
+                let dst = acc.cast::<u8>().cast_mut().add(len_a);
                 copy_small_bytes(b_bytes.as_ptr(), dst, len_b);
                 *dst.add(len_b) = 0;
                 let hdr_mut = hdr.cast_mut();

@@ -1690,12 +1690,7 @@ fn compile_bodies(
     module
         .finalize_definitions()
         .map_err(|e| anyhow!("jit finalize: {e}"))?;
-    let placed: Vec<(usize, crate::jit_frames::FunctionFrames)> =
-        std::mem::take(&mut lowered.frames)
-            .into_iter()
-            .map(|frames| (module.get_finalized_function(frames.id) as usize, frames))
-            .collect();
-    let frames = crate::jit_frames::register(cranelift_module::Module::isa(&module), placed);
+    let frames = register_frames(&module, &heap, std::mem::take(&mut lowered.frames));
     if std::env::var_os("GOS_JIT_TRACE").is_some() {
         trace_placements(&module, &lowered.function_ids_by_name);
     }
@@ -1893,6 +1888,23 @@ fn jit_module(
         gossamer_runtime::c_abi::ffi::resolve_symbol(name, &libraries)
     }));
     Ok((JITModule::new(builder), runtime_symbol_set))
+}
+
+/// Registers the finalized functions of `module` with the unwinder and the
+/// frame registry, with any record the unwinder addresses relative to the
+/// code placed in `heap` beside it.
+fn register_frames(
+    module: &JITModule,
+    heap: &NativeCodeHeap,
+    frames: Vec<crate::jit_frames::FunctionFrames>,
+) -> crate::jit_frames::FrameRegistration {
+    let placed = frames
+        .into_iter()
+        .map(|frames| (module.get_finalized_function(frames.id) as usize, frames))
+        .collect();
+    crate::jit_frames::register(cranelift_module::Module::isa(module), placed, &|bytes| {
+        heap.place_read_only(bytes).ok()
+    })
 }
 
 /// Prints where each body landed, so a native fault address names its body.
