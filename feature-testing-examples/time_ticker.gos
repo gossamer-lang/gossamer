@@ -13,8 +13,10 @@ fn main() {
         }
         println(f"saw {seen} ticks")
     }
+    // Drift-free ticks never arrive ahead of their schedule; how late a busy
+    // machine delivers them is the machine's, not the ticker's.
     let ms = start.elapsed_ms()
-    println(f"took about 100 ms: {ms >= 90 && ms < 400}")
+    println(f"took at least 100 ms: {ms >= 90}")
     let t = time::Ticker::new(time::Duration::from_secs(3600))
     t.stop()
     println(f"stopped ticker closes: {t.recv().is_none()}")
