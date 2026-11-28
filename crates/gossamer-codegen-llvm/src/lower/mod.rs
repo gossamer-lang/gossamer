@@ -200,6 +200,10 @@ pub(crate) struct Lowerer<'a> {
     /// of its shape, so the redirect to `name$cabi` keys on the site rather
     /// than on the name. Empty off Windows.
     pub(crate) cabi_thunk_sites: std::collections::BTreeSet<gossamer_mir::Local>,
+    /// Locals of this body that read a handler address out of a closure env
+    /// for a handler registration, mapped to the handler's arity: on Win64
+    /// each holds the env trampoline's address instead.
+    pub(crate) cabi_env_trampoline_sites: std::collections::BTreeMap<gossamer_mir::Local, usize>,
     /// `alloca` lines for the call-scoped temporaries the body needs, spliced
     /// into the entry block once the blocks are lowered.
     ///

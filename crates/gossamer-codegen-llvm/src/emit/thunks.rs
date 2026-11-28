@@ -420,6 +420,80 @@ pub(super) fn collect_cabi_handlers(
     handlers
 }
 
+/// Handler registrations, per body, whose handler address the body reads out
+/// of slot 0 of a closure env it was handed rather than taking it from a named
+/// body: the destination local of that `gos_load`, mapped to the handler's
+/// arity with the env counted. The body that builds the env may be any of the
+/// callers that pass it on, so on Win64 such a site hands the runtime a
+/// trampoline that calls whatever the env holds and answers the value in xmm0.
+pub(super) fn collect_cabi_env_trampoline_sites(
+    all_bodies: &[Body],
+    tcx: &TyCtxt,
+) -> std::collections::BTreeMap<String, std::collections::BTreeMap<gossamer_mir::Local, usize>> {
+    use gossamer_mir::{ConstValue, Operand, Rvalue, StatementKind, Terminator};
+    let mut sites: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<gossamer_mir::Local, usize>,
+    > = std::collections::BTreeMap::new();
+    for body in all_bodies {
+        for block in &body.blocks {
+            let Terminator::Call { callee, args, .. } = &block.terminator else {
+                continue;
+            };
+            let Operand::Const(ConstValue::Str(sym)) = callee else {
+                continue;
+            };
+            let Some((_, addr_idx)) = CABI_HANDLER_REGISTRATIONS
+                .iter()
+                .find(|(shim, _)| *shim == sym.as_str())
+            else {
+                continue;
+            };
+            let Some(Operand::Copy(addr)) = args.get(*addr_idx) else {
+                continue;
+            };
+            if !addr.projection.is_empty() || resolve_fn_addr_target(body, addr.local).is_some() {
+                continue;
+            }
+            let env = body.blocks.iter().flat_map(|b| &b.stmts).find_map(|stmt| {
+                let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                    return None;
+                };
+                if place.local != addr.local || !place.projection.is_empty() {
+                    return None;
+                }
+                let Rvalue::CallIntrinsic { name, args } = rvalue else {
+                    return None;
+                };
+                match args.as_slice() {
+                    [Operand::Copy(env), off]
+                        if *name == "gos_load"
+                            && env.projection.is_empty()
+                            && operand_is_zero_offset(body, off) =>
+                    {
+                        Some(env.local)
+                    }
+                    _ => None,
+                }
+            });
+            let Some(env) = env else {
+                continue;
+            };
+            let arity = match tcx.kind(body.local_ty(env)) {
+                Some(gossamer_types::TyKind::FnTrait(sig) | gossamer_types::TyKind::FnPtr(sig)) => {
+                    sig.inputs.len() + 1
+                }
+                _ => 2,
+            };
+            sites
+                .entry(body.name.clone())
+                .or_default()
+                .insert(addr.local, arity);
+        }
+    }
+    sites
+}
+
 /// Where a `gos_fn_addr` hands a shared shape thunk's address to a runtime
 /// shim that reads a two-word carrier back from it: for each body, the locals
 /// the address lands in, mapped to the thunk they name.

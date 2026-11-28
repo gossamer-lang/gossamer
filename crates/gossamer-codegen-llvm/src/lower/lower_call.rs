@@ -2149,6 +2149,24 @@ impl<'a> Lowerer<'a> {
                 if args.len() < 2 {
                     return Err(BuildError::InternalLoweringBug("gos_load arity"));
                 }
+                // Win64: the runtime reads a handler's `i128` from xmm0, and
+                // the closure in this env answers it in the GP-register pair.
+                // The trampoline calls the closure the env holds and answers
+                // its value as the runtime reads it.
+                if crate::emit::target_is_windows()
+                    && let Some(&arity) = self.cabi_env_trampoline_sites.get(&destination.local)
+                {
+                    let name = format!("gos_cabi_env_trampoline_{arity}");
+                    self.runtime_refs.insert(cabi_env_trampoline(&name, arity));
+                    let tmp = self.fresh();
+                    writeln!(self.out, "  {tmp} = bitcast ptr @{name} to ptr").unwrap();
+                    let coerced = self.coerce_llvm_value(&tmp, "ptr", &dest_ty);
+                    self.store_value_to_place(destination, &dest_ty, &coerced);
+                    if target.is_some() {
+                        emit_terminator_branch(&mut self.out, target);
+                    }
+                    return Ok(());
+                }
                 let p = self.lower_raw_ptr_arg(&args[0])?;
                 let off_v = self.lower_operand(&args[1])?;
                 let off_ty = self.operand_llvm_ty(&args[1]);
@@ -2612,4 +2630,15 @@ fn is_primitive_int_llvm(ty: &str) -> bool {
 /// has no `store_i64_as` arm, so it stays on the runtime call.
 fn is_inline_vec_scalar_llvm(ty: &str) -> bool {
     is_primitive_int_llvm(ty) || ty == "double"
+}
+
+/// The Win64 env trampoline for a handler of `arity` word arguments, the env
+/// first: it calls the function in the env's slot 0 with the same arguments
+/// and answers its two-word value as `<16 x i8>`, in xmm0.
+fn cabi_env_trampoline(name: &str, arity: usize) -> String {
+    let params: Vec<String> = (0..arity).map(|i| format!("ptr %a{i}")).collect();
+    let params = params.join(", ");
+    format!(
+        "define internal <16 x i8> @{name}({params}) {{\nentry:\n  %f = load ptr, ptr %a0\n  %r = call i128 %f({params})\n  %v = bitcast i128 %r to <16 x i8>\n  ret <16 x i8> %v\n}}"
+    )
 }

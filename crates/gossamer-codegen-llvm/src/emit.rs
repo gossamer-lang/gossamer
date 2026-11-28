@@ -33,11 +33,11 @@ pub(crate) use thunks::{
     coff_comdat_decl, operand_const_int,
 };
 use thunks::{
-    body_has_wide_spawn, cabi_thunk_param_tys, collect_cabi_handlers, collect_cabi_thunk_sites,
-    collect_direct_bodies, collect_sret_bodies, collect_thunk_names_in_body, extern_declare_with,
-    render_cabi_handler_thunk, render_cabi_thunk_with_linkage, render_shape_thunk,
-    render_shape_thunk_with_linkage, render_spawn_wide_cabi_thunk, shape_thunk_param_tys,
-    validate_global_decl_shape,
+    body_has_wide_spawn, cabi_thunk_param_tys, collect_cabi_env_trampoline_sites,
+    collect_cabi_handlers, collect_cabi_thunk_sites, collect_direct_bodies, collect_sret_bodies,
+    collect_thunk_names_in_body, extern_declare_with, render_cabi_handler_thunk,
+    render_cabi_thunk_with_linkage, render_shape_thunk, render_shape_thunk_with_linkage,
+    render_spawn_wide_cabi_thunk, shape_thunk_param_tys, validate_global_decl_shape,
 };
 mod stable_symbols;
 mod toolchain;
@@ -1163,6 +1163,7 @@ fn render_chunk_module(
     // function setup to bind raw runtime pointer params correctly.
     let cabi_handlers = collect_cabi_handlers(ctx.all_bodies);
     let cabi_thunk_sites = collect_cabi_thunk_sites(ctx.all_bodies);
+    let cabi_env_trampoline_sites = collect_cabi_env_trampoline_sites(ctx.all_bodies, ctx.tcx);
     let mut cabi_shape_thunks: std::collections::BTreeSet<String> =
         std::collections::BTreeSet::new();
     let sret_bodies = collect_sret_bodies(ctx.all_bodies, ctx.tcx);
@@ -1198,6 +1199,9 @@ fn render_chunk_module(
             if let Some(sites) = cabi_thunk_sites.get(&body.name) {
                 lowerer.cabi_thunk_sites = sites.keys().copied().collect();
                 cabi_shape_thunks.extend(sites.values().cloned());
+            }
+            if let Some(sites) = cabi_env_trampoline_sites.get(&body.name) {
+                lowerer.cabi_env_trampoline_sites.clone_from(sites);
             }
             lowerer.sret_bodies.clone_from(&sret_bodies);
             lowerer.direct_bodies.clone_from(&direct_bodies);
@@ -2137,6 +2141,7 @@ fn render_module_to_path(
     let direct_bodies = collect_direct_bodies(bodies);
     let cabi_handlers = collect_cabi_handlers(bodies);
     let cabi_thunk_sites = collect_cabi_thunk_sites(bodies);
+    let cabi_env_trampoline_sites = collect_cabi_env_trampoline_sites(bodies, tcx);
     let mut cabi_shape_thunks: std::collections::BTreeSet<String> =
         std::collections::BTreeSet::new();
     for body in bodies {
@@ -2149,6 +2154,9 @@ fn render_module_to_path(
         if let Some(sites) = cabi_thunk_sites.get(&body.name) {
             lowerer.cabi_thunk_sites = sites.keys().copied().collect();
             cabi_shape_thunks.extend(sites.values().cloned());
+        }
+        if let Some(sites) = cabi_env_trampoline_sites.get(&body.name) {
+            lowerer.cabi_env_trampoline_sites.clone_from(sites);
         }
         lowerer.sret_bodies.clone_from(&sret_bodies);
         lowerer.direct_bodies.clone_from(&direct_bodies);
