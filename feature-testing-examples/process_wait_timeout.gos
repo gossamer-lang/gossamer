@@ -1,0 +1,42 @@
+// `process::wait_timeout` parity test.
+//
+// Spawn a quick child (`true`) and a slow child (`sleep 30`), then
+// verify:
+//   - the quick child reports its real exit code well under the
+//     5 s budget,
+//   - the slow child reports -1 (timeout sentinel) after 200 ms,
+//     and is then killed and reaped via `process::kill` + the same
+//     wait_timeout call returning <= 0 on the second pass.
+
+use std::process
+
+fn main() {
+    let empty: Vec<String> = #[]
+    match process::spawn("/usr/bin/true", empty) {
+        Ok(pid) => {
+            let code = process::wait_timeout(pid, 5000)
+            if code == 0 {
+                println("quick: ok")
+            } else {
+                println("quick: code={}", code)
+            }
+        }
+        Err(e) => println("quick spawn err: {}", e.message())
+    }
+
+    let sleep_args: Vec<String> = #["30"]
+    match process::spawn("/bin/sleep", sleep_args) {
+        Ok(pid) => {
+            let r = process::wait_timeout(pid, 200)
+            if r == -1 {
+                println("slow: timeout")
+            } else {
+                println("slow: code={}", r)
+            }
+            let _ = process::kill(pid)
+            let _ = process::wait_timeout(pid, 2000)
+            println("slow: reaped")
+        }
+        Err(e) => println("slow spawn err: {}", e.message())
+    }
+}

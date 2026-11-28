@@ -379,14 +379,28 @@ impl Lowerer<'_> {
             }
             let key = self.entry_path(span, &frame.key_name, frame.key_ty);
             let slot = self.entry_path(span, &frame.slot_name, frame.value_ty);
+            // A value whose release runs a cleanup is answered by the insert
+            // it replaces, so the cleanup point after the store gives it back.
+            let replaced_ty = if self.tcx.is_scope_bound(frame.value_ty) {
+                self.option_of(frame.value_ty)
+            } else {
+                unit
+            };
             let insert = self.method_call(
                 frame.map_place.clone(),
                 "insert",
                 vec![key, slot],
-                unit,
+                replaced_ty,
                 span,
             );
-            body.push(self.unit_stmt(insert.kind, span));
+            body.push(HirStmt {
+                id: self.fresh(),
+                span,
+                kind: HirStmtKind::Expr {
+                    expr: insert,
+                    has_semi: true,
+                },
+            });
             let answer =
                 (result_ty != unit).then(|| self.entry_path(span, &result_name, result_ty));
             let arm = HirExpr {

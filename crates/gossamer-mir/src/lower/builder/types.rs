@@ -77,6 +77,8 @@ impl<'a> Builder<'a> {
             current: None,
             scopes: vec![HashMap::new()],
             named_locals: std::collections::HashSet::new(),
+            statement_locals_start: 0,
+            temp_scrutinees: HashMap::new(),
             reference_aliases: vec![HashMap::new()],
             fn_span: span,
             expr_span: span,
@@ -242,6 +244,39 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The runtime-handle kind of the standard type `struct_name` names, or
+    /// `None` when `ty` is a type the program declares, whatever it is
+    /// called: a program's own `Client` or `Error` is never the standard one.
+    pub(crate) fn std_type_runtime_kind(&self, ty: Ty, struct_name: &str) -> Option<&'static str> {
+        let inner = match self.tcx.kind_of(ty) {
+            gossamer_types::TyKind::Ref { inner, .. } => *inner,
+            _ => ty,
+        };
+        match self.tcx.kind_of(inner) {
+            gossamer_types::TyKind::Adt { def, .. } if def.local < u32::MAX - 64 => return None,
+            gossamer_types::TyKind::Adt { .. } => {}
+            // A type left unresolved (a method's `self`) names no standard
+            // type when the program declares a struct of that name.
+            _ if self
+                .struct_defs
+                .iter()
+                .any(|(def, name)| name == struct_name && def.local < u32::MAX - 64) =>
+            {
+                return None;
+            }
+            _ => {}
+        }
+        match struct_name {
+            "Error" => Some("errors::Error"),
+            "Response" => Some("http::Response"),
+            "Request" => Some("http::Request"),
+            "Client" => Some("http::Client"),
+            "Scanner" => Some("bufio::Scanner"),
+            "Pattern" => Some("regex::Pattern"),
+            _ => None,
+        }
+    }
+
     pub(crate) fn struct_name_of(&self, ty: Ty) -> Option<String> {
         use gossamer_types::TyKind;
         let mut cur = ty;
@@ -391,6 +426,39 @@ impl<'a> Builder<'a> {
     /// `::__ok_wrap` thunk when the callable declares a bare
     /// `http::Response` return (the HTTP runtime's C-ABI reads every
     /// handler return as a packed Result i128), else `fn_name` itself.
+    /// The code address of a handler that arrives as a callable value (an
+    /// `Fn` parameter, field, or element): word 0 of its environment, which
+    /// the runtime calls with the environment first, as it does a closure
+    /// built in place. `None` for a handler that is not a callable value.
+    pub(crate) fn callable_handler_code(
+        &mut self,
+        handler_local: Local,
+        span: Span,
+    ) -> Option<Local> {
+        use gossamer_types::TyKind;
+        let handler_ty = self.locals[handler_local.0 as usize].ty;
+        if !matches!(
+            self.tcx.kind_of(handler_ty),
+            TyKind::FnTrait(_) | TyKind::FnPtr(_) | TyKind::Closure { .. }
+        ) {
+            return None;
+        }
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let fn_addr_local = self.fresh(i64_ty);
+        self.emit_assign(
+            Place::local(fn_addr_local),
+            Rvalue::CallIntrinsic {
+                name: "gos_load",
+                args: vec![
+                    Operand::Copy(Place::local(handler_local)),
+                    Operand::Const(ConstValue::Int(0)),
+                ],
+            },
+            span,
+        );
+        Some(fn_addr_local)
+    }
+
     pub(crate) fn handler_dispatch_symbol(&self, fn_name: String) -> String {
         use crate::lower::helpers::{handler_ok_wrap_name, is_bare_response_ty};
         match self.fn_ret_names.get(&fn_name) {
@@ -446,6 +514,12 @@ impl<'a> Builder<'a> {
                 },
                 span,
             );
+            return RouterHandlerAbi::WithEnv {
+                env: Operand::Copy(Place::local(handler_local)),
+                fn_addr: Operand::Copy(Place::local(fn_addr_local)),
+            };
+        }
+        if let Some(fn_addr_local) = self.callable_handler_code(handler_local, span) {
             return RouterHandlerAbi::WithEnv {
                 env: Operand::Copy(Place::local(handler_local)),
                 fn_addr: Operand::Copy(Place::local(fn_addr_local)),
@@ -587,6 +661,8 @@ impl<'a> Builder<'a> {
             match self.tcx.kind_of(cur) {
                 TyKind::Ref { inner, .. } => cur = *inner,
                 TyKind::Tuple(_) | TyKind::Array { .. } => return true,
+                // A 128-bit integer keys by its two words.
+                TyKind::Int(int) if int.is_wide() => return true,
                 TyKind::Vec(_) | TyKind::Slice(_) => return self.key_descriptor(cur).is_some(),
                 // An `Option<T>` is keyed by its two words, exactly as a
                 // two-element tuple is.
@@ -631,6 +707,19 @@ impl<'a> Builder<'a> {
         use gossamer_types::TyKind;
         match self.tcx.kind_of(ty) {
             TyKind::Ref { inner, .. } => self.append_key_descriptor(*inner, out, boxed),
+            // A 128-bit integer's low word, then its high word, signed or not.
+            TyKind::Int(gossamer_types::IntTy::I128) => {
+                out.push_str("wi");
+                true
+            }
+            TyKind::Int(gossamer_types::IntTy::U128) => {
+                out.push_str("wn");
+                true
+            }
+            TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize) => {
+                out.push('u');
+                true
+            }
             TyKind::Int(_) | TyKind::Bool | TyKind::Char | TyKind::Float(_) => {
                 out.push('s');
                 true
@@ -682,6 +771,7 @@ impl<'a> Builder<'a> {
                     return false;
                 };
                 if self.is_inline_aggregate_ty(payload)
+                    || self.tcx.is_wide_int(payload)
                     || self.is_result_or_option_adt(payload)
                     || self.tcx.is_inline_enum_ty(payload)
                     || self.tcx.is_flat_enum_ty(payload)
@@ -1579,11 +1669,6 @@ impl<'a> Builder<'a> {
             // to the bool-typed shims.
             "AtomicBool" => Some("sync::AtomicBool"),
             "AtomicI32" => Some("sync::AtomicI32"),
-            // `validate::Errors` / `validate::FieldError` handles flowing
-            // in by parameter or out by return carry no construction tag;
-            // recover the handle kind from the receiver's named type.
-            "Errors" => Some("validate::Errors"),
-            "FieldError" => Some("validate::FieldError"),
             // A `context::Context` passed as a parameter (the canonical
             // request-propagation shape) carries no construction tag, so
             // its `is_cancelled` / `cancel` / `done` / `done_chan` calls
@@ -1733,7 +1818,10 @@ impl<'a> Builder<'a> {
                 .get(i)
                 .copied()
                 .filter(|&t| !matches!(self.tcx.kind_of(t), TyKind::Var(_) | TyKind::Error))
-                .is_some_and(|t| crate::lower::carrier_ref::is_two_word_carrier(self.tcx, t));
+                .is_some_and(|t| {
+                    crate::lower::carrier_ref::is_two_word_carrier(self.tcx, t)
+                        || self.tcx.is_wide_int(t)
+                });
             byte += if wide { 16 } else { 8 };
         }
         offsets
@@ -1748,7 +1836,10 @@ impl<'a> Builder<'a> {
                 .get(i)
                 .copied()
                 .filter(|&t| !matches!(self.tcx.kind_of(t), TyKind::Var(_) | TyKind::Error))
-                .is_some_and(|t| crate::lower::carrier_ref::is_two_word_carrier(self.tcx, t));
+                .is_some_and(|t| {
+                    crate::lower::carrier_ref::is_two_word_carrier(self.tcx, t)
+                        || self.tcx.is_wide_int(t)
+                });
             byte += if wide { 16 } else { 8 };
         }
         byte.max(8)
@@ -2162,15 +2253,19 @@ impl<'a> Builder<'a> {
         // A scalar or a string is held in its own word and is never a copy
         // blob; a meta keyed on one would make every carrier of that type an
         // option holder whose payload word the slot helpers read as a pointer.
-        if matches!(
-            self.tcx.kind_of(ty),
-            TyKind::Int(_)
-                | TyKind::Float(_)
-                | TyKind::Bool
-                | TyKind::Char
-                | TyKind::Unit
-                | TyKind::String
-        ) {
+        // A 128-bit integer is the exception: it is two words, so a carrier
+        // holds it in a counted copy whose address is the payload word.
+        if !self.tcx.is_wide_int(ty)
+            && matches!(
+                self.tcx.kind_of(ty),
+                TyKind::Int(_)
+                    | TyKind::Float(_)
+                    | TyKind::Bool
+                    | TyKind::Char
+                    | TyKind::Unit
+                    | TyKind::String
+            )
+        {
             return None;
         }
         if let Some(sym) = self.tcx.aggr_copy_meta(ty) {
@@ -2456,6 +2551,12 @@ impl<'a> Builder<'a> {
     /// words rather than as a handle: a tuple, a fixed array, or a user
     /// struct. A binding to one names the slot's address, and its field reads
     /// take their offsets from there.
+    /// Whether a map value of type `ty` crosses an insert as a counted copy
+    /// of its slots: a multi-slot aggregate, or a 128-bit integer.
+    pub(crate) fn map_value_is_copied(&self, ty: Ty) -> bool {
+        self.is_inline_aggregate_ty(ty) || self.tcx.is_wide_int(ty)
+    }
+
     pub(crate) fn is_inline_aggregate_ty(&self, ty: Ty) -> bool {
         use gossamer_types::TyKind;
         match self.tcx.kind_of(ty) {
@@ -2690,6 +2791,10 @@ impl<'a> Builder<'a> {
             return Some(name);
         }
         match &expr.kind {
+            // A range read (`xs[lo..hi]`) answers a sequence, not an element.
+            HirExprKind::Index { index, .. } if matches!(index.kind, HirExprKind::Range { .. }) => {
+                None
+            }
             HirExprKind::Index { base, .. } => {
                 // Prefer the element-type registration (survives
                 // inference-variable leakage) before walking the
@@ -2794,9 +2899,6 @@ fn sentinel_runtime_kind(name: &str) -> Option<&'static str> {
         "sync::AtomicBool" => "sync::AtomicBool",
         "sync::RwLock" => "sync::RwLock",
         "sync::Map" => "sync::Map",
-        "trace::Tracer" => "trace::Tracer",
-        "trace::Span" => "trace::Span",
-        "trace::EndedSpan" => "trace::EndedSpan",
         "metrics::Counter" => "metrics::Counter",
         "metrics::Gauge" => "metrics::Gauge",
         "metrics::Histogram" => "metrics::Histogram",

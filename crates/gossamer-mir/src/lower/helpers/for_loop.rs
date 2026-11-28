@@ -268,27 +268,24 @@ pub(crate) fn literal_to_const(lit: &HirLiteral) -> ConstValue {
     }
 }
 
+/// The value of an integer literal. A `u128` literal above `i128::MAX` is
+/// held as its bit pattern, which is what every tier computes with.
 pub(crate) fn parse_int(text: &str) -> Option<i128> {
     let cleaned = strip_int_suffix(text).replace('_', "");
-    if let Some(rest) = cleaned
-        .strip_prefix("0x")
-        .or_else(|| cleaned.strip_prefix("0X"))
-    {
-        return i128::from_str_radix(rest, 16).ok();
-    }
-    if let Some(rest) = cleaned
-        .strip_prefix("0b")
-        .or_else(|| cleaned.strip_prefix("0B"))
-    {
-        return i128::from_str_radix(rest, 2).ok();
-    }
-    if let Some(rest) = cleaned
-        .strip_prefix("0o")
-        .or_else(|| cleaned.strip_prefix("0O"))
-    {
-        return i128::from_str_radix(rest, 8).ok();
-    }
-    cleaned.parse::<i128>().ok()
+    let (radix, digits) = [
+        ("0x", 16),
+        ("0X", 16),
+        ("0b", 2),
+        ("0B", 2),
+        ("0o", 8),
+        ("0O", 8),
+    ]
+    .iter()
+    .find_map(|(prefix, radix)| cleaned.strip_prefix(prefix).map(|rest| (*radix, rest)))
+    .unwrap_or((10, cleaned.as_str()));
+    i128::from_str_radix(digits, radix)
+        .ok()
+        .or_else(|| u128::from_str_radix(digits, radix).ok().map(|n| n as i128))
 }
 
 pub(crate) fn parse_float(text: &str) -> f64 {

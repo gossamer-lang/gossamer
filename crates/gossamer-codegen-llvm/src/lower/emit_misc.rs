@@ -427,6 +427,62 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
+    /// A runtime helper call with a 128-bit operand, which crosses the C ABI
+    /// as its low and high words, in the order the registry lists them.
+    /// `false` for the general path: no operand is 128-bit, or the helper's
+    /// row does not take each one as two words (a key passed by address).
+    fn emit_wide_word_call(
+        &mut self,
+        symbol: &str,
+        args: &[Operand],
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+    ) -> Result<bool, BuildError> {
+        let is_wide = |this: &Self, arg: &Operand| {
+            matches!(arg, Operand::Copy(_)) && this.tcx.is_wide_int(this.operand_ty(arg))
+        };
+        if !symbol.starts_with("gos_rt_") || !args.iter().any(|arg| is_wide(self, arg)) {
+            return Ok(false);
+        }
+        let Some(entry) = gossamer_abi::lookup(symbol) else {
+            return Ok(false);
+        };
+        let params: Vec<&str> = entry.sig.params.iter().map(|p| p.llvm_ir()).collect();
+        let wide_args = args.iter().filter(|arg| is_wide(self, arg)).count();
+        if params.len() != args.len() + wide_args {
+            return Ok(false);
+        }
+        let mut rendered = Vec::with_capacity(params.len());
+        for arg in args {
+            let value = self.lower_operand(arg)?;
+            if is_wide(self, arg) {
+                let (low, high) = self.split_wide(&value);
+                rendered.push(format!("i64 {low}"));
+                rendered.push(format!("i64 {high}"));
+                continue;
+            }
+            let want = params.get(rendered.len()).copied().unwrap_or("i64");
+            let have = match arg {
+                Operand::Const(ConstValue::Int(_)) => "i64".to_string(),
+                _ => render_ty(self.tcx, self.operand_ty(arg)),
+            };
+            let value = self.coerce_llvm_value(&value, &have, want);
+            rendered.push(format!("{want} {value}"));
+        }
+        declare_rt(&mut self.runtime_refs, symbol);
+        let ret = entry.sig.ret.llvm_ir();
+        let call = format!("call {ret} @{symbol}({})", rendered.join(", "));
+        if ret == "void" {
+            writeln!(self.out, "  {call}").unwrap();
+        } else {
+            let result = self.fresh();
+            writeln!(self.out, "  {result} = {call}").unwrap();
+            self.store_value_to_place(destination, ret, &result);
+        }
+        emit_terminator_branch(&mut self.out, target);
+        Ok(true)
+    }
+
     /// Direct call to a named symbol: renders args, emits the
     /// `call`, stores the result if non-unit, and writes the
     /// outgoing branch / unreachable.
@@ -437,6 +493,9 @@ impl<'a> Lowerer<'a> {
         destination: &Place,
         target: Option<&gossamer_mir::BlockId>,
     ) -> Result<(), BuildError> {
+        if self.emit_wide_word_call(symbol, args, destination, target)? {
+            return Ok(());
+        }
         let expected_param_tys: Vec<Option<Ty>> = self
             .param_tys_by_name
             .get(symbol)
@@ -783,6 +842,16 @@ impl<'a> Lowerer<'a> {
                     let _ = write!(arg_text, "{want_ty} {zero}");
                     continue;
                 }
+                // A 128-bit operand a helper takes by pointer goes as the
+                // address of its two slots, as a slot-block element does.
+                if want_ty == "ptr" && a_ty == "i128" && self.tcx.is_wide_int(self.operand_ty(arg))
+                {
+                    let slot = self.entry_alloca("i128, align 16");
+                    writeln!(self.out, "  store i128 {a_v}, ptr {slot}").unwrap();
+                    let _ = write!(arg_text, "ptr {slot}");
+                    arg_values[i] = Some(slot);
+                    continue;
+                }
                 if &a_ty != want_ty {
                     let coerced = self.runtime_word_arg(&a_v, &a_ty, want_ty);
                     let _ = write!(arg_text, "{want_ty} {coerced}");
@@ -1078,6 +1147,12 @@ impl<'a> Lowerer<'a> {
                     // store-the-handle shape used by enum construction.
                     self.store_value_to_place(destination, "ptr", &tmp);
                 }
+            } else if self.tcx.is_wide_int(dest_ty_mir) && call_ret_ty == "ptr" {
+                // A 128-bit element is stored inline, two slots wide, so its
+                // reader answers the element's address.
+                let loaded = self.fresh();
+                writeln!(self.out, "  {loaded} = load i128, ptr {tmp}, align 8").unwrap();
+                self.store_value_to_place(destination, "i128", &loaded);
             } else if call_ret_ty == "i64"
                 && dest_ty == "i128"
                 && (symbol.starts_with("gos_rt_map_get_or")

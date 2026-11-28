@@ -176,6 +176,20 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
         example: "impl Default for Point { fn default() -> Point { Point { x: 0, y: 0 } } }",
     },
     BuiltinTrait {
+        name: "Drop",
+        kind: BuiltinTraitKind::Overridable,
+        module: None,
+        impl_items: &["drop"],
+        bound_methods: &[],
+        signature: "{ fn drop(&mut self) }",
+        doc: "Cleanup that runs exactly once, when the last reference to a value \
+              goes. A type with `impl Drop` is a shared handle: `let b = a` \
+              shares one value, and a write through either name is seen \
+              through both.",
+        instead: "",
+        example: "impl Drop for Lock { fn drop(&mut self) { let _ = fs::remove_file(self.path) } }",
+    },
+    BuiltinTrait {
         name: "Iterator",
         kind: BuiltinTraitKind::Overridable,
         module: None,
@@ -431,15 +445,6 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
          `sync::Mutex` or a channel when goroutines share state.",
         "Remove the block.",
         "let guard = sync::Mutex::new()",
-    ),
-    automatic(
-        "Drop",
-        &["drop"],
-        "Values are released deterministically by reference counting, with no \
-         destructor hook to run at the release.",
-        "Write `defer expr`, which runs when control leaves the enclosing block \
-         by any edge the compiler sees.",
-        "defer file.close()",
     ),
     automatic(
         "Into",

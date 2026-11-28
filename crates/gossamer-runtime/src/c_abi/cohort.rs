@@ -1073,6 +1073,7 @@ pub fn spawn_isolated(body: Box<dyn FnOnce() + Send + 'static>) {
             );
             let body = on_thread.lock().take();
             if let Some(body) = body {
+                let _cleanups = super::guard::CleanupsAtExit;
                 body();
             }
         });

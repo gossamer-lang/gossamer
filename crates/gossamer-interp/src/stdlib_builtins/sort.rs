@@ -246,6 +246,9 @@ pub(crate) fn builtin_described_clamp(args: &[Value]) -> RuntimeResult<Value> {
         return Ok(Value::Unit);
     };
     let desc = desc_arg(args, 3);
+    if described_order(lo, hi, &desc) == std::cmp::Ordering::Greater {
+        return Err(super::math::clamp_bounds_error(lo, hi));
+    }
     Ok(
         if described_order(x, lo, &desc) == std::cmp::Ordering::Less {
             lo.clone()

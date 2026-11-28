@@ -450,10 +450,6 @@ fn sync_handle_methods_are_typed() {
         ("let c = metrics::Counter::new(1, \"b\")", "GT0001"),
         ("let r = metrics::Registry::new()\n r.register(5)", "GT0001"),
         (
-            "let t = trace::Tracer::new()\n let s: i64 = t.start_span(\"a\")",
-            "GT0001",
-        ),
-        (
             "let r = rand::Rng::new(1)\n let s: i64 = r.next_u64()",
             "GT0001",
         ),
@@ -1830,55 +1826,10 @@ fn unknown_std_combinator_with_closure_errors_loudly() {
 }
 
 #[test]
-fn i128_type_annotation_rejected_with_gt0014() {
-    let checked = run("fn main() { let x: i128 = 1 }\n");
-    assert!(
-        checked
-            .diagnostics
-            .iter()
-            .any(|d| matches!(&d.error, TypeError::Int128Unsupported { ty } if ty == "i128")),
-        "expected Int128Unsupported for `i128`, got {:?}",
-        checked.diagnostics,
-    );
-}
-
-#[test]
-fn u128_param_and_return_rejected_with_gt0014() {
-    let checked = run("fn f(x: u128) -> u128 { x }\nfn main() { }\n");
-    assert!(
-        checked
-            .diagnostics
-            .iter()
-            .any(|d| matches!(&d.error, TypeError::Int128Unsupported { ty } if ty == "u128")),
-        "expected Int128Unsupported for `u128`, got {:?}",
-        checked.diagnostics,
-    );
-}
-
-#[test]
-fn i128_literal_suffix_rejected_with_gt0014() {
-    let checked = run("fn main() { let y = 1i128 }\n");
-    assert!(
-        checked
-            .diagnostics
-            .iter()
-            .any(|d| matches!(&d.error, TypeError::Int128Unsupported { ty } if ty == "i128")),
-        "expected Int128Unsupported for the `1i128` suffix, got {:?}",
-        checked.diagnostics,
-    );
-}
-
-#[test]
-fn cast_target_i128_rejected_with_gt0014() {
-    let checked = run("fn main() { let z = 1 as i128 }\n");
-    assert!(
-        checked
-            .diagnostics
-            .iter()
-            .any(|d| matches!(&d.error, TypeError::Int128Unsupported { ty } if ty == "i128")),
-        "expected Int128Unsupported for `as i128`, got {:?}",
-        checked.diagnostics,
-    );
+fn i128_and_u128_check_in_every_position() {
+    let checked = run("fn f(x: u128) -> u128 { x }\n\
+         fn main() { let x: i128 = 1\n let y = 1i128\n let z = 1 as i128\n let w = f(3)\n }\n");
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
 }
 
 #[test]
@@ -2653,18 +2604,13 @@ fn strings_free_fn_accepts_string_and_char_patterns() {
 #[test]
 fn strings_free_fn_accepts_inferred_borrowed_text_values() {
     let d = diagnostics_for(
-        "use std::{metrics, strings, trace}\n\
+        "use std::{metrics, strings}\n\
          fn main() {\n\
          let c = metrics::Counter::new(\"requests_total\", \"total requests\")\n\
          let r = metrics::Registry::new()\n\
          r.register(c)\n\
          let text = r.render()\n\
          let _ = strings::contains(text, \"requests_total\")\n\
-         let tracer = trace::Tracer::new()\n\
-         let span = tracer.start_span(\"checkout\")\n\
-         let ended = span.end()\n\
-         let json = ended.to_otlp_json()\n\
-         let _ = strings::contains(json, \"checkout\")\n\
          }\n",
     );
     assert!(
@@ -3282,28 +3228,6 @@ fn flag_set_parse_supports_question_mark() {
          }\n",
     );
     assert!(!has_code(&d, "GT0045"), "{d:?}");
-}
-
-#[test]
-fn validate_handles_keep_methods_across_function_return() {
-    let d = diagnostics_for(
-        "use std::validate\n\
-         fn errors() -> validate::Errors {\n\
-         let errs = validate::Errors::new()\n\
-         errs.add(\"name\", validate::FieldError::new(\"name\", \"missing\", \"required\"))\n\
-         errs\n\
-         }\n\
-         fn field_error() -> validate::FieldError {\n\
-         validate::FieldError::new(\"email\", \"bad\", \"format\")\n\
-         }\n\
-         fn main() {\n\
-         let errs = errors()\n\
-         println(\"{} {}\", errs.len(), errs.collect())\n\
-         let fe = field_error()\n\
-         println(\"{} {} {}\", fe.path(), fe.message(), fe.code())\n\
-         }\n",
-    );
-    assert!(!has_code(&d, "GT0002"), "{d:?}");
 }
 
 #[test]
@@ -5536,6 +5460,41 @@ fn lossy_cast_reports_only_casts_that_can_change_the_value() {
 }
 
 #[test]
+fn lossy_cast_reads_the_value_of_a_named_integer_constant() {
+    let source = "const SMALL: i64 = 5
+const LARGE: i64 = 300
+
+fn main() {
+    let _ = i64::MAX as u64
+    let _ = i8::MAX as u8
+    let _ = SMALL as u8
+    let _ = i128::MAX as u128
+    let _ = LARGE as i8
+    let _ = u64::MAX as i64
+}
+";
+    assert_eq!(lossy_cast_lines(source), vec![9, 10]);
+}
+
+#[test]
+fn integer_bounds_fold_as_constants() {
+    for (source, faults) in [
+        ("fn main() { println(i64::MAX + 1) }\n", true),
+        ("fn main() { println(u8::MAX as i8) }\n", true),
+        ("fn main() { println(i64::MIN - 1) }\n", true),
+        ("fn main() { println(i64::MAX - 1) }\n", false),
+        ("fn main() { println(u128::MAX - 1) }\n", false),
+    ] {
+        let checked = run(source);
+        let reported = checked
+            .diagnostics
+            .iter()
+            .any(|diag| matches!(diag.error, TypeError::ConstArithmetic { .. }));
+        assert_eq!(reported, faults, "{source}: {:?}", checked.diagnostics);
+    }
+}
+
+#[test]
 fn closure_self_cycle_reports_only_a_closure_stored_in_what_it_captures() {
     let source = r"struct Obj {
     payload: [u8; 4]
@@ -5575,6 +5534,58 @@ fn main() {
         .map(|cycle| source[..cycle.span.start as usize].lines().count())
         .collect();
     assert_eq!(lines, vec![10, 12, 14]);
+}
+
+#[test]
+fn closure_self_cycle_reports_a_program_method_only_where_it_keeps_the_closure() {
+    let source = r"struct Counter {
+    n: i64
+    hook: Option<Fn() -> i64>
+}
+
+impl Counter {
+    fn bump(&mut self, peek: Fn() -> i64) -> i64 {
+        self.n += 1
+        peek()
+    }
+
+    fn bump_twice(&mut self, peek: Fn() -> i64) -> i64 {
+        self.bump(peek) + self.bump(peek)
+    }
+
+    fn set_hook(&mut self, hook: Fn() -> i64) {
+        let kept = Some(hook)
+        self.hook = kept
+    }
+
+    fn set_through(&mut self, hook: Fn() -> i64) {
+        self.set_hook(hook)
+    }
+}
+
+fn main() {
+    let mut c = Counter { n: 0, hook: None }
+    let peek = || c.n
+    c.bump(peek)
+    c.bump_twice(peek)
+    c.set_hook(peek)
+    c.set_through(peek)
+    println(c.n)
+}
+";
+    let mut map = SourceMap::new();
+    let file = map.add_file("test.gos", source.to_string());
+    let (mut sf, parse_diags) = parse_source_file(source, file);
+    assert!(parse_diags.is_empty(), "parse errors: {parse_diags:?}");
+    let (mut resolutions, _) = resolve_source_file(&sf);
+    let _ = gossamer_types::normalize_caller_side_spellings(&mut sf, &mut resolutions);
+    let mut tcx = TyCtxt::new();
+    let (table, _) = typecheck_source_file(&sf, &resolutions, &mut tcx);
+    let lines: Vec<usize> = gossamer_types::find_closure_self_cycles(&sf, &resolutions, &table)
+        .iter()
+        .map(|cycle| source[..cycle.span.start as usize].lines().count())
+        .collect();
+    assert_eq!(lines, vec![31, 32]);
 }
 
 #[test]

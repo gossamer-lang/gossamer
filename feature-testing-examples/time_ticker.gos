@@ -1,0 +1,40 @@
+// time::Ticker delivers drift-free ticks, to `recv` or through `select` on
+// its channel, and stops when its last reference goes or at stop().
+use std::time
+
+fn main() {
+    let start = time::Instant::now()
+    {
+        let ticker = time::Ticker::new(time::Duration::from_millis(20))
+        let mut seen = 0
+        while let Some(n) = ticker.recv() {
+            seen += 1
+            if seen == 5 { break }
+        }
+        println(f"saw {seen} ticks")
+    }
+    let ms = start.elapsed_ms()
+    println(f"took about 100 ms: {ms >= 90 && ms < 400}")
+    let t = time::Ticker::new(time::Duration::from_secs(3600))
+    t.stop()
+    println(f"stopped ticker closes: {t.recv().is_none()}")
+
+    let fed = time::Ticker::new(time::Duration::from_millis(10))
+    let ticks = fed.channel()
+    let mut through_select = 0
+    while through_select < 3 {
+        select {
+            Some(_) = ticks.recv() => { through_select += 1 }
+            None = ticks.recv() => { break }
+        }
+    }
+    let after = fed.recv()
+    println(f"select saw {through_select}, recv then reads the channel: {after.is_some()}")
+    fed.stop()
+    let mut drained = 0
+    while let Some(_) = fed.recv() {
+        drained += 1
+        if drained > 2 { break }
+    }
+    println(f"stopped channel closes: {drained <= 2}")
+}

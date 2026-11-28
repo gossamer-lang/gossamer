@@ -129,8 +129,6 @@ enum SymbolLookup {
 type KindDispatchArgs = (Vec<Operand>, &'static str, Vec<(Local, Local)>);
 
 const HASH_SET_DEF_LOCAL: u32 = u32::MAX - 7;
-const VALIDATE_ERRORS_DEF_LOCAL: u32 = u32::MAX - 9;
-const VALIDATE_FIELD_ERROR_DEF_LOCAL: u32 = u32::MAX - 10;
 const BTREE_SET_DEF_LOCAL: u32 = u32::MAX - 18;
 const BINARY_HEAP_DEF_LOCAL: u32 = u32::MAX - 28;
 const REVERSE_DEF_LOCAL: u32 = u32::MAX - 29;
@@ -557,6 +555,11 @@ impl<'a> Builder<'a> {
         }
         if let MethodLowering::Handled(r) =
             self.lower_scalar_bound_method(receiver, method, args, span)
+        {
+            return r;
+        }
+        if let MethodLowering::Handled(r) =
+            self.lower_str_to_wide_method(receiver, method, args, span)
         {
             return r;
         }

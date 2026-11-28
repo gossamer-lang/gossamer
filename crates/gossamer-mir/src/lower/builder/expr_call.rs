@@ -353,6 +353,15 @@ impl<'a> Builder<'a> {
             // TLS-terminating variant. Same handler-fn-ptr dispatch as
             // `http::serve`, with the cert + key PEM threaded ahead of
             // the handler.
+            // `http::serve_tls_config(addr, config, handler)`, which the
+            // front end spells with the configuration's registry id.
+            if joined == "http::__serve_tls_live" && args.len() == 3 {
+                if let Some(local) =
+                    self.lower_http_serve_tls_live(&args[0], &args[1], &args[2], span)
+                {
+                    return Some(local);
+                }
+            }
             if joined == "http::serve_tls" && args.len() == 4 {
                 if let Some(local) =
                     self.lower_http_serve_tls(&args[0], &args[1], &args[2], &args[3], ty, span)
@@ -369,16 +378,6 @@ impl<'a> Builder<'a> {
             ) && args.len() == 2
             {
                 if let Some(local) = self.lower_websocket_serve(&args[0], &args[1], ty, span) {
-                    return Some(local);
-                }
-            }
-            // `http_h3::serve(addr, cert_path, key_path, handler)` -
-            // same handler-fn-ptr dispatch as `http::serve` with two
-            // extra leading string args (the TLS keypair file paths).
-            if joined == "http_h3::serve" && args.len() == 4 {
-                if let Some(local) =
-                    self.lower_http3_serve(&args[0], &args[1], &args[2], &args[3], ty, span)
-                {
                     return Some(local);
                 }
             }
@@ -991,11 +990,34 @@ impl<'a> Builder<'a> {
             if segments.len() == 1 {
                 if let Some(local) = self.lookup_local(&segments[0].name) {
                     if let Some(fn_name) = self.local_closure.get(&local).cloned() {
+                        let param_tys = match self.tcx.kind_of(callee.ty) {
+                            gossamer_types::TyKind::FnPtr(sig)
+                            | gossamer_types::TyKind::FnTrait(sig) => sig.inputs.clone(),
+                            _ => Vec::new(),
+                        };
                         let mut arg_operands = Vec::with_capacity(args.len() + 1);
                         arg_operands.push(Operand::Copy(Place::local(local)));
-                        for arg in args {
+                        for (idx, arg) in args.iter().enumerate() {
                             let a = self.lower_expr(arg)?;
                             let a = self.auto_deref_cell(a, span);
+                            // A callable argument crosses as an environment, as
+                            // it does into any other call: a raw function name
+                            // (a lifted closure that captures nothing, or a
+                            // named `fn`) is wrapped in one.
+                            let a = match param_tys.get(idx) {
+                                Some(&expected)
+                                    if !self.local_closure.contains_key(&a)
+                                        && (self.local_fn_name.contains_key(&a)
+                                            || matches!(
+                                                self.tcx.kind_of(self.locals[a.0 as usize].ty),
+                                                gossamer_types::TyKind::FnDef { .. }
+                                                    | gossamer_types::TyKind::FnPtr(_)
+                                            )) =>
+                                {
+                                    self.coerce_to_fn_trait_if_needed(a, expected, span)
+                                }
+                                _ => a,
+                            };
                             arg_operands.push(Operand::Copy(Place::local(a)));
                         }
                         let dest = self.fresh(ty);

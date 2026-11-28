@@ -298,6 +298,19 @@ pub(super) fn emit_per_arg_print(
                 intrinsics,
                 Some(bare),
             )?,
+            PrintKind::VecWide(unsigned) => emit_vec_print(
+                module,
+                builder,
+                if unsigned {
+                    "gos_rt_vec_format_u128"
+                } else {
+                    "gos_rt_vec_format_i128"
+                },
+                value,
+                print_str,
+                intrinsics,
+                Some(bare),
+            )?,
             PrintKind::VecF64 => emit_vec_print(
                 module,
                 builder,
@@ -843,6 +856,9 @@ pub(super) fn emit_args_to_concat_string(
             other => (other, false),
         };
         match kind {
+            _ if operand_is_wide_int(body, tcx, arg) => {
+                emit_concat_wide(module, builder, intrinsics, body, tcx, arg, value)?;
+            }
             // The spelling was taken off the kind above, so a sequence
             // reaching here carries the kind it wraps.
             PrintKind::Seq(_) => unreachable!("the sequence spelling is unwrapped above"),
@@ -914,6 +930,7 @@ pub(super) fn emit_args_to_concat_string(
             }
             PrintKind::VecI64
             | PrintKind::VecUint
+            | PrintKind::VecWide(_)
             | PrintKind::VecF64
             | PrintKind::VecBool
             | PrintKind::VecString
@@ -922,6 +939,8 @@ pub(super) fn emit_args_to_concat_string(
                 let helper = match kind {
                     PrintKind::VecI64 => "gos_rt_vec_format_i64",
                     PrintKind::VecUint => "gos_rt_vec_format_u64",
+                    PrintKind::VecWide(false) => "gos_rt_vec_format_i128",
+                    PrintKind::VecWide(true) => "gos_rt_vec_format_u128",
                     PrintKind::VecF64 => "gos_rt_vec_format_f64",
                     PrintKind::VecBool => "gos_rt_vec_format_bool",
                     PrintKind::VecString => "gos_rt_vec_format_string",
@@ -1091,4 +1110,51 @@ pub(super) fn emit_args_to_concat_string(
     let finish_ref = module.declare_func_in_func(finish, builder.func);
     let call = builder.ins().call(finish_ref, &[]);
     Ok(builder.inst_results(call)[0])
+}
+
+/// Whether `arg` is a 128-bit integer, or a reference to one, which renders
+/// as the value it addresses.
+pub(super) fn operand_is_wide_int(body: &Body, tcx: &TyCtxt, arg: &Operand) -> bool {
+    let Operand::Copy(place) = arg else {
+        return false;
+    };
+    let ty = super::ty::resolve_place_ty(tcx, body, place);
+    tcx.is_wide_int(ty)
+        || matches!(tcx.kind_of(ty), TyKind::Ref { inner, .. } if tcx.is_wide_int(*inner))
+}
+
+/// Appends a 128-bit integer `value` of `arg` to the concat buffer as its two
+/// words, signed or not by `arg`'s type; a reference is read through first.
+pub(super) fn emit_concat_wide(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    intrinsics: &mut IntrinsicContext,
+    body: &Body,
+    tcx: &TyCtxt,
+    arg: &Operand,
+    value: ir::Value,
+) -> Result<()> {
+    let mut ty = match arg {
+        Operand::Copy(place) => Some(super::ty::resolve_place_ty(tcx, body, place)),
+        _ => None,
+    };
+    let value = match ty.map(|t| tcx.kind_of(t)) {
+        Some(TyKind::Ref { inner, .. }) => {
+            ty = Some(*inner);
+            builder
+                .ins()
+                .load(types::I128, ir::MemFlagsData::trusted(), value, 0)
+        }
+        _ => value,
+    };
+    let unsigned =
+        ty.is_some_and(|t| matches!(tcx.kind_of(t), TyKind::Int(gossamer_types::IntTy::U128)));
+    let name = if unsigned {
+        "gos_rt_concat_u128"
+    } else {
+        "gos_rt_concat_i128"
+    };
+    let (low, high) = builder.ins().isplit(value);
+    super::lowering_calls::emit_rt_call_by_name(module, builder, intrinsics, name, &[low, high])?;
+    Ok(())
 }

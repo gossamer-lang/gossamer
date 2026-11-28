@@ -220,12 +220,30 @@ fn run_pipeline(user_source: &str) -> Result<(), String> {
     gossamer_interp::set_program_name(ENTRY_NAME);
     gossamer_interp::set_program_args(&[]);
 
+    // A program before this one in the module may have left cleanups its
+    // last releases queued; they belong to a run that has ended.
+    gossamer_interp::discard_pending_cleanups();
     let mut vm = gossamer_interp::Vm::new();
     vm.load(&program, tcx, true)
         .map_err(|err| format!("vm load failed: {err}"))?;
     drop(program);
 
     let call = vm.call("main", Vec::new());
+    // Cleanups `main`'s last releases queued run as it ends, or as an exit
+    // leaves it, as under `gos run`.
+    if call.is_ok()
+        || call
+            .as_ref()
+            .err()
+            .and_then(gossamer_interp::exit_status)
+            .is_some()
+    {
+        gossamer_interp::run_pending_cleanups(&vm);
+    }
+    let call = match gossamer_interp::take_cleanup_fault() {
+        Some(fault) => Err(fault),
+        None => call,
+    };
     vm.release_jit_prelude();
     gossamer_interp::join_outstanding_goroutines();
     gossamer_interp::flush_runtime_stdout();

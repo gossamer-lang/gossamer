@@ -245,7 +245,7 @@ fn builtin_flag_map_get(args: &[Value]) -> RuntimeResult<Value> {
 // Sync primitives: I64Vec, WaitGroup, lcg_jump.
 //
 // The interpreter exposes these as `Value::Struct { name: "I64Vec" }`
-// / `Value::Struct { name: "WaitGroup" }` carrying a single
+// / `Value::Struct { name: "sync::WaitGroup" }` carrying a single
 // `__handle: i64` field. The actual mutable state lives in the
 // global side tables below, so the `Value` itself stays cheap to
 // clone across goroutine boundaries (the closure-call form of
@@ -291,7 +291,7 @@ fn u8vec_of(value: &Value) -> Option<Arc<U8Buf>> {
 }
 
 fn wg_of(value: &Value) -> Option<Arc<WaitGroupCell>> {
-    crate::value::handle_state(value, "WaitGroup", "__handle")
+    crate::value::handle_state(value, "sync::WaitGroup", "__handle")
 }
 
 
@@ -704,7 +704,7 @@ fn builtin_waitgroup_new(_args: &[Value]) -> RuntimeResult<Value> {
         counter: parking_lot::Mutex::new(0),
         cond: parking_lot::Condvar::new(),
     });
-    Ok(crate::value::state_handle("WaitGroup", "__handle", cell))
+    Ok(crate::value::state_handle("sync::WaitGroup", "__handle", cell))
 }
 
 fn builtin_waitgroup_add(args: &[Value]) -> RuntimeResult<Value> {
@@ -959,7 +959,7 @@ mod tests {
         if let Some(items) = headers {
             fields.push(("headers", Value::Array(Arc::new(items))));
         }
-        Value::struct_("Response", fields)
+        Value::struct_("http::Response", fields)
     }
 
     #[test]

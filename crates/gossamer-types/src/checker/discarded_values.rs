@@ -7,6 +7,7 @@ use crate::{Ty, TyKind, TypeError};
 
 /// `String` methods that answer a value and leave the receiver as it was.
 const STRING_VALUE_METHODS: &[&str] = &[
+    "cmp",
     "len",
     "is_empty",
     "as_bytes",
@@ -44,6 +45,8 @@ const STRING_VALUE_METHODS: &[&str] = &[
     "to_uppercase",
     "to_title",
     "to_i64",
+    "to_i128",
+    "to_u128",
     "to_f64",
     "to_bool",
     "repeat",
@@ -231,6 +234,7 @@ const NUMBER_VALUE_METHODS: &[&str] = &[
     "hypot",
     "mul_add",
     "total_cmp",
+    "cmp",
     "is_nan",
     "is_infinite",
     "is_finite",
@@ -244,6 +248,7 @@ const NUMBER_VALUE_METHODS: &[&str] = &[
 
 /// `char` methods.
 const CHAR_VALUE_METHODS: &[&str] = &[
+    "cmp",
     "is_alphabetic",
     "is_alphanumeric",
     "is_numeric",

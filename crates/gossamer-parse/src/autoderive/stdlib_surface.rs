@@ -4,8 +4,19 @@
 /// `sql::Stmt`. A head outside this set is not a module key at all
 /// (`Http2Config::default`) and passes through unguarded.
 const REWRITTEN_STDLIB_MODULES: &[&str] = &[
-    "csrf", "form", "fs", "http", "path", "pem", "sql", "tar", "time", "x509", "zip",
+    "form", "fs", "http", "path", "pem", "sql", "tar", "time", "x509", "zip",
 ];
+
+/// The rewrite-table key of the stdlib module `segment` names when `parent`
+/// holds it. `text::template` and `html::template` share a last name, so each
+/// is keyed by both; every other module is keyed by its own name.
+fn nested_module_key(parent: Option<&str>, segment: &str) -> String {
+    match (parent, segment) {
+        (Some("text"), "template") => "text_template".to_string(),
+        (Some("html"), "template") => "html_template".to_string(),
+        _ => segment.to_string(),
+    }
+}
 
 /// Stdlib modules this compilation unit reached through `use std::...`, keyed by
 /// the name each is spelled by - its own, or the alias an import gave it - and
@@ -29,24 +40,31 @@ fn std_modules_bound_by<'a>(
         if path.segments.first().map(|s| s.name.as_str()) != Some("std") {
             continue;
         }
+        let n = path.segments.len();
+        let parent_of_last = n.checked_sub(2).map(|i| path.segments[i].name.as_str());
         if let Some(entries) = &decl.list {
             for entry in entries {
                 let bound = entry
                     .alias
                     .as_ref()
                     .map_or_else(|| entry.name.name.clone(), |alias| alias.name.clone());
-                out.insert(bound, entry.name.name.clone());
+                let parent = entry
+                    .prefix
+                    .last()
+                    .or_else(|| path.segments.last())
+                    .map(|s| s.name.as_str());
+                out.insert(bound, nested_module_key(parent, &entry.name.name));
             }
             // A list's own path is a module the entries were reached through.
             if let Some(last) = path.segments.last() {
-                out.insert(last.name.clone(), last.name.clone());
+                out.insert(last.name.clone(), nested_module_key(parent_of_last, &last.name));
             }
         } else if let Some(last) = path.segments.last() {
             let bound = decl
                 .alias
                 .as_ref()
                 .map_or_else(|| last.name.clone(), |alias| alias.name.clone());
-            out.insert(bound, last.name.clone());
+            out.insert(bound, nested_module_key(parent_of_last, &last.name));
         }
     }
     out
@@ -204,8 +222,9 @@ fn wrapper_names_bound_by<'a>(
             if n < 2 || declared.contains(bound.as_str()) {
                 continue;
             }
+            let parent = (n >= 3).then(|| segments[n - 3].as_str());
             if let Some(mangled) = mangled_stdlib_name(
-                segments[n - 2].as_str(),
+                &nested_module_key(parent, segments[n - 2].as_str()),
                 segments[n - 1].as_str(),
             ) {
                 out.insert(bound, mangled);
@@ -246,7 +265,16 @@ fn collapse_expr(
     if !rooted && n > 2 {
         return;
     }
-    let key = |i: usize| stdlib_module_key(scope, path.segments[i].name.name.as_str(), rooted);
+    let key = |i: usize| {
+        let parent = i.checked_sub(1).map(|p| path.segments[p].name.name.as_str());
+        let name = path.segments[i].name.name.as_str();
+        // `html::template::render` reaches through `html`, so the module is
+        // keyed with its parent as an import of it would be.
+        if rooted && parent.is_some() && nested_module_key(parent, name) != name {
+            return Some(nested_module_key(parent, name));
+        }
+        stdlib_module_key(scope, name, rooted)
+    };
     let head3 = if n >= 3 { key(n - 3) } else { None };
     let head2 = key(n - 2);
     let head3 = head3.as_deref();
@@ -333,7 +361,7 @@ fn collapse_expr(
         }
     }
     if n >= 3
-        && matches!(head3, Some("csrf" | "form"))
+        && head3 == Some("form")
         && collapse_http_security_path(path)
     {
         return;
@@ -385,7 +413,14 @@ fn collapse_type(
     if !rooted && n > 2 {
         return;
     }
-    let parent = stdlib_module_key(scope, path.segments[n - 2].name.name.as_str(), rooted);
+    let grandparent = (n >= 3).then(|| path.segments[n - 3].name.name.as_str());
+    let name = path.segments[n - 2].name.name.as_str();
+    let parent = if rooted && grandparent.is_some() && nested_module_key(grandparent, name) != name
+    {
+        Some(nested_module_key(grandparent, name))
+    } else {
+        stdlib_module_key(scope, name, rooted)
+    };
     let parent = parent.as_deref();
     // `sql::Error` is the standard error type at the language
     // level - redirect to `errors::Error`.
@@ -504,7 +539,7 @@ mod struct_surface {
 
         fn visit_expr(&mut self, expr: &mut Expr) {
             walk_expr_mut(self, expr);
-            if let ExprKind::Path(path) = &mut expr.kind {
+            if let ExprKind::Path(path) | ExprKind::Struct { path, .. } = &mut expr.kind {
                 bare_import_expr(path, self.scopes.wrappers_in(&self.module));
             }
         }
@@ -787,9 +822,10 @@ mod wrapper_names {
                 }
                 ExprKind::Struct {
                     path, fields, base, ..
-                } if path.segments.len() >= 2 => {
+                } if self.may_rewrite(path.segments.len(), &path.segments[0].name.name) => {
                     let mut path = path.clone();
                     collapse_expr(&mut path, self.scopes.modules_in(&self.module));
+                    bare_import_expr(&mut path, self.scopes.wrappers_in(&self.module));
                     self.visit_path_expr(&path);
                     for field in fields {
                         if let Some(value) = &field.value {
@@ -1629,7 +1665,10 @@ fn serde_site_stub(op: &str, name: &str, ty: gossamer_ast::Type, span: Span) -> 
         "from_value" => {
             format!("fn {name}(value: json::Value) -> Result<{STUB_TARGET}, errors::Error>")
         }
-        _ => format!("fn {name}(text: String) -> Result<{STUB_TARGET}, errors::Error>"),
+        "from_toml" => format!("fn {name}(text: String) -> Result<{STUB_TARGET}, errors::Error>"),
+        _ => format!(
+            "fn {name}(text: String, duplicate_keys: i64 = 0) -> Result<{STUB_TARGET}, errors::Error>"
+        ),
     };
     let source = format!("{signature} {{\n    panic(\"{op} is generated after checking\")\n}}\n");
     let (parsed, diags) = crate::parse_source_file(&source, span.file);

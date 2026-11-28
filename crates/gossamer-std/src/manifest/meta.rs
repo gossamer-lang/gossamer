@@ -74,6 +74,11 @@ pub const RUNTIME: StdModule = StdModule {
     summary: "Goroutine / scheduler introspection and tuning.",
     items: &[
         StdItem {
+            name: "Guard",
+            kind: StdItemKind::Type,
+            doc: "A value that runs a closure once, when the last reference to it goes: `let g = runtime::Guard::new(|| cleanup())`. Copies share the one guard, so the cleanup runs when the last copy is released, whatever path releases it. A panic in the cleanup ends the program with its report.",
+        },
+        StdItem {
             name: "collect_cycles",
             kind: StdItemKind::Function,
             doc: "Requests collection of unreachable reference cycles; returns `()`.",
@@ -353,67 +358,27 @@ pub const HTTPTEST: StdModule = StdModule {
 
 pub const IMAGE: StdModule = StdModule {
     path: "std::image",
-    summary: "Opaque RGBA8 image handles with PNG and JPEG codecs.",
+    summary: "RGBA8 images as values, with PNG, JPEG, and GIF decoding, PNG and JPEG encoding, and Lanczos-3 resizing, all under one pixel limit.",
     items: &[
         StdItem {
-            name: "new",
-            kind: StdItemKind::Function,
-            doc: "Allocates a transparent image handle.",
+            name: "Image",
+            kind: StdItemKind::Type,
+            doc: "An image: its size and RGBA8 pixels, row by row, copied and shared like any value. `Image::new(width, height)?` (transparent), `Image::filled(width, height, color)?`, and `Image::from_rgba(width, height, pixels)?` build one; `width()`, `height()`, `pixels()`, `pixel(x, y)` (an `Option<Rgba>`), `set_pixel(x, y, color)` (panics outside the image), `resize(width, height)?` (Lanczos-3 on premultiplied alpha), `encode_png()?`, and `encode_jpeg(quality: 90)?` (1 through 100; alpha drawn over black) work on it.",
         },
         StdItem {
-            name: "filled",
-            kind: StdItemKind::Function,
-            doc: "Allocates an image handle filled with a packed 0xRRGGBBAA colour.",
+            name: "Rgba",
+            kind: StdItemKind::Type,
+            doc: "One pixel's colour: `Rgba { r, g, b, a }`, each a `u8`.",
         },
         StdItem {
-            name: "decode_base64",
+            name: "decode",
             kind: StdItemKind::Function,
-            doc: "Decodes a base64 PNG or JPEG; returns zero for malformed input.",
+            doc: "`decode(bytes) -> Result<Image, errors::Error>`: a PNG, JPEG, or GIF (a GIF's first frame, on its logical screen). The error names what failed: bytes of no known format, the codec's message, or a size past the pixel limit, checked before the pixels are allocated.",
         },
         StdItem {
-            name: "width",
+            name: "set_max_pixels",
             kind: StdItemKind::Function,
-            doc: "Returns an image width in pixels.",
-        },
-        StdItem {
-            name: "height",
-            kind: StdItemKind::Function,
-            doc: "Returns an image height in pixels.",
-        },
-        StdItem {
-            name: "pixel",
-            kind: StdItemKind::Function,
-            doc: "Returns packed 0xRRGGBBAA, or -1 outside the image.",
-        },
-        StdItem {
-            name: "set_pixel",
-            kind: StdItemKind::Function,
-            doc: "Sets a packed 0xRRGGBBAA pixel and reports whether it was in bounds.",
-        },
-        StdItem {
-            name: "from_rgba_bytes",
-            kind: StdItemKind::Function,
-            doc: "Builds an image from width * height RGBA8 pixels, row by row; returns zero when the byte count does not match.",
-        },
-        StdItem {
-            name: "release",
-            kind: StdItemKind::Function,
-            doc: "Releases an opaque image and its pixels. Returns false for an invalid or already released handle.",
-        },
-        StdItem {
-            name: "to_rgba_bytes",
-            kind: StdItemKind::Function,
-            doc: "Returns the pixels as RGBA8 bytes, row by row; empty for an invalid handle.",
-        },
-        StdItem {
-            name: "encode_png_base64",
-            kind: StdItemKind::Function,
-            doc: "Encodes an image as lossless base64 PNG.",
-        },
-        StdItem {
-            name: "encode_jpeg_base64",
-            kind: StdItemKind::Function,
-            doc: "Encodes an image as base64 JPEG at quality 1 through 100.",
+            doc: "`set_max_pixels(limit) -> Result<(), errors::Error>`: the most pixels a decoded or built image may hold, 178 956 970 unless set (Pillow's threshold), so a small file claiming a huge image is refused instead of filling memory.",
         },
     ],
 };
@@ -422,6 +387,11 @@ pub const TIME: StdModule = StdModule {
     path: "std::time",
     summary: "Wall-clock and monotonic time facilities.",
     items: &[
+        StdItem {
+            name: "Ticker",
+            kind: StdItemKind::Type,
+            doc: "A channel that receives the tick count every interval, counted from when the ticker was made so ticks do not drift (Go's `time.Ticker`): `Ticker::new(interval)`, `recv()`, `channel()` for `select`, `stop()`. A tick nobody is waiting for is dropped. The ticker stops when its last reference goes.",
+        },
         StdItem {
             name: "Instant",
             kind: StdItemKind::Type,
@@ -440,12 +410,12 @@ pub const TIME: StdModule = StdModule {
         StdItem {
             name: "CivilTime",
             kind: StdItemKind::Type,
-            doc: "Calendar fields interpreted only with an explicit location.",
+            doc: "The calendar fields of an instant read in a location: `year`, `month` (1-12), `day`, `hour`, `minute`, `second`, `nanosecond`, `offset_seconds` (east of UTC), and `weekday` (0 is Monday). `Location::civil(unix_ms)` answers one; `Location::resolve(civil)` reads the date and time fields alone, so a literal may leave `nanosecond`, `offset_seconds`, and `weekday` out (each defaults to 0).",
         },
         StdItem {
             name: "CivilResolution",
             kind: StdItemKind::Type,
-            doc: "Explicit unique, gap, or fold result of resolving civil fields.",
+            doc: "What `Location::resolve(civil)` finds for a wall-clock time: `Unique(unix_ms)`, `Gap` (a time the zone skips, as at a spring-forward change), or `Fold(earlier_ms, later_ms)` (a time the zone repeats).",
         },
         StdItem {
             name: "Location",
@@ -455,7 +425,7 @@ pub const TIME: StdModule = StdModule {
         StdItem {
             name: "Time",
             kind: StdItemKind::Type,
-            doc: "A wall-clock instant with the location it is read in: `now()`, `from_unix` / `from_unix_ms` / `from_unix_nanos`, `parse_rfc3339` (keeps the written offset), `format_rfc3339`, `civil()`, `in_location` / `utc`, `add_date(years, months, days)` (moves the calendar date and keeps the time of day, refusing a time the change of date skips or repeats), `+` / `-` a `Duration` (elapsed time), and `a - b` answering the `Duration` between two instants.",
+            doc: "A wall-clock instant with the location it is read in: `now()`, `from_unix` / `from_unix_ms` / `from_unix_nanos`, `parse_rfc3339` (keeps the written offset), `format_rfc3339`, `format(layout)` (strftime directives, as `time::parse` reads them), `civil()`, `in_location` / `utc`, `add_date(years, months, days)` (moves the calendar date and keeps the time of day, refusing a time the change of date skips or repeats), `+` / `-` a `Duration` (elapsed time), and `a - b` answering the `Duration` between two instants.",
         },
         StdItem {
             name: "sleep",
@@ -496,6 +466,11 @@ pub const TIME: StdModule = StdModule {
             name: "format_in",
             kind: StdItemKind::Function,
             doc: "Formats an instant in an explicit civil-time location.",
+        },
+        StdItem {
+            name: "parse",
+            kind: StdItemKind::Function,
+            doc: "`parse(layout, text, location: Option<Location> = None)` reads `text` by the strftime directives of `layout` (`%Y-%m-%d %H:%M:%S %z`, `%d/%m/%Y`, `%Q` for an IANA zone name, `%s` for Unix seconds) and answers the `Time` it names. A parsed offset or zone name decides the instant; without one the civil time is read in `location`, or UTC, and a time that location's clock skips or repeats is an error. `Time::format(layout)` writes with the same directives.",
         },
         StdItem {
             name: "add_date",
@@ -602,28 +577,6 @@ pub const UUID: StdModule = StdModule {
     ],
 };
 
-pub const VALIDATE: StdModule = StdModule {
-    path: "std::validate",
-    summary: "Trait-based field validation: implement Validate, collect FieldErrors into Errors.",
-    items: &[
-        StdItem {
-            name: "Validate",
-            kind: StdItemKind::Trait,
-            doc: "Implement on a struct to declare field-level validation rules.",
-        },
-        StdItem {
-            name: "FieldError",
-            kind: StdItemKind::Type,
-            doc: "One field-scoped validation failure: dotted path, message, optional code.",
-        },
-        StdItem {
-            name: "Errors",
-            kind: StdItemKind::Type,
-            doc: "Aggregated FieldError set, indexable by dotted path.",
-        },
-    ],
-};
-
 pub const METRICS: StdModule = StdModule {
     path: "std::metrics",
     summary: "Prometheus-compatible primitives (Counter, Gauge, Histogram) and a Registry rendering the standard text-exposition format.",
@@ -699,53 +652,6 @@ pub const PPROF: StdModule = StdModule {
             name: "route",
             kind: StdItemKind::Function,
             doc: "Serves a `/debug/pprof/...` path, returning the body to write, or `None` for an unknown path.",
-        },
-    ],
-};
-
-pub const TRACE: StdModule = StdModule {
-    path: "std::trace",
-    summary: "W3C trace-context-compatible distributed tracing. Identifier types, request-scoped SpanContext, process-level Tracer, and OTLP JSON export.",
-    items: &[
-        StdItem {
-            name: "TraceId",
-            kind: StdItemKind::Type,
-            doc: "128-bit trace identifier (W3C trace-context format).",
-        },
-        StdItem {
-            name: "SpanId",
-            kind: StdItemKind::Type,
-            doc: "64-bit span identifier.",
-        },
-        StdItem {
-            name: "SpanContext",
-            kind: StdItemKind::Type,
-            doc: "Request-scoped trace + span pair, propagated through `std::context`.",
-        },
-        StdItem {
-            name: "SpanStatus",
-            kind: StdItemKind::Type,
-            doc: "Span outcome: Unset / Ok / Error(message).",
-        },
-        StdItem {
-            name: "Span",
-            kind: StdItemKind::Type,
-            doc: "Active span builder. Attributes, events, status; `end()` finalises and records.",
-        },
-        StdItem {
-            name: "EndedSpan",
-            kind: StdItemKind::Type,
-            doc: "Finalised span record; `to_otlp_json()` serialises for OTLP/HTTP export.",
-        },
-        StdItem {
-            name: "Tracer",
-            kind: StdItemKind::Type,
-            doc: "Process-level span sink. `start_span`, `ended_spans`, `set_global`.",
-        },
-        StdItem {
-            name: "SpanGuard",
-            kind: StdItemKind::Type,
-            doc: "RAII guard returned by `enter_span`; restores the prior active span on drop.",
         },
     ],
 };

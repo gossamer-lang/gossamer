@@ -11,8 +11,10 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::HashMap;
+
 use gossamer_ast::visitor::{Visitor, walk_expr};
-use gossamer_ast::{BinaryOp, Expr, ExprKind, Literal, SourceFile, UnaryOp};
+use gossamer_ast::{BinaryOp, Expr, ExprKind, ItemKind, Literal, SourceFile, UnaryOp};
 use gossamer_lex::Span;
 
 use crate::context::TyCtxt;
@@ -39,18 +41,67 @@ pub fn find_lossy_casts(sf: &SourceFile, table: &TypeTable, tcx: &TyCtxt) -> Vec
     let mut finder = Finder {
         table,
         tcx,
+        consts: literal_consts(sf),
         out: Vec::new(),
     };
     finder.visit_source_file(sf);
     finder.out
 }
 
-/// An inclusive range of integer values.
-type Range = (i128, i128);
+/// The greatest value of a range: an `i128`, or `u128::MAX`, the one bound
+/// of an integer type no `i128` holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Top {
+    Value(i128),
+    U128Max,
+}
 
-const CHAR_RANGE: Range = (0, 0x10_FFFF);
+impl Top {
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the bounds are compared as floats"
+    )]
+    fn as_f64(self) -> f64 {
+        match self {
+            Top::Value(v) => v as f64,
+            Top::U128Max => u128::MAX as f64,
+        }
+    }
+
+    /// The integer past this one as a float: a power of two for every type's
+    /// greatest value, exact in every float type.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the integer past a type's greatest value is a power of two"
+    )]
+    fn past_as_f64(self) -> f64 {
+        match self {
+            Top::Value(v) => v.checked_add(1).map_or(2f64.powi(127), |p| p as f64),
+            Top::U128Max => 2f64.powi(128),
+        }
+    }
+
+    fn shr(self, k: u32) -> Top {
+        match self {
+            Top::Value(v) => Top::Value(v >> k),
+            Top::U128Max => i128::try_from(u128::MAX >> k).map_or(Top::U128Max, Top::Value),
+        }
+    }
+
+    fn render(self) -> String {
+        match self {
+            Top::Value(v) => render_bound(v),
+            Top::U128Max => u128::MAX.to_string(),
+        }
+    }
+}
+
+/// An inclusive range of integer values.
+type Range = (i128, Top);
+
+const CHAR_RANGE: Range = (0, Top::Value(0x10_FFFF));
 /// What `as char` keeps of an integer: its low byte.
-const CHAR_TARGET_RANGE: Range = (0, 0xFF);
+const CHAR_TARGET_RANGE: Range = (0, Top::Value(0xFF));
 
 fn int_range(ty: IntTy) -> Range {
     let bits: u32 = match ty {
@@ -58,12 +109,16 @@ fn int_range(ty: IntTy) -> Range {
         IntTy::I16 | IntTy::U16 => 16,
         IntTy::I32 | IntTy::U32 => 32,
         IntTy::I64 | IntTy::U64 | IntTy::Isize | IntTy::Usize => 64,
-        IntTy::I128 | IntTy::U128 => 127,
+        IntTy::I128 => return (i128::MIN, Top::Value(i128::MAX)),
+        IntTy::U128 => return (0, Top::U128Max),
     };
     if ty.is_signed() {
-        (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
+        (
+            -(1i128 << (bits - 1)),
+            Top::Value((1i128 << (bits - 1)) - 1),
+        )
     } else {
-        (0, (1i128 << bits) - 1)
+        (0, Top::Value((1i128 << bits) - 1))
     }
 }
 
@@ -132,9 +187,23 @@ fn render_bound(value: i128) -> String {
     }
 }
 
+/// The file's top-level integer constants whose value is a literal.
+fn literal_consts(sf: &SourceFile) -> HashMap<String, i128> {
+    sf.items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::Const(decl) => {
+                literal_int(&decl.value).map(|value| (decl.name.name.clone(), value))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 struct Finder<'a> {
     table: &'a TypeTable,
     tcx: &'a TyCtxt,
+    consts: HashMap<String, i128>,
     out: Vec<LossyCast>,
 }
 
@@ -161,25 +230,28 @@ impl Finder<'_> {
     fn value_range(&self, expr: &Expr, ty: IntTy) -> Range {
         let whole = int_range(ty);
         if let Some(value) = literal_int(expr) {
-            return (value, value);
+            return (value, Top::Value(value));
+        }
+        if let Some(known) = self.named_constant(expr) {
+            return known;
         }
         let narrowed = match &expr.kind {
             ExprKind::Binary { op, lhs, rhs } => match op {
                 BinaryOp::BitAnd => literal_int(rhs)
                     .or_else(|| literal_int(lhs))
                     .filter(|mask| *mask >= 0)
-                    .map(|mask| (0, mask)),
+                    .map(|mask| (0, Top::Value(mask))),
                 BinaryOp::Rem => literal_int(rhs).filter(|n| *n > 0).map(|n| {
                     if whole.0 < 0 {
-                        (-(n - 1), n - 1)
+                        (-(n - 1), Top::Value(n - 1))
                     } else {
-                        (0, n - 1)
+                        (0, Top::Value(n - 1))
                     }
                 }),
                 BinaryOp::Shr if whole.0 >= 0 => literal_int(rhs)
                     .and_then(|k| u32::try_from(k).ok())
-                    .filter(|k| *k < 127)
-                    .map(|k| (0, whole.1 >> k)),
+                    .filter(|k| *k < 128)
+                    .map(|k| (0, whole.1.shr(k))),
                 _ => None,
             },
             ExprKind::MethodCall { name, args, .. } if name.name == "clamp" => {
@@ -187,7 +259,7 @@ impl Finder<'_> {
                     args.first().and_then(literal_int),
                     args.get(1).and_then(literal_int),
                 ) {
-                    (Some(lo), Some(hi)) if lo <= hi => Some((lo, hi)),
+                    (Some(lo), Some(hi)) if lo <= hi => Some((lo, Top::Value(hi))),
                     _ => None,
                 }
             }
@@ -195,6 +267,34 @@ impl Finder<'_> {
             _ => None,
         };
         narrowed.map_or(whole, |(lo, hi)| (lo.max(whole.0), hi.min(whole.1)))
+    }
+
+    /// The value of a named integer constant: an integer type's `MIN` or
+    /// `MAX`, or a top-level `const` the file sets to a literal.
+    fn named_constant(&self, expr: &Expr) -> Option<Range> {
+        let ExprKind::Path(path) = &expr.kind else {
+            return None;
+        };
+        match path.segments.as_slice() {
+            [name] => self
+                .consts
+                .get(&name.name.name)
+                .map(|value| (*value, Top::Value(*value))),
+            [owner, bound] => {
+                let (lo, hi) = int_range(IntTy::from_name(&owner.name.name)?);
+                match bound.name.name.as_str() {
+                    "MIN" => Some((lo, Top::Value(lo))),
+                    // `u128::MAX` is the one value no `i128` holds, so its
+                    // lower bound is the largest one that does.
+                    "MAX" => Some(match hi {
+                        Top::Value(value) => (value, hi),
+                        Top::U128Max => (i128::MAX, hi),
+                    }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Whether a float operand is rounded and clamped into `target` by its
@@ -211,7 +311,7 @@ impl Finder<'_> {
                     reason = "the target's bounds are compared as floats"
                 )]
                 let fits =
-                    value.fract() == 0.0 && value >= target.0 as f64 && value <= target.1 as f64;
+                    value.fract() == 0.0 && value >= target.0 as f64 && value <= target.1.as_f64();
                 return fits || (rounded && clamped);
             }
             let ExprKind::MethodCall {
@@ -234,7 +334,7 @@ impl Finder<'_> {
                         args.first().and_then(literal_float),
                         args.get(1).and_then(literal_float),
                     ) && lo >= target.0 as f64
-                        && hi <= target.1 as f64
+                        && hi <= target.1.as_f64()
                     {
                         clamped = true;
                     }
@@ -333,14 +433,18 @@ fn to_int(kind: &TyKind) -> Option<IntTy> {
 }
 
 fn int_range_text(range: Range) -> String {
-    format!("{}, {}", render_bound(range.0), render_bound(range.1))
+    format!("{}, {}", render_bound(range.0), range.1.render())
 }
 
 /// The bounds a value in `values` must be tested against to fit `target`,
 /// or `None` when every such value fits.
 fn int_check(values: Range, target: Range) -> Option<CastCheck> {
     let least = (values.0 < target.0).then_some(target.0);
-    let greatest = (values.1 > target.1).then_some(target.1);
+    // Nothing lies past `u128::MAX`, so a greatest worth testing is an `i128`.
+    let greatest = match target.1 {
+        Top::Value(top) if values.1 > target.1 => Some(top),
+        _ => None,
+    };
     (least.is_some() || greatest.is_some()).then_some(CastCheck::Int { least, greatest })
 }
 
@@ -365,21 +469,18 @@ fn float_check(source: FloatTy, target: Range) -> CastCheck {
         FloatTy::F32 => (value as f32) as i128 == value,
         FloatTy::F64 => (value as f64) as i128 == value,
     };
-    let below = target.0 - 1;
+    // `i128::MIN` has no integer below it in `i128`; it is a power of two, so
+    // every float type holds it and the least is tested inclusively.
+    let below = target.0.checked_sub(1).filter(|&below| exact(below));
     #[allow(
         clippy::cast_precision_loss,
         reason = "the bounds are written as float literals of the source type"
     )]
-    let (least, least_inclusive) = if exact(below) {
-        (below as f64, false)
-    } else {
-        (target.0 as f64, true)
+    let (least, least_inclusive) = match below {
+        Some(below) => (below as f64, false),
+        None => (target.0 as f64, true),
     };
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "the integer past the greatest is a power of two, exact in every float type"
-    )]
-    let past = (target.1 + 1) as f64;
+    let past = target.1.past_as_f64();
     CastCheck::Float {
         least,
         least_inclusive,
@@ -432,6 +533,7 @@ pub fn cast_check(cast: &Expr, table: &TypeTable, tcx: &TyCtxt) -> Option<CastCh
     let finder = Finder {
         table,
         tcx,
+        consts: HashMap::new(),
         out: Vec::new(),
     };
     finder.needed_check(cast, value).map(|(check, _, _)| check)
@@ -440,14 +542,11 @@ pub fn cast_check(cast: &Expr, table: &TypeTable, tcx: &TyCtxt) -> Option<CastCh
 /// The values an integer expression can take, narrowed by what its own
 /// form shows (a literal, a mask, a remainder, a shift, a literal `clamp`),
 /// or `None` when it is not an integer.
-pub(crate) fn int_value_range(
-    expr: &Expr,
-    table: &TypeTable,
-    tcx: &TyCtxt,
-) -> Option<(i128, i128)> {
+pub(crate) fn int_value_range(expr: &Expr, table: &TypeTable, tcx: &TyCtxt) -> Option<(i128, Top)> {
     let finder = Finder {
         table,
         tcx,
+        consts: HashMap::new(),
         out: Vec::new(),
     };
     let ty = finder.int_of(expr)?;
@@ -465,5 +564,67 @@ impl Visitor for Finder<'_> {
             self.check_cast(expr, value);
         }
         walk_expr(self, expr);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn float_checks_reach_the_full_width_of_128_bit_targets() {
+        let CastCheck::Float {
+            least,
+            least_inclusive,
+            past,
+        } = float_to_int_check(FloatTy::F64, IntTy::U128)
+        else {
+            panic!("a float to integer check");
+        };
+        assert_eq!(
+            (least, least_inclusive, past),
+            (-1.0, false, 2f64.powi(128))
+        );
+        let CastCheck::Float {
+            least,
+            least_inclusive,
+            past,
+        } = float_to_int_check(FloatTy::F64, IntTy::I128)
+        else {
+            panic!("a float to integer check");
+        };
+        assert_eq!(
+            (least, least_inclusive, past),
+            (-(2f64.powi(127)), true, 2f64.powi(127))
+        );
+    }
+
+    #[test]
+    fn integer_ranges_hold_every_128_bit_bound() {
+        assert_eq!(int_range(IntTy::U128), (0, Top::U128Max));
+        assert_eq!(int_range(IntTy::I128), (i128::MIN, Top::Value(i128::MAX)));
+        assert_eq!(
+            int_check(int_range(IntTy::U128), int_range(IntTy::I128)),
+            Some(CastCheck::Int {
+                least: None,
+                greatest: Some(i128::MAX)
+            })
+        );
+        assert_eq!(
+            int_check(int_range(IntTy::I128), int_range(IntTy::U128)),
+            Some(CastCheck::Int {
+                least: Some(0),
+                greatest: None
+            })
+        );
+        assert_eq!(
+            int_check(int_range(IntTy::U64), int_range(IntTy::U128)),
+            None
+        );
+        assert_eq!(Top::U128Max.shr(1), Top::Value(i128::MAX));
+        assert_eq!(
+            int_range_text(int_range(IntTy::U128)),
+            format!("0, {}", u128::MAX)
+        );
     }
 }

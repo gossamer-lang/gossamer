@@ -60,9 +60,16 @@ impl<'tcx> FnBuilder<'tcx> {
         // `==` lowers natively to a `<Type>::eq` call and `defer` to
         // block-scoped LIFO emission, so every closure body lowers
         // natively.
-        let chunk = self
-            .build_closure_chunk(&capture_names, &capture_is_cell, params, body)?
-            .into_shared();
+        let chunk =
+            self.build_closure_chunk(&capture_names, &capture_is_cell, params, body, false)?;
+        if self.cell_variants && !chunk.mut_ref_params.is_empty() {
+            let variant =
+                self.build_closure_chunk(&capture_names, &capture_is_cell, params, body, true)?;
+            self.passes_capture_cells |= variant.passes_capture_cells;
+            let _ = chunk.cell_variant.set(variant.into_shared());
+        }
+        let chunk = chunk.into_shared();
+        self.passes_capture_cells |= chunk.passes_capture_cells;
 
         let proto = ClosureProto {
             chunk,
@@ -84,13 +91,15 @@ impl<'tcx> FnBuilder<'tcx> {
     /// leading `capture_names.len()` registers receive the captured
     /// upvalues, followed by one register per declared parameter; the VM
     /// places `capture_values ++ args` into them before running the
-    /// chunk.
+    /// chunk. With `cell_params` it is the body whose `&mut` parameters
+    /// arrive as captured bindings' cells or places.
     fn build_closure_chunk(
         &self,
         capture_names: &[String],
         capture_is_cell: &[bool],
         params: &[HirParam],
         body: &HirExpr,
+        cell_params: bool,
     ) -> RuntimeResult<FnChunk> {
         let name = crate::value::intern_type_name("__closure");
         let mut b = FnBuilder::new(
@@ -116,6 +125,8 @@ impl<'tcx> FnBuilder<'tcx> {
         // written in, so it reads the same dispatch targets.
         b.dispatch = self.dispatch;
         b.dispatch_key = self.dispatch_key;
+        b.cell_variants = self.cell_variants;
+        b.cell_params = cell_params;
         // Captured upvalues occupy the leading registers; the names bind
         // to them below, once the declared parameters have claimed the
         // rest of the arity prefix.
@@ -132,10 +143,17 @@ impl<'tcx> FnBuilder<'tcx> {
         // binding: the `&mut Vec<T>` write-back protocol and the
         // typed-storage fast-path tracking both carry over.
         let mut pending_cells: Vec<(String, Reg, gossamer_types::Ty)> = Vec::new();
+        let mut cell_param_regs: Vec<(&HirPat, Reg)> = Vec::new();
         for param in params {
             let reg = b.alloc_reg();
+            let writes_through = is_mut_ref_writeback(self.tcx, param.ty);
+            if cell_params && writes_through {
+                cell_param_regs.push((&param.pattern, reg));
+                b.mut_ref_params.push(reg);
+                continue;
+            }
             b.bind_param(&param.pattern, reg)?;
-            if is_mut_ref_writeback(self.tcx, param.ty) {
+            if writes_through {
                 b.mut_ref_params.push(reg);
             }
             let elem_kind = b.unwrap_ref(param.ty);
@@ -155,6 +173,15 @@ impl<'tcx> FnBuilder<'tcx> {
             if let HirPatKind::Binding { name, .. } = &param.pattern.kind {
                 pending_cells.push((name.name.clone(), reg, param.ty));
             }
+        }
+        // A cell parameter's binding gets a working register every
+        // instruction loads from, and stores back to, the caller's cell.
+        for (pattern, cell) in cell_param_regs {
+            let home = b.alloc_reg();
+            b.bind_param(pattern, home)?;
+            b.capture_cells.push((home, cell));
+            b.cell_param_homes.push(home);
+            b.capture_cells_used = true;
         }
         // A cell claims a register of its own, so cells are installed
         // only once every declared parameter holds its register: the VM

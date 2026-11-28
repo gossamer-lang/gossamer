@@ -32,18 +32,25 @@ unsafe fn text_arg<'a>(s: *const c_char) -> &'a str {
 /// The text a reader walks: a share of the caller's `String`, held for the
 /// walk instead of a copy, or text the reader made itself.
 enum ReaderText {
-    /// A `String` argument the reader took a share of, released on drop.
-    Shared(*const c_char),
+    /// A `String` argument the reader took a share of, released on drop, and
+    /// its content, checked as UTF-8 once when the reader opened.
+    Shared {
+        body: *const c_char,
+        text: *const u8,
+        len: usize,
+    },
     Owned(String),
 }
 
 impl AsRef<str> for ReaderText {
     fn as_ref(&self) -> &str {
         match self {
-            // SAFETY: the reader holds a share of the string, so its body
-            // stays live until the drop below, and `rd_new` checked it is
-            // UTF-8 before sharing it.
-            Self::Shared(text) => unsafe { super::string::gos_str_arg_text(*text) },
+            // SAFETY: the reader holds a share of the string, so the content
+            // `text..text + len` stays live and unchanged until the drop
+            // below, and `rd_new` checked it is UTF-8 before sharing it.
+            Self::Shared { text, len, .. } => unsafe {
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts(*text, *len))
+            },
             Self::Owned(text) => text,
         }
     }
@@ -51,9 +58,9 @@ impl AsRef<str> for ReaderText {
 
 impl Drop for ReaderText {
     fn drop(&mut self) {
-        if let Self::Shared(text) = *self {
+        if let Self::Shared { body, .. } = *self {
             // SAFETY: gives back the share `rd_new` took.
-            unsafe { super::string::gos_rt_str_free_typed(text.cast_mut()) };
+            unsafe { super::string::gos_rt_str_free_typed(body.cast_mut()) };
         }
     }
 }
@@ -97,20 +104,62 @@ unsafe fn with_reader_or_else<T>(
 /// `w` is zero or a handle `gos_rt_serde_wr_new` answered that nothing else
 /// uses for the call.
 unsafe fn with_writer(w: i64, f: impl FnOnce(&mut Vec<u8>)) {
+    // SAFETY: the caller's contract.
+    unsafe { with_writer_state(w, |writer| f(&mut writer.bytes)) };
+}
+
+/// Runs `f` on the writer the handle `w` names.
+///
+/// # Safety
+///
+/// As for [`with_writer`].
+unsafe fn with_writer_state(w: i64, f: impl FnOnce(&mut SerdeWriter)) {
     if w == 0 {
         return;
     }
     // SAFETY: a nonzero handle is the address `gos_rt_serde_wr_new` leaked,
-    // live until `gos_rt_serde_wr_finish`, and the caller holds it alone.
-    let out = unsafe { &mut *(w as *mut Vec<u8>) };
-    f(out);
+    // live until a finish releases it, and the caller holds it alone.
+    let writer = unsafe { &mut *(w as *mut SerdeWriter) };
+    f(writer);
+}
+
+/// A typed writer: the text written so far, and the first float written that
+/// JSON has no number for.
+#[derive(Debug, Default)]
+pub struct SerdeWriter {
+    /// The text, after the string header a finished writer's text keeps.
+    pub bytes: Vec<u8>,
+    /// The first NaN or infinity a `json::encode` walk wrote as `null`.
+    pub non_finite: Option<f64>,
+}
+
+impl SerdeWriter {
+    /// Notes `value` when JSON has no number for it.
+    pub fn note_float(&mut self, value: f64) {
+        if !value.is_finite() && self.non_finite.is_none() {
+            self.non_finite = Some(value);
+        }
+    }
+}
+
+/// Why `json::encode` refuses a value holding `value`, a NaN or an infinity.
+#[must_use]
+pub fn non_finite_message(value: f64) -> String {
+    let spelled = if value.is_nan() {
+        "NaN"
+    } else if value > 0.0 {
+        "inf"
+    } else {
+        "-inf"
+    };
+    format!("json::encode: {spelled} has no JSON number (RFC 8259 section 6)")
 }
 
 fn index_arg(index: i64) -> usize {
     usize::try_from(index).unwrap_or(usize::MAX)
 }
 
-/// Opens a reader over `text`, validated as `json::parse` would.
+/// Opens a reader over `text`, which it reads as `json::parse` would.
 ///
 /// The reader takes a share of the string rather than copying it: the
 /// caller may release its own share once this call is its last use, and the
@@ -130,7 +179,11 @@ pub unsafe extern "C" fn gos_rt_serde_rd_new(text: *const c_char) -> i64 {
                 // SAFETY: as above; the share lives in the reader until
                 // `ReaderText`'s drop gives it back.
                 unsafe { super::string::gos_rt_str_retain_typed(text) };
-                TypedReader::over(ReaderText::Shared(text))
+                TypedReader::over(ReaderText::Shared {
+                    body: text,
+                    text: bytes.as_ptr(),
+                    len: bytes.len(),
+                })
             } else {
                 match gossamer_core::json::validate(bytes) {
                     Ok(_) => owned(""),
@@ -162,17 +215,19 @@ fn converted_reader(converted: Result<String, String>) -> i64 {
     Box::into_raw(Box::new(reader)) as i64
 }
 
-/// Opens a reader over a YAML document, for `yaml::decode::<T>`.
+/// Opens a reader over a YAML document, for `yaml::decode::<T>`, reading a
+/// key a mapping repeats as the `duplicates` policy index says.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_serde_rd_new_yaml(text: *const c_char) -> i64 {
+pub unsafe extern "C" fn gos_rt_serde_rd_new_yaml(text: *const c_char, duplicates: i64) -> i64 {
     ffi_entry!({
         // SAFETY: `text` is this shim's String argument, live for the call or null.
         let text = unsafe { text_arg(text) };
         converted_reader(
-            crate::yaml_node::decode_json(
+            crate::yaml_node::decode_json_with(
                 text,
                 crate::yaml_node::max_depth(),
                 crate::yaml_node::max_size(),
+                gossamer_core::json::DuplicateKeys::from_index(duplicates),
             )
             .and_then(|value| serde_json::to_string(&value).map_err(|e| e.to_string())),
         )
@@ -201,12 +256,24 @@ pub unsafe extern "C" fn gos_rt_serde_rd_free(r: i64) {
     });
 }
 
-/// Whether a read has failed.
+/// Sets what a key an object of the reader's document repeats reads as, by
+/// its `json::DuplicateKeys` policy index.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_serde_rd_duplicates(r: i64, duplicates: i64) {
+    ffi_entry!({
+        let policy = gossamer_core::json::DuplicateKeys::from_index(duplicates);
+        // SAFETY: `r` is this shim's reader handle.
+        unsafe { with_reader(r, (), |reader| reader.set_duplicate_keys(policy)) };
+    });
+}
+
+/// Ends the read, checking the document against the parser where it needs
+/// to, and answers whether the read failed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_serde_rd_failed(r: i64) -> i8 {
     ffi_entry!({
         // SAFETY: `r` is this shim's reader handle.
-        i8::from(unsafe { with_reader(r, false, |reader| reader.failed()) })
+        i8::from(unsafe { with_reader(r, false, TypedReader::finish) })
     })
 }
 
@@ -278,13 +345,23 @@ pub unsafe extern "C" fn gos_rt_serde_rd_struct(r: i64, keys: *const c_char) {
     });
 }
 
-/// Steps into field `index`, answering whether the document has it.
+/// Steps into the next member of the struct walk whose key names a field,
+/// answering that field's declared index, or -1 past the last.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_serde_rd_field(r: i64, index: i64) -> i8 {
+pub unsafe extern "C" fn gos_rt_serde_rd_next_field(r: i64) -> i64 {
     ffi_entry!({
         // SAFETY: `r` is this shim's reader handle.
-        i8::from(unsafe { with_reader(r, false, |reader| reader.enter_field(index_arg(index))) })
+        unsafe { with_reader(r, -1, next_field_index) }
     })
+}
+
+/// The declared index of the field the struct walk steps into next, or -1
+/// past the last.
+fn next_field_index(reader: &mut TypedReader) -> i64 {
+    if !reader.next_field() {
+        return -1;
+    }
+    i64::try_from(reader.field_index()).unwrap_or(-1)
 }
 
 /// The current value as an `i64`.
@@ -295,6 +372,28 @@ pub unsafe extern "C" fn gos_rt_serde_rd_i64(r: i64, message: *const c_char) -> 
         let message = unsafe { text_arg(message) };
         // SAFETY: `r` is this shim's reader handle.
         unsafe { with_reader(r, 0, |reader| reader.read_i64(message)) }
+    })
+}
+
+/// The current value as an `i128`: a number or a string of decimal digits.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_serde_rd_i128(r: i64, message: *const c_char) -> i128 {
+    ffi_entry!({
+        // SAFETY: `message` is this shim's String argument.
+        let message = unsafe { text_arg(message) };
+        // SAFETY: `r` is this shim's reader handle.
+        unsafe { with_reader(r, 0, |reader| reader.read_wide(message, false)) }.cast_signed()
+    })
+}
+
+/// The current value as a `u128`: a number or a string of decimal digits.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_serde_rd_u128(r: i64, message: *const c_char) -> i128 {
+    ffi_entry!({
+        // SAFETY: `message` is this shim's String argument.
+        let message = unsafe { text_arg(message) };
+        // SAFETY: `r` is this shim's reader handle.
+        unsafe { with_reader(r, 0, |reader| reader.read_wide(message, true)) }.cast_signed()
     })
 }
 
@@ -350,8 +449,13 @@ pub unsafe extern "C" fn gos_rt_serde_rd_str(r: i64, message: *const c_char) -> 
         // SAFETY: `message` is this shim's String argument.
         let message = unsafe { text_arg(message) };
         // SAFETY: `r` is this shim's reader handle.
-        let text = unsafe { with_reader(r, String::new(), |reader| reader.read_string(message)) };
-        alloc_cstring(text.as_bytes())
+        unsafe {
+            with_reader_or_else(
+                r,
+                || alloc_cstring(b""),
+                |reader| alloc_cstring(reader.read_str(message).as_bytes()),
+            )
+        }
     })
 }
 
@@ -370,15 +474,24 @@ pub unsafe extern "C" fn gos_rt_serde_rd_json(r: i64) -> *mut GosJson {
     })
 }
 
-/// The element count of the current array.
+/// Begins a walk of the current array.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_serde_rd_array(r: i64, message: *const c_char) -> i64 {
+pub unsafe extern "C" fn gos_rt_serde_rd_array(r: i64, message: *const c_char) {
     ffi_entry!({
         // SAFETY: `message` is this shim's String argument.
         let message = unsafe { text_arg(message) };
         // SAFETY: `r` is this shim's reader handle.
-        let count = unsafe { with_reader(r, 0, |reader| reader.begin_array(message)) };
-        i64::try_from(count).unwrap_or(i64::MAX)
+        unsafe { with_reader(r, (), |reader| reader.begin_array(message)) };
+    });
+}
+
+/// Steps into the next element of the array walk, answering whether there is
+/// one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_serde_rd_next_elem(r: i64) -> i8 {
+    ffi_entry!({
+        // SAFETY: `r` is this shim's reader handle.
+        i8::from(unsafe { with_reader(r, false, TypedReader::next_elem) })
     })
 }
 
@@ -423,40 +536,40 @@ pub unsafe extern "C" fn gos_rt_serde_rd_at(r: i64, index: i64) {
     });
 }
 
-/// The entry count of the current object, read as a map.
+/// Begins a walk of the current object, read as a map.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_serde_rd_map(r: i64, message: *const c_char) -> i64 {
+pub unsafe extern "C" fn gos_rt_serde_rd_map(r: i64, message: *const c_char) {
     ffi_entry!({
         // SAFETY: `message` is this shim's String argument.
         let message = unsafe { text_arg(message) };
         // SAFETY: `r` is this shim's reader handle.
-        let count = unsafe { with_reader(r, 0, |reader| reader.begin_map(message)) };
-        i64::try_from(count).unwrap_or(i64::MAX)
+        unsafe { with_reader(r, (), |reader| reader.begin_map(message)) };
+    });
+}
+
+/// Steps into the value of the next entry of the map walk, answering whether
+/// there is one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_serde_rd_next_entry(r: i64) -> i8 {
+    ffi_entry!({
+        // SAFETY: `r` is this shim's reader handle.
+        i8::from(unsafe { with_reader(r, false, TypedReader::next_entry) })
     })
 }
 
-/// The key of map entry `index`.
+/// The key of the map entry the walk stepped into.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_serde_rd_map_key(r: i64, index: i64) -> *mut c_char {
+pub unsafe extern "C" fn gos_rt_serde_rd_entry_key(r: i64) -> *mut c_char {
     ffi_entry!({
         // SAFETY: `r` is this shim's reader handle.
         unsafe {
             with_reader_or_else(
                 r,
                 || alloc_cstring(b""),
-                |reader| alloc_cstring(reader.map_key(index_arg(index)).as_bytes()),
+                |reader| alloc_cstring(reader.entry_key().as_bytes()),
             )
         }
     })
-}
-
-/// Steps into the value of map entry `index`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_serde_rd_map_value(r: i64, index: i64) {
-    ffi_entry!({
-        // SAFETY: `r` is this shim's reader handle.
-        unsafe { with_reader(r, (), |reader| reader.enter_map_value(index_arg(index))) };
-    });
 }
 
 /// Selects an enum variant, stepping into its payload when it has one.
@@ -525,9 +638,12 @@ const WRITER_PREFIX: usize = super::string::BODY_PREFIX_BYTES;
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_serde_wr_new() -> i64 {
     ffi_entry!({
-        let mut out = Vec::<u8>::with_capacity(SERDE_WRITER_CAPACITY);
-        out.resize(WRITER_PREFIX, 0);
-        Box::into_raw(Box::new(out)) as i64
+        let mut bytes = Vec::<u8>::with_capacity(SERDE_WRITER_CAPACITY);
+        bytes.resize(WRITER_PREFIX, 0);
+        Box::into_raw(Box::new(SerdeWriter {
+            bytes,
+            non_finite: None,
+        })) as i64
     })
 }
 
@@ -545,8 +661,8 @@ pub unsafe extern "C" fn gos_rt_serde_wr_finish(w: i64) -> *mut c_char {
         }
         // SAFETY: the handle is the address `gos_rt_serde_wr_new` leaked,
         // released once.
-        let bytes = unsafe { Box::from_raw(w as *mut Vec<u8>) };
-        super::string::string_from_prefixed(*bytes)
+        let writer = unsafe { Box::from_raw(w as *mut SerdeWriter) };
+        super::string::string_from_prefixed(writer.bytes)
     })
 }
 
@@ -560,10 +676,61 @@ pub unsafe extern "C" fn gos_rt_serde_wr_finish_pretty(w: i64) -> *mut c_char {
         }
         // SAFETY: the handle is the address `gos_rt_serde_wr_new` leaked,
         // released once.
-        let bytes = unsafe { Box::from_raw(w as *mut Vec<u8>) };
-        let compact = String::from_utf8_lossy(written(&bytes));
+        let writer = unsafe { Box::from_raw(w as *mut SerdeWriter) };
+        let compact = String::from_utf8_lossy(written(&writer.bytes));
         alloc_cstring(gossamer_core::json::typed::indent_text(&compact).as_bytes())
     })
+}
+
+/// Releases a writer a `json::encode` walk wrote, answering its text, or the
+/// error for a float JSON has no number for: `Result<String, errors::Error>`.
+///
+/// # Safety
+///
+/// `w` is zero or a handle `gos_rt_serde_wr_new` answered, released once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_serde_wr_finish_json(w: i64) -> i128 {
+    // SAFETY: the caller's contract.
+    ffi_entry!({ unsafe { finish_json(w, false) } })
+}
+
+/// [`gos_rt_serde_wr_finish_json`], the text laid out as
+/// `json::encode_pretty` lays out a document.
+///
+/// # Safety
+///
+/// As for [`gos_rt_serde_wr_finish_json`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_serde_wr_finish_json_pretty(w: i64) -> i128 {
+    // SAFETY: the caller's contract.
+    ffi_entry!({ unsafe { finish_json(w, true) } })
+}
+
+/// # Safety
+///
+/// `w` is zero or a handle `gos_rt_serde_wr_new` answered, released once.
+unsafe fn finish_json(w: i64, pretty: bool) -> i128 {
+    if w == 0 {
+        return converted_result(Ok(String::new()));
+    }
+    // SAFETY: the handle is the address `gos_rt_serde_wr_new` leaked,
+    // released once.
+    let writer = unsafe { Box::from_raw(w as *mut SerdeWriter) };
+    if let Some(value) = writer.non_finite {
+        return converted_result(Err(non_finite_message(value)));
+    }
+    if pretty {
+        let compact = String::from_utf8_lossy(written(&writer.bytes));
+        return converted_result(Ok(gossamer_core::json::typed::indent_text(&compact)));
+    }
+    // The walk writes UTF-8, so the buffer it wrote is the answer's own
+    // storage; text that is not UTF-8 is mended a copy at a time, as before.
+    if std::str::from_utf8(written(&writer.bytes)).is_err() {
+        let mended = String::from_utf8_lossy(written(&writer.bytes)).into_owned();
+        return converted_result(Ok(mended));
+    }
+    let text = super::string::string_from_prefixed(writer.bytes);
+    super::result::gos_rt_result_new(0, text as i64)
 }
 
 /// Appends `text` as it is: punctuation and the keys the compiler spelled.
@@ -616,8 +783,8 @@ unsafe fn take_writer(w: i64) -> String {
         return String::new();
     }
     // SAFETY: the caller's contract.
-    let bytes = unsafe { Box::from_raw(w as *mut Vec<u8>) };
-    String::from_utf8_lossy(written(&bytes)).into_owned()
+    let writer = unsafe { Box::from_raw(w as *mut SerdeWriter) };
+    String::from_utf8_lossy(written(&writer.bytes)).into_owned()
 }
 
 /// A conversion's text as `Ok`, or its message as an `Err`.
@@ -668,6 +835,30 @@ pub unsafe extern "C" fn gos_rt_serde_wr_i64(w: i64, value: i64) {
                 out.extend_from_slice(itoa::Buffer::new().format(value).as_bytes());
             });
         }
+    });
+}
+
+/// Appends an `i128`, passed as its low and high words: a number when it
+/// fits 64 bits, else a string of its digits.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_serde_wr_i128(w: i64, low: i64, high: i64) {
+    ffi_entry!({
+        let bits = super::concat::wide_from_words(low.cast_unsigned(), high.cast_unsigned());
+        let text = typed::wide_json_text(bits, false);
+        // SAFETY: `w` is this shim's writer handle.
+        unsafe { with_writer(w, |out| out.extend_from_slice(text.as_bytes())) };
+    });
+}
+
+/// Appends a `u128`, passed as its low and high words: a number when it
+/// fits 64 bits, else a string of its digits.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_serde_wr_u128(w: i64, low: i64, high: i64) {
+    ffi_entry!({
+        let bits = super::concat::wide_from_words(low.cast_unsigned(), high.cast_unsigned());
+        let text = typed::wide_json_text(bits, true);
+        // SAFETY: `w` is this shim's writer handle.
+        unsafe { with_writer(w, |out| out.extend_from_slice(text.as_bytes())) };
     });
 }
 
@@ -726,7 +917,12 @@ pub unsafe extern "C" fn gos_rt_serde_wr_f32(w: i64, value: f64) {
 pub unsafe extern "C" fn gos_rt_serde_wr_f64_tree(w: i64, value: f64) {
     ffi_entry!({
         // SAFETY: `w` is this shim's writer handle.
-        unsafe { with_writer(w, |out| crate::builtins::write_json_tree_float(out, value)) };
+        unsafe {
+            with_writer_state(w, |writer| {
+                writer.note_float(value);
+                crate::builtins::write_json_tree_float(&mut writer.bytes, value);
+            });
+        }
     });
 }
 
@@ -736,7 +932,12 @@ pub unsafe extern "C" fn gos_rt_serde_wr_f32_tree(w: i64, value: f64) {
     ffi_entry!({
         let value = crate::builtins::f32_as_decimal_double(value);
         // SAFETY: `w` is this shim's writer handle.
-        unsafe { with_writer(w, |out| crate::builtins::write_json_tree_float(out, value)) };
+        unsafe {
+            with_writer_state(w, |writer| {
+                writer.note_float(value);
+                crate::builtins::write_json_tree_float(&mut writer.bytes, value);
+            });
+        }
     });
 }
 

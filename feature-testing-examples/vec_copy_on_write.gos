@@ -1,0 +1,170 @@
+// A copy of a `Vec` is a value of its own however deep its elements nest: a
+// write through the copy, or through the original, leaves the other as it
+// was. Covers nested vectors, vectors in struct fields and in elements,
+// element moves out of a copied parent, every mutating method, element and
+// field stores, writes through `&mut`, mutable windows, closures, and
+// goroutine snapshots.
+// Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+struct Node {
+    tag: String
+    children: Vec<Node>
+}
+
+struct Bag {
+    name: String
+    items: Vec<i64>
+    rows: Vec<Vec<i64>>
+}
+
+fn push_one(xs: &mut Vec<i64>) {
+    xs.push(1)
+}
+
+fn bump_all(rows: &mut Vec<Vec<i64>>) {
+    for i in 0..rows.len() {
+        rows[i].push(100 + i)
+    }
+}
+
+fn fill(window: &mut [i64], v: i64) {
+    for i in 0..window.len() {
+        window[i] = v
+    }
+}
+
+fn depth(n: Node) -> i64 {
+    let mut d = 0
+    let mut cur = n
+    while cur.children.len() > 0 {
+        d += 1
+        cur = cur.children[0]
+    }
+    d
+}
+
+fn nested() {
+    let a = #[#[1, 2], #[3], #[]]
+    let mut b = a
+    b[0].push(9)
+    b[1][0] = 30
+    b[2] = #[7, 7]
+    println(f"nested a {a} b {b}")
+    let mut c = b
+    c.pop()
+    c[0].clear()
+    println(f"nested b {b} c {c}")
+    let mut deep = #[#[#[1]]]
+    let shallow = deep
+    deep[0][0].push(2)
+    deep[0].push(#[3])
+    println(f"deep {deep} shallow {shallow}")
+}
+
+fn methods() {
+    let base = #[#[5, 1], #[4], #[3, 3, 3], #[2]]
+    let mut sorted = base
+    sorted.sort_by_key(|v| v.len())
+    let mut rev = base
+    rev.reverse()
+    let mut cut = base
+    cut.truncate(1)
+    let mut grown = base
+    grown.extend(#[#[8], #[9]])
+    let mut ins = base
+    ins.insert(1, #[0]).unwrap()
+    let mut rem = base
+    let removed = rem.remove(0).unwrap()
+    let mut sw = base
+    sw.swap(0, 3)
+    let mut kept = base
+    kept.retain(|v| v.len() > 1)
+    println(f"base {base}")
+    println(f"sorted {sorted} rev {rev} cut {cut}")
+    println(f"grown {grown} ins {ins}")
+    println(f"rem {rem} removed {removed} sw {sw} kept {kept}")
+}
+
+fn moves_out() {
+    let parent = #[#[1], #[2, 2]]
+    let mut copy = parent
+    let mut last = copy.pop().unwrap()
+    last.push(3)
+    let mut first = copy[0]
+    first.push(4)
+    copy[0].push(5)
+    println(f"parent {parent} copy {copy} last {last} first {first}")
+}
+
+fn struct_fields() {
+    let bag = Bag { name: "b", items: #[1, 2], rows: #[#[1], #[2]] }
+    let mut other = bag
+    other.items.push(3)
+    other.rows[1].push(20)
+    other.name = "o"
+    println(f"bag {bag.name} {bag.items} {bag.rows}")
+    println(f"other {other.name} {other.items} {other.rows}")
+    let bags = #[bag, other]
+    let mut bags2 = bags
+    bags2[0].items[0] = 99
+    bags2[1].rows[0].push(11)
+    println(f"bags {bags[0].items} {bags[1].rows} bags2 {bags2[0].items} {bags2[1].rows}")
+}
+
+fn through_mut() {
+    let a = #[10, 20]
+    let mut b = a
+    push_one(&mut b)
+    let rows = #[#[0], #[1]]
+    let mut rows2 = rows
+    bump_all(&mut rows2)
+    println(f"mut a {a} b {b} rows {rows} rows2 {rows2}")
+    let src = #[1, 2, 3, 4, 5, 6]
+    let mut win = src
+    fill(&mut win[1..4], 0)
+    println(f"window src {src} win {win}")
+}
+
+fn closures_and_tasks() {
+    let rows = #[#[1, 2], #[3]]
+    let mut seen = rows
+    let add = |x: i64| seen[0].push(x)
+    add(7)
+    add(8)
+    println(f"closure rows {rows} seen {seen}")
+    let shared = #[#[1], #[2]]
+    let done = cohort {
+        let task = spawn(|| {
+            let mut mine = shared
+            mine[1].push(5)
+            mine
+        })
+        let back = task.join().unwrap()
+        println(f"task shared {shared} back {back}")
+    }
+    if done.is_err() { println("cohort failed") }
+}
+
+fn tree_by_slicing(levels: i64) -> i64 {
+    let mut built: Vec<Node> = #[]
+    for i in 0..levels {
+        let start = if i == 0 { 0 } else { built.len() - 1 }
+        let children = built[start..built.len()]
+        built.truncate(start)
+        built.push(Node { tag: "div", children: children })
+    }
+    let mut copy = built
+    copy[0].children[0].tag = "span"
+    println(f"tree tags {built[0].children[0].tag} {copy[0].children[0].tag}")
+    depth(built[0])
+}
+
+fn main() {
+    nested()
+    methods()
+    moves_out()
+    struct_fields()
+    through_mut()
+    closures_and_tasks()
+    println(f"tree depth {tree_by_slicing(3000)}")
+}

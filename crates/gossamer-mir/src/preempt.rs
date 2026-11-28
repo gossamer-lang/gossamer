@@ -57,7 +57,7 @@ pub fn preemption_polls(body: &Body, calls_program: impl Fn(&Operand) -> bool) -
     polls
 }
 
-fn successors(terminator: &Terminator) -> Vec<usize> {
+pub(crate) fn successors(terminator: &Terminator) -> Vec<usize> {
     match terminator {
         Terminator::Goto { target }
         | Terminator::Assert { target, .. }

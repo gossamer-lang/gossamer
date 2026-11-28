@@ -799,62 +799,6 @@ impl TypeChecker<'_> {
         let err = self.tcx.dyn_error_ty();
         Some(self.result_adt_ty(vec, err))
     }
-
-    pub(super) fn validate_handle_method_ret(
-        &mut self,
-        method: &str,
-        args: &[Expr],
-        arg_tys: &[Ty],
-        resolved: Ty,
-        span: Span,
-    ) -> Option<Ty> {
-        let mut resolved = self.infer.resolve(self.tcx, resolved);
-        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(resolved) {
-            resolved = self.infer.resolve(self.tcx, *inner);
-        }
-        let public_owner = self.render_public_ty(resolved);
-        let Some(TyKind::Adt { def, .. }) = self.tcx.kind(resolved) else {
-            return None;
-        };
-        let owner = self
-            .tcx
-            .def_name(*def)
-            .map_or_else(|| public_owner.clone(), ToString::to_string);
-        let string = self.tcx.string_ty();
-        let field_error = self.stdlib_handle_ty(10, "validate::FieldError");
-        let owner_key = match public_owner.as_str() {
-            "validate::Errors" | "validate::FieldError" => public_owner.as_str(),
-            _ => owner.as_str(),
-        };
-        let (params, ret) = match (owner_key, method) {
-            ("Errors" | "validate::Errors", "add") => (vec![string, field_error], self.tcx.unit()),
-            ("Errors" | "validate::Errors", "is_empty") => (Vec::new(), self.tcx.bool_ty()),
-            ("Errors" | "validate::Errors", "len") => (Vec::new(), self.tcx.int_ty(IntTy::I64)),
-            ("Errors" | "validate::Errors", "count") => (vec![string], self.tcx.int_ty(IntTy::I64)),
-            ("Errors" | "validate::Errors", "get") => (vec![string], string),
-            ("Errors" | "validate::Errors", "collect") => (Vec::new(), string),
-            ("FieldError" | "validate::FieldError", "path" | "message" | "code") => {
-                (Vec::new(), string)
-            }
-            _ => return None,
-        };
-        if args.len() != params.len() {
-            self.emit(
-                TypeError::CallArityMismatch {
-                    callee: format!("{owner}::{method}"),
-                    expected: params.len(),
-                    found: args.len(),
-                },
-                span,
-            );
-            return Some(self.tcx.error_ty());
-        }
-        for (param, (arg_ty, arg)) in params.iter().zip(arg_tys.iter().zip(args)) {
-            self.check_sig_param_arg(*param, *arg_ty, arg);
-        }
-        Some(ret)
-    }
-
     pub(super) fn stdlib_handle_ty(&mut self, offset: u32, name: &str) -> Ty {
         let def = gossamer_resolve::DefId::local(u32::MAX - offset);
         self.tcx.register_def_name(def, name);
@@ -1160,7 +1104,10 @@ impl TypeChecker<'_> {
             }
             ("net::TcpStream" | "net::UnixStream", "write" | "write_all")
             | ("net::UdpSocket", "send_to") => Some(self.fallible(unit)),
-            ("net::TcpStream", "start_tls" | "start_tls_ca" | "start_tls_insecure") => {
+            (
+                "net::TcpStream",
+                "start_tls" | "start_tls_ca" | "start_tls_identity" | "start_tls_insecure",
+            ) => {
                 let handle = self.stdlib_handle_ty(12, "net::TcpStream");
                 Some(self.fallible(handle))
             }
@@ -1921,10 +1868,21 @@ impl TypeChecker<'_> {
                 }
                 _ => None,
             },
+            // One type for both kinds of stream: one the handler writes, and
+            // one `http::stream` answers over an upstream response.
             Some("http::ResponseStream") => match method {
                 "write" | "write_bytes" => Some(self.tcx.int_ty(IntTy::I64)),
                 "close" => Some(self.tcx.unit()),
                 "is_open" => Some(self.tcx.bool_ty()),
+                "next_line" => {
+                    let s = self.tcx.string_ty();
+                    Some(self.option_adt_ty(s))
+                }
+                "next_chunk" => {
+                    let byte = self.tcx.int_ty(IntTy::U8);
+                    let bytes = self.tcx.intern(TyKind::Vec(byte));
+                    Some(self.option_adt_ty(bytes))
+                }
                 _ => None,
             },
             // Every setter answers the server itself, which is what lets a
@@ -2421,7 +2379,7 @@ impl TypeChecker<'_> {
             self.reject_optional_json_document(args, arg_tys);
         }
         match last {
-            "parse" => {
+            "parse" | "__parse_with" => {
                 let j = self.tcx.json_value_ty();
                 let e = self.tcx.dyn_error_ty();
                 Some(self.result_adt_ty(j, e))
@@ -2764,6 +2722,13 @@ impl TypeChecker<'_> {
     /// The type of a rendering intrinsic's call, after checking that each of
     /// `arg_tys` renders on the channel `name` names.
     fn check_rendering_intrinsic(&mut self, name: &str, arg_tys: &[Ty], span: Span) -> Ty {
+        if name == "__fmt_prec"
+            && let Some(value) = arg_tys.first()
+            && let Some(ty) = self.precision_target_mismatch(*value)
+        {
+            self.emit(TypeError::PrecisionOnNonNumber { ty }, span);
+            return self.tcx.error_ty();
+        }
         for ty in arg_tys {
             let resolved = self.infer.resolve(self.tcx, *ty);
             if matches!(
@@ -2790,6 +2755,29 @@ impl TypeChecker<'_> {
             }
         }
         self.tcx.string_ty()
+    }
+
+    /// The rendered type of a `{v:.N}` value that a precision cannot apply
+    /// to: anything but a number or a `String`.
+    fn precision_target_mismatch(&mut self, ty: Ty) -> Option<String> {
+        let mut inner = self.infer.resolve(self.tcx, ty);
+        loop {
+            match self.tcx.kind_of(inner) {
+                TyKind::Ref { inner: next, .. } | TyKind::Nominal { repr: next, .. } => {
+                    inner = self.infer.resolve(self.tcx, *next);
+                }
+                TyKind::Int(_)
+                | TyKind::Float(_)
+                | TyKind::String
+                | TyKind::Var(_)
+                | TyKind::Never
+                | TyKind::Error => return None,
+                _ => {
+                    let shown = self.deep_resolve(inner);
+                    return Some(crate::render_ty(self.tcx, shown));
+                }
+            }
+        }
     }
 
     pub(super) fn check_bare_intrinsic_call(
@@ -3336,7 +3324,9 @@ impl TypeChecker<'_> {
             let name = stdlib_net_handle(tail)
                 .or_else(|| stdlib_fs_handle(tail))
                 .or_else(|| super::handles::stdlib_io_handle(tail))
-                .map_or_else(|| tail.to_string(), |(_, n)| n.to_string());
+                .map(|(_, n)| n)
+                .or_else(|| super::handles::stdlib_handle_qualified_name(tail))
+                .map_or_else(|| tail.to_string(), str::to_string);
             self.tcx.register_def_name(def, &name);
             return Some(self.tcx.intern(TyKind::Adt {
                 def,

@@ -88,6 +88,14 @@ pub enum JitKind {
     /// through nested carriers kept in counted boxes. A parameter is lent to
     /// the body; an answer is owned by the caller. Integer register class.
     Carrier(CarrierShape),
+    /// An `i128` / `u128` (`unsigned`) crossing the boundary as its two
+    /// words, low then high, through the body's carrier entry thunk: a
+    /// parameter as the address of the words, an answer through the
+    /// out-pointer. Integer register class.
+    Wide {
+        /// Whether the value is a `u128`.
+        unsigned: bool,
+    },
     /// An all-scalar user struct (`&self` / `&mut self` / by-value)
     /// crossing the boundary as a pointer to a flat field-slot block
     /// (one 8-byte slot per field, field `i` at byte offset `i * 8`, NO
@@ -656,7 +664,6 @@ fn body_uses_unlowerable_local_repr(
     }
     body.locals.iter().enumerate().any(|(idx, l)| {
         let hit = match tcx.kind_of(l.ty) {
-            TyKind::Int(gossamer_types::IntTy::I128 | gossamer_types::IntTy::U128) => true,
             TyKind::Adt { def, .. } => {
                 if def.local == u32::MAX {
                     return false;
@@ -1941,10 +1948,12 @@ fn emit_carrier_thunks(
         let Some((params, returns)) = body_kinds(body, tcx, enum_shapes, struct_shapes) else {
             continue;
         };
-        let crosses_carrier = matches!(returns, JitKind::ResultEnumPtr(_) | JitKind::Carrier(_))
-            || params
-                .iter()
-                .any(|kind| matches!(kind, JitKind::Carrier(_)));
+        let crosses_carrier = matches!(
+            returns,
+            JitKind::ResultEnumPtr(_) | JitKind::Carrier(_) | JitKind::Wide { .. }
+        ) || params
+            .iter()
+            .any(|kind| matches!(kind, JitKind::Carrier(_) | JitKind::Wide { .. }));
         // The trampoline has a signature for every arrangement of float and
         // integer parameters only up to seven of them; past that, floats
         // cross as words and every arity needs one.
@@ -3178,7 +3187,8 @@ fn push_carrier_nodes(
             CarrierNode::Struct
         }
         TyKind::Unit => CarrierNode::Unit,
-        TyKind::Int(gossamer_types::IntTy::I128 | gossamer_types::IntTy::U128) => return None,
+        TyKind::Int(gossamer_types::IntTy::I128) => CarrierNode::I128,
+        TyKind::Int(gossamer_types::IntTy::U128) => CarrierNode::U128,
         TyKind::Int(_) => CarrierNode::I64,
         TyKind::Float(gossamer_types::FloatTy::F64) => CarrierNode::F64,
         TyKind::Bool => CarrierNode::Bool,
@@ -3400,6 +3410,7 @@ fn ty_to_kind(
     // A reference to a scalar is an address the body loads through, unlike
     // a reference to a heap value, which is the value's own pointer.
     if was_borrowed
+        && !tcx.is_wide_int(ty)
         && matches!(
             tcx.kind_of(ty),
             TyKind::Bool | TyKind::Int(_) | TyKind::Float(_) | TyKind::Char
@@ -3409,6 +3420,9 @@ fn ty_to_kind(
     }
     match tcx.kind_of(ty) {
         TyKind::Bool => Some(JitKind::Bool),
+        TyKind::Int(int) if int.is_wide() => Some(JitKind::Wide {
+            unsigned: *int == gossamer_types::IntTy::U128,
+        }),
         TyKind::Int(_) => Some(JitKind::I64),
         TyKind::Float(_) => Some(JitKind::F64),
         // A Unicode scalar crosses the boundary as its `u32` code point in an
@@ -3764,7 +3778,7 @@ mod promotion_report_tests {
     fn unlowerable_dependency_rejects_caller() {
         let mut tcx = TyCtxt::new();
         let i64_ty = tcx.intern(TyKind::Int(IntTy::I64));
-        let i128_ty = tcx.intern(TyKind::Int(IntTy::I128));
+        let bytecode_only = tcx.intern(TyKind::Error);
         let mut caller = body("caller", i64_ty, true);
         let span = caller.span;
         caller.blocks[0].terminator = Terminator::Call {
@@ -3781,7 +3795,7 @@ mod promotion_report_tests {
             terminator_span: None,
             terminator_inlined: None,
         });
-        let bodies = vec![caller, body("unsupported", i128_ty, false)];
+        let bodies = vec![caller, body("unsupported", bytecode_only, false)];
         let admitted = jit_compile_body_names(&bodies, &tcx, &HashMap::new(), &HashMap::new());
         assert!(
             admitted.is_empty(),
@@ -3798,7 +3812,7 @@ mod promotion_report_tests {
     fn unsupported_method_dependency_rejects_dynamic_leaf_name_caller() {
         let mut tcx = TyCtxt::new();
         let i64_ty = tcx.intern(TyKind::Int(IntTy::I64));
-        let i128_ty = tcx.intern(TyKind::Int(IntTy::I128));
+        let bytecode_only = tcx.intern(TyKind::Error);
         let mut caller = body("main", i64_ty, true);
         let span = caller.span;
         caller.blocks[0].terminator = Terminator::Call {
@@ -3815,7 +3829,7 @@ mod promotion_report_tests {
             terminator_span: None,
             terminator_inlined: None,
         });
-        let bodies = vec![caller, body("Counter::next", i128_ty, false)];
+        let bodies = vec![caller, body("Counter::next", bytecode_only, false)];
         let admitted = jit_compile_body_names(&bodies, &tcx, &HashMap::new(), &HashMap::new());
         assert!(
             admitted.is_empty(),

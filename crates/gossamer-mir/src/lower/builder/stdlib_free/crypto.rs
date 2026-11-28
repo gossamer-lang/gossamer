@@ -170,18 +170,223 @@ impl<'a> Builder<'a> {
         _args: &[HirExpr],
     ) -> Option<(&'static str, gossamer_types::Ty)> {
         Some(match joined {
+            "crypto::sha3_256::digest" | "sha3_256::digest" => ("gos_rt_crypto_sha3_256_digest", {
+                let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::U8);
+                self.tcx.intern(gossamer_types::TyKind::Vec(u8_ty))
+            }),
+            "crypto::sha3_256::hex" | "sha3_256::hex" => {
+                ("gos_rt_crypto_sha3_256_hex", self.tcx.string_ty())
+            }
+            "crypto::sha3_512::digest" | "sha3_512::digest" => ("gos_rt_crypto_sha3_512_digest", {
+                let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::U8);
+                self.tcx.intern(gossamer_types::TyKind::Vec(u8_ty))
+            }),
+            "crypto::sha3_512::hex" | "sha3_512::hex" => {
+                ("gos_rt_crypto_sha3_512_hex", self.tcx.string_ty())
+            }
+            "crypto::kdf::hkdf_sha256" | "kdf::hkdf_sha256" => {
+                ("gos_rt_crypto_hkdf_sha256", self.result_vec_u8_error_ty())
+            }
+            "crypto::sha384::digest" | "sha384::digest" => ("gos_rt_crypto_sha384_digest", {
+                let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::U8);
+                self.tcx.intern(gossamer_types::TyKind::Vec(u8_ty))
+            }),
+            "crypto::sha384::hex" | "sha384::hex" => {
+                ("gos_rt_crypto_sha384_hex", self.tcx.string_ty())
+            }
+            "crypto::hmac::sha384_mac" | "hmac::sha384_mac" => ("gos_rt_crypto_hmac_sha384_mac", {
+                let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::U8);
+                self.tcx.intern(gossamer_types::TyKind::Vec(u8_ty))
+            }),
+            "crypto::hmac::sha384_hex" | "hmac::sha384_hex" => {
+                ("gos_rt_crypto_hmac_sha384_hex", self.tcx.string_ty())
+            }
+            "crypto::hmac::sha512_mac" | "hmac::sha512_mac" => ("gos_rt_crypto_hmac_sha512_mac", {
+                let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::U8);
+                self.tcx.intern(gossamer_types::TyKind::Vec(u8_ty))
+            }),
+            "crypto::hmac::sha512_hex" | "hmac::sha512_hex" => {
+                ("gos_rt_crypto_hmac_sha512_hex", self.tcx.string_ty())
+            }
+            "crypto::hmac::sha3_256_mac" | "hmac::sha3_256_mac" => {
+                ("gos_rt_crypto_hmac_sha3_256_mac", {
+                    let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::U8);
+                    self.tcx.intern(gossamer_types::TyKind::Vec(u8_ty))
+                })
+            }
+            "crypto::hmac::sha3_256_hex" | "hmac::sha3_256_hex" => {
+                ("gos_rt_crypto_hmac_sha3_256_hex", self.tcx.string_ty())
+            }
+            "crypto::hmac::sha3_512_mac" | "hmac::sha3_512_mac" => {
+                ("gos_rt_crypto_hmac_sha3_512_mac", {
+                    let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::U8);
+                    self.tcx.intern(gossamer_types::TyKind::Vec(u8_ty))
+                })
+            }
+            "crypto::hmac::sha3_512_hex" | "hmac::sha3_512_hex" => {
+                ("gos_rt_crypto_hmac_sha3_512_hex", self.tcx.string_ty())
+            }
+            "crypto::hmac::verify_sha256" | "hmac::verify_sha256" => {
+                ("gos_rt_crypto_hmac_verify_sha256", self.tcx.bool_ty())
+            }
+            "crypto::hmac::verify_sha384" | "hmac::verify_sha384" => {
+                ("gos_rt_crypto_hmac_verify_sha384", self.tcx.bool_ty())
+            }
+            "crypto::hmac::verify_sha512" | "hmac::verify_sha512" => {
+                ("gos_rt_crypto_hmac_verify_sha512", self.tcx.bool_ty())
+            }
+            "crypto::hmac::verify_sha3_256" | "hmac::verify_sha3_256" => {
+                ("gos_rt_crypto_hmac_verify_sha3_256", self.tcx.bool_ty())
+            }
+            "crypto::hmac::verify_sha3_512" | "hmac::verify_sha3_512" => {
+                ("gos_rt_crypto_hmac_verify_sha3_512", self.tcx.bool_ty())
+            }
+            "crypto::insecure::hmac_sha1" | "insecure::hmac_sha1" => {
+                ("gos_rt_crypto_insecure_hmac_sha1", {
+                    let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::U8);
+                    self.tcx.intern(gossamer_types::TyKind::Vec(u8_ty))
+                })
+            }
+            "crypto::insecure::hmac_sha1_hex" | "insecure::hmac_sha1_hex" => {
+                ("gos_rt_crypto_insecure_hmac_sha1_hex", self.tcx.string_ty())
+            }
+            "crypto::insecure::verify_hmac_sha1" | "insecure::verify_hmac_sha1" => (
+                "gos_rt_crypto_insecure_verify_hmac_sha1",
+                self.tcx.bool_ty(),
+            ),
+            "crypto::ecdsa::sign_fixed_pem" | "ecdsa::sign_fixed_pem" => (
+                "gos_rt_crypto_ecdsa_sign_fixed_pem",
+                self.result_vec_u8_error_ty(),
+            ),
+            "crypto::ecdsa::verify_fixed_pem" | "ecdsa::verify_fixed_pem" => (
+                "gos_rt_crypto_ecdsa_verify_fixed_pem",
+                self.result_unit_error_adt_ty(),
+            ),
+            "crypto::ecdsa::der_to_fixed" | "ecdsa::der_to_fixed" => (
+                "gos_rt_crypto_ecdsa_der_to_fixed",
+                self.result_vec_u8_error_ty(),
+            ),
+            "crypto::ecdsa::fixed_to_der" | "ecdsa::fixed_to_der" => (
+                "gos_rt_crypto_ecdsa_fixed_to_der",
+                self.result_vec_u8_error_ty(),
+            ),
+            "crypto::ecdsa::p384_keypair_pem" | "ecdsa::p384_keypair_pem" => {
+                ("gos_rt_crypto_ecdsa_p384_keypair_pem", {
+                    let s = self.tcx.string_ty();
+                    let tup = self.tcx.intern(gossamer_types::TyKind::Tuple(vec![s, s]));
+                    self.result_of(tup)
+                })
+            }
+            "crypto::ecdsa::p384_sign_pem" | "ecdsa::p384_sign_pem" => (
+                "gos_rt_crypto_ecdsa_p384_sign_pem",
+                self.result_vec_u8_error_ty(),
+            ),
+            "crypto::ecdsa::p384_verify_pem" | "ecdsa::p384_verify_pem" => (
+                "gos_rt_crypto_ecdsa_p384_verify_pem",
+                self.result_unit_error_adt_ty(),
+            ),
+            "crypto::ecdsa::p384_sign_fixed_pem" | "ecdsa::p384_sign_fixed_pem" => (
+                "gos_rt_crypto_ecdsa_p384_sign_fixed_pem",
+                self.result_vec_u8_error_ty(),
+            ),
+            "crypto::ecdsa::p384_verify_fixed_pem" | "ecdsa::p384_verify_fixed_pem" => (
+                "gos_rt_crypto_ecdsa_p384_verify_fixed_pem",
+                self.result_unit_error_adt_ty(),
+            ),
+            "crypto::ecdsa::p384_der_to_fixed" | "ecdsa::p384_der_to_fixed" => (
+                "gos_rt_crypto_ecdsa_p384_der_to_fixed",
+                self.result_vec_u8_error_ty(),
+            ),
+            "crypto::ecdsa::p384_fixed_to_der" | "ecdsa::p384_fixed_to_der" => (
+                "gos_rt_crypto_ecdsa_p384_fixed_to_der",
+                self.result_vec_u8_error_ty(),
+            ),
+            "crypto::rsa::generate" | "rsa::generate" => ("gos_rt_crypto_rsa_generate", {
+                let s = self.tcx.string_ty();
+                let tup = self.tcx.intern(gossamer_types::TyKind::Tuple(vec![s, s]));
+                self.result_of(tup)
+            }),
+            "crypto::kdf::hkdf_sha384" | "kdf::hkdf_sha384" => {
+                ("gos_rt_crypto_hkdf_sha384", self.result_vec_u8_error_ty())
+            }
+            "crypto::kdf::hkdf_sha512" | "kdf::hkdf_sha512" => {
+                ("gos_rt_crypto_hkdf_sha512", self.result_vec_u8_error_ty())
+            }
+            "crypto::rsa::sign_pkcs1_sha256" | "rsa::sign_pkcs1_sha256" => (
+                "gos_rt_crypto_rsa_sign_pkcs1_sha256",
+                self.result_vec_u8_error_ty(),
+            ),
+            "crypto::rsa::encrypt_oaep_sha256" | "rsa::encrypt_oaep_sha256" => (
+                "gos_rt_crypto_rsa_encrypt_oaep_sha256",
+                self.result_vec_u8_error_ty(),
+            ),
+            "crypto::rsa::decrypt_oaep_sha256" | "rsa::decrypt_oaep_sha256" => (
+                "gos_rt_crypto_rsa_decrypt_oaep_sha256",
+                self.result_vec_u8_error_ty(),
+            ),
+            "crypto::rsa::sign_pss_sha256" | "rsa::sign_pss_sha256" => (
+                "gos_rt_crypto_rsa_sign_pss_sha256",
+                self.result_vec_u8_error_ty(),
+            ),
+            "crypto::rsa::verify_pkcs1_sha256" | "rsa::verify_pkcs1_sha256" => (
+                "gos_rt_crypto_rsa_verify_pkcs1_sha256",
+                self.result_unit_error_adt_ty(),
+            ),
+            "crypto::rsa::verify_pss_sha256" | "rsa::verify_pss_sha256" => (
+                "gos_rt_crypto_rsa_verify_pss_sha256",
+                self.result_unit_error_adt_ty(),
+            ),
+            "crypto::rsa::public_key_pem" | "rsa::public_key_pem" => (
+                "gos_rt_crypto_rsa_public_key_pem",
+                self.result_string_error_adt_ty(),
+            ),
+            "__gos_x509_self_signed_raw" => ("gos_rt_crypto_x509_self_signed", {
+                let s = self.tcx.string_ty();
+                let tup = self.tcx.intern(gossamer_types::TyKind::Tuple(vec![s, s]));
+                self.result_of(tup)
+            }),
+            "__gos_x509_issue_raw" => ("gos_rt_crypto_x509_issue", {
+                let s = self.tcx.string_ty();
+                let tup = self.tcx.intern(gossamer_types::TyKind::Tuple(vec![s, s]));
+                self.result_of(tup)
+            }),
+            "__gos_x509_extensions_raw" => (
+                "gos_rt_crypto_x509_extensions_raw",
+                self.result_string_error_adt_ty(),
+            ),
+            "crypto::x509::private_key_pkcs8" | "x509::private_key_pkcs8" => (
+                "gos_rt_crypto_x509_private_key_pkcs8",
+                self.result_string_error_adt_ty(),
+            ),
+            "crypto::x509::private_key_der" | "x509::private_key_der" => (
+                "gos_rt_crypto_x509_private_key_der",
+                self.result_vec_u8_error_ty(),
+            ),
+            "crypto::x509::decrypt_private_key" | "x509::decrypt_private_key" => (
+                "gos_rt_crypto_x509_decrypt_private_key",
+                self.result_string_error_adt_ty(),
+            ),
+            "crypto::x509::public_key_spki" | "x509::public_key_spki" => (
+                "gos_rt_crypto_x509_public_key_spki",
+                self.result_string_error_adt_ty(),
+            ),
+            "crypto::x509::public_key_der" | "x509::public_key_der" => (
+                "gos_rt_crypto_x509_public_key_der",
+                self.result_vec_u8_error_ty(),
+            ),
+            "crypto::x509::csr" | "x509::csr" => ("gos_rt_crypto_x509_csr", {
+                let s = self.tcx.string_ty();
+                let tup = self.tcx.intern(gossamer_types::TyKind::Tuple(vec![s, s]));
+                self.result_of(tup)
+            }),
+            "crypto::x509::sign_csr" | "x509::sign_csr" => (
+                "gos_rt_crypto_x509_sign_csr",
+                self.result_string_error_adt_ty(),
+            ),
             "crypto::ecdsa::verify_pem" | "ecdsa::verify_pem" => (
                 "gos_rt_crypto_ecdsa_verify_pem",
                 self.result_unit_error_adt_ty(),
             ),
-            "jwt::sign_hs" => ("gos_rt_jwt_sign_hs", self.result_string_error_adt_ty()),
-            "jwt::verify_hs" => ("gos_rt_jwt_verify_hs", self.result_string_error_adt_ty()),
-            "jwt::verify" => ("gos_rt_jwt_verify", self.result_string_error_adt_ty()),
-            "jwt::header" => ("gos_rt_jwt_header", self.result_string_error_adt_ty()),
-            "jwt::sign_es256" => ("gos_rt_jwt_sign_es256", self.result_string_error_adt_ty()),
-            "jwt::verify_es256" => ("gos_rt_jwt_verify_es256", self.result_string_error_adt_ty()),
-            "jwt::sign_eddsa" => ("gos_rt_jwt_sign_eddsa", self.result_string_error_adt_ty()),
-            "jwt::verify_eddsa" => ("gos_rt_jwt_verify_eddsa", self.result_string_error_adt_ty()),
             "crypto::sha256::hex" | "sha256::hex" | "crypto::sha256_hex" => {
                 ("gos_rt_sha256_hex", self.tcx.string_ty())
             }

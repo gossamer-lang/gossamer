@@ -424,6 +424,11 @@ impl<'a> Lowerer<'a> {
                 if *name == "gos_rt_ffi_zero" && self.try_inline_ffi_zero(args)? {
                     return Ok(());
                 }
+                if *name == "gos_rt_vec_unshare" {
+                    let v = self.lower_operand(&args[0])?;
+                    self.emit_vec_unshare_inline(&v);
+                    return Ok(());
+                }
                 self.lower_runtime_call_intrinsic(name, args, place.local)?;
                 return Ok(());
             }
@@ -551,7 +556,28 @@ impl<'a> Lowerer<'a> {
         //
         // Strict LLVM verification surfaces these mismatches, so
         // coerce here.
-        let rvalue_llvm = self.rvalue_llvm_ty(rvalue);
+        let mut rvalue_llvm = self.rvalue_llvm_ty(rvalue);
+        // A constant carries no width, and `lower_binary` / the unary path
+        // compute at 128 bits for a 128-bit destination, so a value bound for
+        // an `i128` / `u128` slot is already that wide.
+        if matches!(self.tcx.kind(leaf_ty), Some(TyKind::Int(it)) if it.is_wide())
+            && match rvalue {
+                Rvalue::Use(Operand::Const(gossamer_mir::ConstValue::Int(_)))
+                | Rvalue::UnaryOp { .. } => true,
+                Rvalue::BinaryOp { op, .. } => !matches!(
+                    op,
+                    gossamer_mir::BinOp::Eq
+                        | gossamer_mir::BinOp::Ne
+                        | gossamer_mir::BinOp::Lt
+                        | gossamer_mir::BinOp::Le
+                        | gossamer_mir::BinOp::Gt
+                        | gossamer_mir::BinOp::Ge
+                ),
+                _ => false,
+            }
+        {
+            rvalue_llvm = "i128".to_string();
+        }
         // When the rvalue is void (e.g. `Use(Copy(_tmp))` where the
         // source local was assigned the result of a void-returning
         // runtime call), `lower_place_read` returns an empty string.

@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use gossamer_std::http::{StatusCode, StreamResponse};
 use parking_lot::Mutex;
 
-use crate::builtins::{BuiltinFnPub, as_str, value_to_int};
+use crate::builtins::{BuiltinFnPub, as_str};
 use crate::value::{RuntimeResult, Value};
 
 /// The reading end of a response stream: whatever a handler wrote, in
@@ -104,16 +104,7 @@ fn builtin_write(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_write_bytes(args: &[Value]) -> RuntimeResult<Value> {
-    let bytes = match args.get(1) {
-        Some(Value::ByteVec(b)) => b.as_ref().clone(),
-        Some(Value::ByteArray(b)) => b.to_vec(),
-        Some(Value::InlineByteArray(b)) => b.as_ref().to_vec(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(|v| value_to_int(v).map(|n| n as u8))
-            .collect(),
-        _ => Vec::new(),
-    };
+    let bytes = args.get(1).map_or_else(Vec::new, Value::bytes_or_empty);
     Ok(Value::Int(push(args, bytes)))
 }
 

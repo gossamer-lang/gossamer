@@ -648,3 +648,36 @@ fn main() {{
         "{diagnostics:?}"
     );
 }
+
+#[test]
+fn i128_ranges_spelled_with_its_bounds_are_exhaustive() {
+    let source = r#"
+fn sign(n: i128) -> String {
+    match n {
+        i128::MIN..=-1 => "neg",
+        0 => "zero",
+        1..=i128::MAX => "pos",
+    }
+}
+"#;
+    let diagnostics = run(source);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+#[test]
+fn a_u128_match_needs_a_catch_all() {
+    let source = r#"
+fn low(u: u128) -> String {
+    match u {
+        0..=170141183460469231731687303715884105727 => "low",
+    }
+}
+"#;
+    let diagnostics = run(source);
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| matches!(&d.error, ExhaustivenessError::NonExhaustive { .. })),
+        "a u128 above i128::MAX is uncovered: {diagnostics:?}"
+    );
+}

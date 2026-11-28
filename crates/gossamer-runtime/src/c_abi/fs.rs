@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use super::*;
+use crate::file_lock::Span;
 use crate::open_file::OpenFile;
 use parking_lot::Mutex;
 
@@ -37,22 +38,14 @@ struct GosOpenOptions {
     create_new: bool,
 }
 
-/// The advisory ranges each open file handle currently holds.
-type HeldLocks = HashMap<i64, Vec<(u64, u64)>>;
-
 // Lookups take the read side, so goroutines working on open files never
 // serialise on the table; only open and close write it.
 static FILE_HANDLES: parking_lot::RwLock<Option<HashMap<i64, Arc<OpenFile>>>> =
     parking_lot::RwLock::new(None);
 
-// Win32 releases a lock only through an UnlockFileEx naming the same span
-// LockFileEx took, so a whole-file `unlock` has to name each range it is
-// releasing. The ranges a handle holds are recorded here and replayed.
-static HELD_LOCKS: Mutex<Option<HeldLocks>> = Mutex::new(None);
 static OPEN_OPTIONS_HANDLES: Mutex<Option<HashMap<i64, Arc<Mutex<GosOpenOptions>>>>> =
     Mutex::new(None);
 static NEXT_FS_HANDLE: AtomicI64 = AtomicI64::new(1);
-static NEXT_TEMP_RESOURCE: AtomicI64 = AtomicI64::new(1);
 
 fn next_fs_handle() -> i64 {
     NEXT_FS_HANDLE.fetch_add(1, Ordering::Relaxed)
@@ -69,14 +62,12 @@ fn insert_file(file: std::fs::File) -> i64 {
     super::registry_key::key_handle(id, retire_file)
 }
 
-/// Removes the file registered under `id` and the locks it holds. A call
-/// still working on the file keeps it open until that call returns.
+/// Removes the file registered under `id`; its locks go with its last
+/// reference. A call still working on the file keeps it open until that call
+/// returns.
 fn retire_file(id: i64) {
     if let Some(files) = FILE_HANDLES.write().as_mut() {
         files.remove(&id);
-    }
-    if let Some(locks) = HELD_LOCKS.lock().as_mut() {
-        locks.remove(&id);
     }
 }
 
@@ -154,23 +145,67 @@ fn is_temp_prefix(prefix: &str) -> bool {
     !prefix.contains(['/', '\\', ':', '\0']) && !matches!(prefix, "." | "..")
 }
 
-fn temp_resource_path(prefix: &str) -> std::path::PathBuf {
-    crate::platform::temp_dir().join(format!("gossamer-{}", temp_resource_name(prefix)))
+/// Names tried before giving up, as Go's `os.CreateTemp` and Python's
+/// `tempfile` bound their retries (10 000 each).
+const TEMP_NAME_ATTEMPTS: usize = 10_000;
+
+/// `prefix` followed by 64 bits from the OS random source. Nobody else on the
+/// host can predict the name, so nobody can create it first to block the call
+/// or plant a file under it.
+#[cfg(not(target_arch = "wasm32"))]
+fn temp_resource_name(prefix: &str) -> std::io::Result<String> {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes)
+        .map_err(|e| std::io::Error::other(format!("OS random source: {e}")))?;
+    Ok(format!("{prefix}-{:016x}", u64::from_le_bytes(bytes)))
 }
 
-/// `prefix` followed by the process id, the time, and a counter, so names
-/// made by concurrent processes and calls never collide.
-fn temp_resource_name(prefix: &str) -> String {
-    let n = NEXT_TEMP_RESOURCE.fetch_add(1, Ordering::Relaxed);
-    let nanos = crate::platform::system_time_now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    format!("{prefix}-{:x}-{nanos:x}-{n}", crate::platform::process_id())
+/// wasm32 has neither a file system to make one in nor an OS random source.
+#[cfg(target_arch = "wasm32")]
+fn temp_resource_name(_prefix: &str) -> std::io::Result<String> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "temporary files need a file system, which wasm32 has none of",
+    ))
 }
 
-/// Creates a fresh directory for `fs::temp_dir` and answers its path. Under
-/// `parent` it is named `prefix-...`, as Go's `os.MkdirTemp` names it; with
-/// no parent it lands in the system temporary root as `gossamer-prefix-...`.
+/// Creates a fresh temporary resource with `create`, trying new random names
+/// while one is taken. Under `parent` the name is `prefix-...`, as Go's
+/// `os.MkdirTemp` names it; with no parent it lands in the system temporary
+/// root as `gossamer-prefix-...`.
+fn create_temp_resource<T>(
+    parent: Option<&std::path::Path>,
+    prefix: &str,
+    create: impl Fn(&std::path::Path) -> std::io::Result<T>,
+) -> std::io::Result<(T, std::path::PathBuf)> {
+    if !is_temp_prefix(prefix) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            TEMP_PREFIX_ERROR,
+        ));
+    }
+    for _ in 0..TEMP_NAME_ATTEMPTS {
+        let name = temp_resource_name(prefix)?;
+        let path = match parent {
+            Some(parent) => parent.join(name),
+            None => crate::platform::temp_dir().join(format!("gossamer-{name}")),
+        };
+        match create(&path) {
+            Ok(made) => return Ok((made, path)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("no free temporary name after {TEMP_NAME_ATTEMPTS} attempts"),
+    ))
+}
+
+/// Creates a fresh directory for `fs::temp_dir` and `fs::TempDir` and answers
+/// its path. On Unix only the owner may list or enter it (mode 0700), as with
+/// Go's `os.MkdirTemp` and Python's `mkdtemp`; on Windows the user's own
+/// temporary folder already limits access to that user.
 ///
 /// # Errors
 ///
@@ -180,18 +215,39 @@ pub fn create_temp_dir(
     parent: Option<&std::path::Path>,
     prefix: &str,
 ) -> std::io::Result<std::path::PathBuf> {
-    if !is_temp_prefix(prefix) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            TEMP_PREFIX_ERROR,
-        ));
-    }
-    let path = match parent {
-        Some(parent) => parent.join(temp_resource_name(prefix)),
-        None => temp_resource_path(prefix),
-    };
-    std::fs::create_dir(&path)?;
-    Ok(path)
+    create_temp_resource(parent, prefix, |path| {
+        #[cfg(unix)]
+        let builder = {
+            let mut builder = std::fs::DirBuilder::new();
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            builder
+        };
+        #[cfg(not(unix))]
+        let builder = std::fs::DirBuilder::new();
+        builder.create(path)
+    })
+    .map(|((), path)| path)
+}
+
+/// Creates and opens a fresh file for `fs::temp_file` and `fs::TempFile`,
+/// readable and writable. On Unix only the owner may read or write it (mode
+/// 0600), as with Go's `os.CreateTemp` and Python's `mkstemp`; on Windows the
+/// user's own temporary folder already limits access to that user.
+///
+/// # Errors
+///
+/// `prefix` is not a single path component, or the file could not be created.
+pub fn create_temp_file(
+    parent: Option<&std::path::Path>,
+    prefix: &str,
+) -> std::io::Result<(std::fs::File, std::path::PathBuf)> {
+    create_temp_resource(parent, prefix, |path| {
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).read(true).write(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options.open(path)
+    })
 }
 
 // ---------------------------------------------------------------
@@ -227,6 +283,30 @@ pub unsafe extern "C" fn gos_rt_fs_read_to_string(path: *const c_char) -> *mut c
 /// `fs::read_to_string` here so a missing / unreadable path propagates `Err`
 /// identically to the VM, mirroring how `fs::read` (`gos_rt_fs_read_bytes_result`)
 /// already builds its error.
+/// The UTF-8 text of the file at `path`, read into a buffer laid out as a
+/// string body and sized from the file's length, so the string takes the
+/// buffer over without copying the text.
+fn read_text_body(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut file = crate::file_read::open_for_read(path)?;
+    let size = file
+        .metadata()
+        .ok()
+        .and_then(|meta| usize::try_from(meta.len()).ok())
+        .unwrap_or(0);
+    let prefix = crate::c_abi::string::BODY_PREFIX_BYTES;
+    let mut body = Vec::with_capacity(crate::c_abi::string::prefixed_block_len(size));
+    body.resize(prefix, 0);
+    file.read_to_end(&mut body)?;
+    if std::str::from_utf8(&body[prefix..]).is_err() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        ));
+    }
+    Ok(body)
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_read_to_string_result(path: *const c_char) -> i128 {
     ffi_entry!({
@@ -239,10 +319,10 @@ pub unsafe extern "C" fn gos_rt_fs_read_to_string_result(path: *const c_char) ->
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
         match crate::sched_global::run_blocking("fs-read-string", move || {
-            crate::file_read::read_to_string(std::path::Path::new(&p))
+            read_text_body(std::path::Path::new(&p))
         }) {
-            Ok(Ok(text)) => {
-                let s = alloc_cstring(text.as_bytes());
+            Ok(Ok(body)) => {
+                let s = crate::c_abi::string::string_from_prefixed(body);
                 gos_rt_result_new(0, s as i64)
             }
             Ok(Err(e)) => {
@@ -411,26 +491,37 @@ static TEMP_FILE_PAIR_META: [i64; 6] = [
     (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 1,
 ];
 
-/// `fs::temp_file(prefix) -> Result<(File, String), Error>`.
+/// `__gos_fs_temp_file_raw(prefix, parent) -> Result<(File, String), Error>`,
+/// the leaf under `fs::temp_file`: an empty `parent` names the system
+/// temporary root, as for `fs::temp_dir`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_temp_file(prefix: *const c_char) -> i128 {
+pub unsafe extern "C" fn gos_rt_fs_temp_file_raw(
+    prefix: *const c_char,
+    parent: *const c_char,
+) -> i128 {
     ffi_entry!({
+        if parent.is_null() {
+            return fs_err("fs::temp_file: null argument");
+        }
         // SAFETY: `prefix` is this shim's argument, null or a live string body (C-ABI contract).
         let prefix = match unsafe { temp_prefix(prefix, "fs::temp_file") } {
             Ok(prefix) => prefix,
             Err(error) => return error,
         };
-        let path = temp_resource_path(&prefix);
-        let context = path.to_string_lossy().into_owned();
+        // SAFETY: `parent` is a String argument from compiled code, non-null (checked above) and live for the whole call.
+        let parent = unsafe { crate::c_abi::gos_str_arg_string(parent) };
+        let context = if parent.is_empty() {
+            "fs::temp_file".to_string()
+        } else {
+            parent.clone()
+        };
         match crate::sched_global::run_blocking("fs-temp-file", move || {
-            std::fs::OpenOptions::new()
-                .create_new(true)
-                .read(true)
-                .write(true)
-                .open(path)
+            let parent = (!parent.is_empty()).then(|| std::path::PathBuf::from(parent));
+            create_temp_file(parent.as_deref(), &prefix)
         }) {
-            Ok(Ok(file)) => {
-                let words = [insert_file(file), alloc_cstring(context.as_bytes()) as i64];
+            Ok(Ok((file, path))) => {
+                let path = path.to_string_lossy().into_owned();
+                let words = [insert_file(file), alloc_cstring(path.as_bytes()) as i64];
                 let pair = crate::c_abi::rc::counted_words(&words, &TEMP_FILE_PAIR_META);
                 if pair.is_null() {
                     return fs_err("fs::temp_file: allocation failed");
@@ -907,6 +998,163 @@ pub unsafe extern "C" fn gos_rt_fs_rename(from: *const c_char, to: *const c_char
     })
 }
 
+/// A String argument from compiled code as owned text, or the empty string
+/// for null.
+///
+/// # Safety
+///
+/// `ptr` is null or a live string body for the call.
+unsafe fn path_arg(ptr: *const c_char) -> String {
+    if ptr.is_null() {
+        String::new()
+    } else {
+        // SAFETY: the caller's contract.
+        unsafe { crate::c_abi::gos_str_arg_string(ptr) }
+    }
+}
+
+/// Runs the filesystem operation `op` on the blocking pool, answering its
+/// value through `ok` or its error named for `context`.
+fn fs_op<T: Send + 'static>(
+    label: &'static str,
+    context: String,
+    op: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+    ok: impl FnOnce(T) -> i128,
+) -> i128 {
+    match crate::sched_global::run_blocking(label, op) {
+        Ok(Ok(value)) => ok(value),
+        Ok(Err(e)) => fs_io_err(&e, &context),
+        Err(e) => fs_err(&e),
+    }
+}
+
+/// `fs::symlink(target, link) -> Result<(), io::Error>`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_fs_symlink(target: *const c_char, link: *const c_char) -> i128 {
+    ffi_entry!({
+        // SAFETY: both are this shim's String arguments (C-ABI contract).
+        let (target, link) = unsafe { (path_arg(target), path_arg(link)) };
+        fs_op(
+            "fs-symlink",
+            link.clone(),
+            move || crate::fs_ops::symlink(&target, &link),
+            |()| gos_rt_result_new(0, 0),
+        )
+    })
+}
+
+/// `fs::hard_link(original, link) -> Result<(), io::Error>`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_fs_hard_link(original: *const c_char, link: *const c_char) -> i128 {
+    ffi_entry!({
+        // SAFETY: both are this shim's String arguments (C-ABI contract).
+        let (original, link) = unsafe { (path_arg(original), path_arg(link)) };
+        fs_op(
+            "fs-hard-link",
+            link.clone(),
+            move || crate::fs_ops::hard_link(&original, &link),
+            |()| gos_rt_result_new(0, 0),
+        )
+    })
+}
+
+/// `fs::read_link(path) -> Result<String, io::Error>`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_fs_read_link(path: *const c_char) -> i128 {
+    ffi_entry!({
+        // SAFETY: `path` is this shim's String argument (C-ABI contract).
+        let path = unsafe { path_arg(path) };
+        fs_op(
+            "fs-read-link",
+            path.clone(),
+            move || crate::fs_ops::read_link(&path),
+            |target| gos_rt_result_new(0, alloc_cstring(target.as_bytes()) as i64),
+        )
+    })
+}
+
+/// `fs::copy_dir(src, dst) -> Result<i64, io::Error>`: the bytes copied.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_fs_copy_dir(src: *const c_char, dst: *const c_char) -> i128 {
+    ffi_entry!({
+        // SAFETY: both are this shim's String arguments (C-ABI contract).
+        let (src, dst) = unsafe { (path_arg(src), path_arg(dst)) };
+        fs_op(
+            "fs-copy-dir",
+            src.clone(),
+            move || crate::fs_ops::copy_dir(&src, &dst),
+            |n| gos_rt_result_new(0, i64::try_from(n).unwrap_or(i64::MAX)),
+        )
+    })
+}
+
+/// `fs::move(src, dst) -> Result<(), io::Error>`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_fs_move(src: *const c_char, dst: *const c_char) -> i128 {
+    ffi_entry!({
+        // SAFETY: both are this shim's String arguments (C-ABI contract).
+        let (src, dst) = unsafe { (path_arg(src), path_arg(dst)) };
+        fs_op(
+            "fs-move",
+            src.clone(),
+            move || crate::fs_ops::move_path(&src, &dst),
+            |()| gos_rt_result_new(0, 0),
+        )
+    })
+}
+
+/// `__gos_fs_chown_raw(path, set_uid, uid, set_gid, gid) -> Result<(), Error>`:
+/// an id whose flag is 0 is left as it is.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_fs_chown_raw(
+    path: *const c_char,
+    set_uid: i64,
+    uid: i64,
+    set_gid: i64,
+    gid: i64,
+) -> i128 {
+    ffi_entry!({
+        // SAFETY: `path` is this shim's String argument (C-ABI contract).
+        let path = unsafe { path_arg(path) };
+        let id = |set: i64, id: i64, what: &str| match (set, u32::try_from(id)) {
+            (0, _) => Ok(None),
+            (_, Ok(id)) => Ok(Some(id)),
+            (_, Err(_)) => Err(format!("chown: {what} {id} is out of range")),
+        };
+        let (uid, gid) = match (id(set_uid, uid, "uid"), id(set_gid, gid, "gid")) {
+            (Ok(uid), Ok(gid)) => (uid, gid),
+            (Err(message), _) | (_, Err(message)) => return fs_err(&message),
+        };
+        fs_op(
+            "fs-chown",
+            path.clone(),
+            move || crate::fs_ops::chown(&path, uid, gid),
+            |()| gos_rt_result_new(0, 0),
+        )
+    })
+}
+
+/// `__gos_fs_disk_space_raw(path) -> Result<(i64, i64, i64), Error>`: total,
+/// free, and available bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_fs_disk_space_raw(path: *const c_char) -> i128 {
+    ffi_entry!({
+        // SAFETY: `path` is this shim's String argument (C-ABI contract).
+        let path = unsafe { path_arg(path) };
+        fs_op(
+            "fs-disk-space",
+            path.clone(),
+            move || crate::fs_ops::disk_space(&path),
+            |space| {
+                let words = space.map(|n| i64::try_from(n).unwrap_or(i64::MAX));
+                let blob =
+                    crate::c_abi::rc::counted_words(&words, &crate::c_abi::rc::LEAF_BLOB_META);
+                gos_rt_result_new(0, blob as i64)
+            },
+        )
+    })
+}
+
 /// `env::set_current_dir(path) -> Result<(), Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_env_set_current_dir(path: *const c_char) -> i128 {
@@ -942,6 +1190,20 @@ pub extern "C" fn gos_rt_os_arch() -> *const c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_os_family() -> *const c_char {
     alloc_cstring(std::env::consts::FAMILY.as_bytes()).cast_const()
+}
+
+/// `os::hostname() -> Result<String, errors::Error>`: the machine's host name.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_os_hostname() -> i128 {
+    ffi_entry!({
+        match crate::platform::host_name() {
+            Ok(name) => gos_rt_result_new(0, alloc_cstring(name.as_bytes()) as i64),
+            Err(message) => {
+                let err = crate::c_abi::errors::error_new_from_bytes(message.as_bytes());
+                gos_rt_result_new(1, err as i64)
+            }
+        }
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -1356,6 +1618,46 @@ pub unsafe extern "C" fn gos_rt_net_resolve(host: *const c_char) -> i128 {
     })
 }
 
+/// `__gos_net_dns_raw(name, rtype, server) -> Result<Vec<String>, Error>`:
+/// the records of DNS type `rtype` for `name`, each record's text fields in
+/// order, flattened (`dns::lookup` names the fields per type). An empty
+/// `server` asks the system's nameservers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_net_dns_raw(
+    name: *const c_char,
+    rtype: i64,
+    server: *const c_char,
+) -> i128 {
+    ffi_entry!({
+        // SAFETY: both are this shim's String arguments (C-ABI contract).
+        let (name, server) = unsafe { (path_arg(name), path_arg(server)) };
+        dns_records(name, rtype, server)
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn dns_records(name: String, rtype: i64, server: String) -> i128 {
+    let Some(kind) = crate::dns::RecordType::from_code(rtype) else {
+        return fs_err(&format!(
+            "dns: record type {rtype} is not one this resolver reads"
+        ));
+    };
+    match crate::sched_global::run_blocking("net-dns", move || {
+        crate::dns::lookup(&name, kind, Some(&server))
+    }) {
+        Ok(Ok(records)) => ok_str_vec(&records.concat()),
+        Ok(Err(e)) | Err(e) => fs_err(&e),
+    }
+}
+
+/// wasm32 has no sockets to reach a nameserver through.
+#[cfg(target_arch = "wasm32")]
+fn dns_records(name: String, _rtype: i64, _server: String) -> i128 {
+    fs_err(&format!(
+        "dns: looking up {name} needs a network, which wasm32 has none of"
+    ))
+}
+
 // --- 0.7.0 scalar cmp helpers ---
 
 /// Scalar `min(a, b)` for i64. Pair-shape used by the prelude
@@ -1370,8 +1672,38 @@ pub extern "C" fn gos_rt_max_i64(a: i64, b: i64) -> i64 {
     a.max(b)
 }
 
+/// The panic every tier raises for a `clamp` whose bounds are out of order.
+fn clamp_bounds_panic(lo: impl std::fmt::Display, hi: impl std::fmt::Display) -> ! {
+    super::panic::panic_text(&format!(
+        "clamp: the lower bound {lo} is above the upper bound {hi}"
+    ))
+}
+
+/// The panic for a 128-bit `clamp` whose bounds are out of order, each bound
+/// passed as its low and high words; `unsigned` is 1 for a `u128`.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_clamp_i64(x: i64, lo: i64, hi: i64) -> i64 {
+pub extern "C-unwind" fn gos_rt_clamp_bounds_wide(
+    lo_low: i64,
+    lo_high: i64,
+    hi_low: i64,
+    hi_high: i64,
+    unsigned: i64,
+) -> ! {
+    let lo = super::concat::wide_from_words(lo_low.cast_unsigned(), lo_high.cast_unsigned());
+    let hi = super::concat::wide_from_words(hi_low.cast_unsigned(), hi_high.cast_unsigned());
+    if unsigned != 0 {
+        clamp_bounds_panic(lo, hi)
+    } else {
+        clamp_bounds_panic(lo.cast_signed(), hi.cast_signed())
+    }
+}
+
+/// Scalar `clamp(x, lo, hi)` for `i64`; bounds out of order panic.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn gos_rt_clamp_i64(x: i64, lo: i64, hi: i64) -> i64 {
+    if lo > hi {
+        clamp_bounds_panic(lo, hi);
+    }
     x.clamp(lo, hi)
 }
 
@@ -1389,7 +1721,10 @@ pub extern "C" fn gos_rt_max_u64(a: u64, b: u64) -> u64 {
 
 /// Scalar `clamp(x, lo, hi)` for `u64` / `usize`, whose words order unsigned.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_clamp_u64(x: u64, lo: u64, hi: u64) -> u64 {
+pub extern "C-unwind" fn gos_rt_clamp_u64(x: u64, lo: u64, hi: u64) -> u64 {
+    if lo > hi {
+        clamp_bounds_panic(lo, hi);
+    }
     x.clamp(lo, hi)
 }
 
@@ -1403,8 +1738,16 @@ pub extern "C" fn gos_rt_max_f64(a: f64, b: f64) -> f64 {
     a.max(b)
 }
 
+/// Scalar `clamp(x, lo, hi)` for `f64`; bounds out of order or NaN panic.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_clamp_f64(x: f64, lo: f64, hi: f64) -> f64 {
+pub extern "C-unwind" fn gos_rt_clamp_f64(x: f64, lo: f64, hi: f64) -> f64 {
+    // Bounds out of order, or a NaN bound, which orders with nothing.
+    if !matches!(
+        lo.partial_cmp(&hi),
+        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+    ) {
+        clamp_bounds_panic(lo, hi);
+    }
     x.clamp(lo, hi)
 }
 
@@ -2049,22 +2392,15 @@ pub extern "C" fn gos_rt_fs_file_try_lock_range(
     exclusive: i32,
 ) -> i128 {
     ffi_entry!({
-        if start < 0 || len < 0 {
+        let (Ok(start), Ok(len)) = (u64::try_from(start), u64::try_from(len)) else {
             return fs_err("File::try_lock_range: start and len must be non-negative");
-        }
-        let exclusive = exclusive != 0;
-        match with_file_cursor(h, "File::try_lock_range", move |file| {
-            try_lock_range_on(file, start as u64, len as u64, exclusive)
-        }) {
-            Ok(Ok(acquired)) => {
-                if acquired {
-                    record_held_range(h, start as u64, len as u64);
-                }
-                gos_rt_result_new(0, i64::from(acquired))
-            }
-            Ok(Err(e)) => fs_io_err(&e, "File::try_lock_range"),
-            Err(packed) => packed,
-        }
+        };
+        try_lock_span(
+            h,
+            Span::Range { start, len },
+            exclusive != 0,
+            "File::try_lock_range",
+        )
     })
 }
 
@@ -2072,81 +2408,47 @@ pub extern "C" fn gos_rt_fs_file_try_lock_range(
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fs_file_unlock_range(h: i64, start: i64, len: i64) -> i128 {
     ffi_entry!({
-        if start < 0 || len < 0 {
+        let (Ok(start), Ok(len)) = (u64::try_from(start), u64::try_from(len)) else {
             return fs_err("File::unlock_range: start and len must be non-negative");
-        }
-        match with_file_cursor(h, "File::unlock_range", move |file| {
-            unlock_range_on(file, start as u64, len as u64)
+        };
+        match with_open_file(h, "File::unlock_range", |file| {
+            file.unlock(Span::Range { start, len })
         }) {
-            Ok(Ok(())) => {
-                forget_held_range(h, start as u64, len as u64);
-                gos_rt_result_new(0, 0)
-            }
-            Ok(Err(e)) => fs_io_err(&e, "File::unlock_range"),
+            Ok(outcome) => fs_unit_result(outcome, "File::unlock_range"),
             Err(packed) => packed,
         }
     })
 }
 
-/// `fs::File::try_lock_shared() -> Result<bool, Error>`: the whole file as
-/// one shared range.
+/// `fs::File::try_lock_shared() -> Result<bool, Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_file_try_lock_shared(h: i64) -> i128 {
-    gos_rt_fs_file_try_lock_range(h, 0, 0, 0)
+    ffi_entry!({ try_lock_span(h, Span::Whole, false, "File::try_lock_shared") })
 }
 
-/// `fs::File::try_lock_exclusive() -> Result<bool, Error>`: the whole file
-/// as one exclusive range.
+/// `fs::File::try_lock_exclusive() -> Result<bool, Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_file_try_lock_exclusive(h: i64) -> i128 {
-    gos_rt_fs_file_try_lock_range(h, 0, 0, 1)
+    ffi_entry!({ try_lock_span(h, Span::Whole, true, "File::try_lock_exclusive") })
 }
 
-/// `fs::File::unlock() -> Result<(), Error>`: release every range this
-/// handle holds, whole-file or otherwise.
+/// `fs::File::unlock() -> Result<(), Error>`: release every lock this file
+/// holds, whole-file or range.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_fs_file_unlock(h: i64) -> i128 {
     ffi_entry!({
-        let held = HELD_LOCKS
-            .lock()
-            .as_mut()
-            .and_then(|locks| locks.remove(&super::registry_key::key_id(h)))
-            .unwrap_or_default();
-        if held.is_empty() {
-            return gos_rt_result_new(0, 0);
-        }
-        match with_file_cursor(h, "File::unlock", move |file| {
-            held.into_iter()
-                .try_for_each(|(start, len)| unlock_range_on(file, start, len))
-        }) {
-            Ok(Ok(())) => gos_rt_result_new(0, 0),
-            Ok(Err(e)) => fs_io_err(&e, "File::unlock"),
+        match with_open_file(h, "File::unlock", OpenFile::unlock_all) {
+            Ok(outcome) => fs_unit_result(outcome, "File::unlock"),
             Err(packed) => packed,
         }
     })
 }
 
-/// Note a range this handle now holds, so `File::unlock` can name it.
-fn record_held_range(h: i64, start: u64, len: u64) {
-    let mut guard = HELD_LOCKS.lock();
-    let held = guard
-        .get_or_insert_with(HashMap::new)
-        .entry(super::registry_key::key_id(h))
-        .or_default();
-    if !held.contains(&(start, len)) {
-        held.push((start, len));
-    }
-}
-
-/// Drop one range from the handle's held set once it has been released.
-fn forget_held_range(h: i64, start: u64, len: u64) {
-    if let Some(held) = HELD_LOCKS
-        .lock()
-        .as_mut()
-        .and_then(|locks| locks.get_mut(&super::registry_key::key_id(h)))
-        && let Some(at) = held.iter().position(|range| *range == (start, len))
-    {
-        held.swap_remove(at);
+fn try_lock_span(h: i64, span: Span, exclusive: bool, context: &str) -> i128 {
+    match with_open_file(h, context, |file| file.try_lock(span, exclusive)) {
+        Ok(Ok(acquired)) => gos_rt_result_new(0, i64::from(acquired)),
+        Ok(Err(e)) => fs_io_err(&e, context),
+        Err(packed) => packed,
     }
 }
 
@@ -2230,161 +2532,6 @@ pub fn write_at_offset(file: &std::fs::File, buf: &[u8], offset: u64) -> std::io
     let written = file.write(buf);
     file.seek(SeekFrom::Start(resume))?;
     written
-}
-
-/// Advisory locks are the operating system's, and a target with neither the
-/// POSIX nor the Win32 call has none to take. Answering `Ok(false)` would
-/// claim another holder owns the range, so the absence is reported instead.
-#[cfg(not(any(unix, windows)))]
-pub fn try_lock_range_on(
-    _file: &std::fs::File,
-    _start: u64,
-    _len: u64,
-    _exclusive: bool,
-) -> std::io::Result<bool> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "advisory file locks are unavailable on this target",
-    ))
-}
-
-/// Companion to [`try_lock_range_on`] on a target with no advisory locks.
-#[cfg(not(any(unix, windows)))]
-pub fn unlock_range_on(_file: &std::fs::File, _start: u64, _len: u64) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "advisory file locks are unavailable on this target",
-    ))
-}
-
-/// POSIX record lock over `[start, start + len)`, or `[start, EOF)` when
-/// `len` is zero. `Ok(false)` reports a conflicting holder; every other
-/// failure is a real error.
-#[cfg(unix)]
-pub fn try_lock_range_on(
-    file: &std::fs::File,
-    start: u64,
-    len: u64,
-    exclusive: bool,
-) -> std::io::Result<bool> {
-    let fd = std::os::unix::io::AsRawFd::as_raw_fd(file);
-    // SAFETY: `flock` is a plain C struct whose all-zero value is valid.
-    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-    lock.l_type = if exclusive {
-        libc::F_WRLCK as libc::c_short
-    } else {
-        libc::F_RDLCK as libc::c_short
-    };
-    lock.l_whence = libc::SEEK_SET as libc::c_short;
-    lock.l_start = start as libc::off_t;
-    lock.l_len = len as libc::off_t;
-    // SAFETY: `lock` is a fully initialised `flock` and `fd` is owned by
-    // the borrowed `File` for the duration of the call.
-    let rc = unsafe { libc::fcntl(fd, libc::F_SETLK, &raw const lock) };
-    if rc == 0 {
-        return Ok(true);
-    }
-    let error = std::io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(libc::EACCES | libc::EAGAIN) => Ok(false),
-        _ => Err(error),
-    }
-}
-
-#[cfg(unix)]
-pub fn unlock_range_on(file: &std::fs::File, start: u64, len: u64) -> std::io::Result<()> {
-    let fd = std::os::unix::io::AsRawFd::as_raw_fd(file);
-    // SAFETY: `flock` is a plain C struct whose all-zero value is valid.
-    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-    lock.l_type = libc::F_UNLCK as libc::c_short;
-    lock.l_whence = libc::SEEK_SET as libc::c_short;
-    lock.l_start = start as libc::off_t;
-    lock.l_len = len as libc::off_t;
-    // SAFETY: as in `try_lock_range_on`.
-    let rc = unsafe { libc::fcntl(fd, libc::F_SETLK, &raw const lock) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-/// `LockFileEx` over the same range, with `LOCKFILE_FAIL_IMMEDIATELY` so a
-/// held lock answers `Ok(false)` instead of blocking the scheduler thread.
-/// A zero `len` covers the whole 64-bit range, matching the POSIX
-/// "to end of file" spelling.
-#[cfg(windows)]
-pub fn try_lock_range_on(
-    file: &std::fs::File,
-    start: u64,
-    len: u64,
-    exclusive: bool,
-) -> std::io::Result<bool> {
-    use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, HANDLE};
-    use windows_sys::Win32::Storage::FileSystem::{
-        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
-    };
-    use windows_sys::Win32::System::IO::OVERLAPPED;
-
-    let handle = std::os::windows::io::AsRawHandle::as_raw_handle(file) as HANDLE;
-    let span = if len == 0 { u64::MAX } else { len };
-    // SAFETY: `OVERLAPPED` is a plain C struct whose all-zero value is valid.
-    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-    overlapped.Anonymous.Anonymous.Offset = start as u32;
-    overlapped.Anonymous.Anonymous.OffsetHigh = (start >> 32) as u32;
-    let mut flags = LOCKFILE_FAIL_IMMEDIATELY;
-    if exclusive {
-        flags |= LOCKFILE_EXCLUSIVE_LOCK;
-    }
-    // SAFETY: `handle` is owned by the borrowed `File` and `overlapped` is
-    // a fully initialised structure that outlives the call.
-    let ok = unsafe {
-        LockFileEx(
-            handle,
-            flags,
-            0,
-            span as u32,
-            (span >> 32) as u32,
-            &raw mut overlapped,
-        )
-    };
-    if ok != 0 {
-        return Ok(true);
-    }
-    let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
-        Ok(false)
-    } else {
-        Err(error)
-    }
-}
-
-#[cfg(windows)]
-pub fn unlock_range_on(file: &std::fs::File, start: u64, len: u64) -> std::io::Result<()> {
-    use windows_sys::Win32::Foundation::HANDLE;
-    use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
-    use windows_sys::Win32::System::IO::OVERLAPPED;
-
-    let handle = std::os::windows::io::AsRawHandle::as_raw_handle(file) as HANDLE;
-    let span = if len == 0 { u64::MAX } else { len };
-    // SAFETY: `OVERLAPPED` is a plain C struct whose all-zero value is valid.
-    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
-    overlapped.Anonymous.Anonymous.Offset = start as u32;
-    overlapped.Anonymous.Anonymous.OffsetHigh = (start >> 32) as u32;
-    // SAFETY: as in `try_lock_range_on`.
-    let ok = unsafe {
-        UnlockFileEx(
-            handle,
-            0,
-            span as u32,
-            (span >> 32) as u32,
-            &raw mut overlapped,
-        )
-    };
-    if ok == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 /// Answers the `Result<(), errors::Error>` carrier for a filesystem
@@ -2530,5 +2677,34 @@ mod tests {
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{prefix:?}");
         }
         let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // creates files
+    fn temp_resources_take_unpredictable_names_only_their_owner_can_open() {
+        let (file, file_path) = super::create_temp_file(None, "mode").unwrap();
+        let (_, other_path) = super::create_temp_file(None, "mode").unwrap();
+        let dir = create_temp_dir(None, "mode").unwrap();
+        let name = file_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let suffix = name.strip_prefix("gossamer-mode-").unwrap();
+        assert_eq!(suffix.len(), 16, "{name}");
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()), "{name}");
+        assert_ne!(file_path, other_path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+            let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+            assert_eq!(dir_mode & 0o777, 0o700);
+        }
+        drop(file);
+        for path in [file_path, other_path] {
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(dir).unwrap();
     }
 }

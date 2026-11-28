@@ -1168,13 +1168,13 @@ for src in ["2 + 3 * 4", "(2 + 3) * 4", "10 - 2 - 3", "2 * 3 + 4 * 5", "100 / 5 
         let mut state = ServerState::new();
         let labels = complete_at(
             &mut state,
-            "use std::os\nfn main() { os::e| }\n",
+            "use std::os\nfn main() { os::s| }\n",
             "file:///os.gos",
         );
-        // `os::e|` should suggest the `exec` submodule.
+        // `os::s|` should suggest the `signal` submodule.
         assert!(
-            labels.iter().any(|l| l == "exec"),
-            "expected `exec` submodule in {labels:?}"
+            labels.iter().any(|l| l == "signal"),
+            "expected `signal` submodule in {labels:?}"
         );
     }
 
@@ -1233,13 +1233,13 @@ for src in ["2 + 3 * 4", "(2 + 3) * 4", "10 - 2 - 3", "2 * 3 + 4 * 5", "100 / 5 
         let mut state = ServerState::new();
         let labels = complete_at(
             &mut state,
-            "use std::os\nfn main() { os::e| }\n",
+            "use std::os\nfn main() { os::s| }\n",
             "file:///os2.gos",
         );
-        // std::os::exec is a known submodule.
+        // std::os::signal is a known submodule.
         assert!(
-            labels.iter().any(|l| l == "exec"),
-            "expected `exec` in labels {labels:?}"
+            labels.iter().any(|l| l == "signal"),
+            "expected `signal` in labels {labels:?}"
         );
     }
 

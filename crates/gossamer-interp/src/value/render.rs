@@ -26,13 +26,14 @@ impl fmt::Display for Value {
                 let inner = c.lock().clone();
                 fmt::Display::fmt(&inner, out)
             }
+            Self::CapturePlace(place) => fmt::Display::fmt(&place.read(), out),
             Self::Unit => out.write_str(gossamer_runtime::builtins::format_unit()),
             Self::Bool(b) => out.write_str(gossamer_runtime::builtins::format_bool(*b)),
             Self::Int(i) => out.write_str(&gossamer_runtime::builtins::format_int(*i)),
             Self::Float(f) => out.write_str(&gossamer_runtime::builtins::format_float(*f)),
             Self::Char(c) => write!(out, "{c}"),
             Self::String(s) => out.write_str(s),
-            Self::Json(value) => out.write_str(&gossamer_std::json::encode(value.as_value())),
+            Self::Json(value) => out.write_str(&gossamer_std::json::encode(&value.as_value())),
             Self::Tuple(parts) => write_tuple(out, parts),
             Self::Array(parts) => write_array(out, parts),
             Self::FloatArray(_) => write_array(out, &self.float_array_elems()),
@@ -121,6 +122,11 @@ impl fmt::Display for Value {
             Self::IntMap(map) => write_int_map(out, &map.lock()),
             Self::StrIntMap(map) => write_str_int_map(out, &map.lock()),
             Self::Uint(n) => write!(out, "{n}"),
+            Self::Wide(wide) => write!(out, "{wide}"),
+            Self::WideInline(..) => match self.wide_int() {
+                Some(wide) => write!(out, "{wide}"),
+                None => Ok(()),
+            },
             Self::Weak(_) => out.write_str("<weak>"),
             Self::Void => out.write_str("<void>"),
         }

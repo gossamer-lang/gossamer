@@ -84,6 +84,46 @@ pub extern "C" fn gos_rt_concat_u64(n: u64) {
     });
 }
 
+/// A 128-bit zero, which compiled code reads in place of a `None` carrier's
+/// boxed 128-bit payload.
+#[unsafe(no_mangle)]
+#[allow(
+    non_upper_case_globals,
+    reason = "the symbol is the runtime's `gos_rt_` name, which compiled code links against"
+)]
+pub static gos_rt_wide_zero: [i64; 2] = [0, 0];
+
+/// The 128-bit integer whose low and high words compiled code passes in two
+/// registers, which every target's C ABI agrees on.
+#[must_use]
+pub fn wide_from_words(lo: u64, hi: u64) -> u128 {
+    (u128::from(hi) << 64) | u128::from(lo)
+}
+
+/// Appends an `i128`, passed as its low and high words.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_concat_i128(lo: u64, hi: u64) {
+    ffi_entry!({
+        use std::io::Write;
+        let n = wide_from_words(lo, hi) as i128;
+        CONCAT_BUF.with(|b| {
+            let _ = write!(&mut *b.borrow_mut(), "{n}");
+        });
+    });
+}
+
+/// Appends a `u128`, passed as its low and high words.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_concat_u128(lo: u64, hi: u64) {
+    ffi_entry!({
+        use std::io::Write;
+        let n = wide_from_words(lo, hi);
+        CONCAT_BUF.with(|b| {
+            let _ = write!(&mut *b.borrow_mut(), "{n}");
+        });
+    });
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_concat_f64(x: f64) {
     ffi_entry!({

@@ -1,0 +1,42 @@
+// Integers, `char`, and `String` answer `cmp` as a sign, which an `impl Ord`
+// writes field by field; `to_vec` copies a `Vec` and a range read.
+struct Version {
+    major: i64
+    minor: i64
+    name: String
+}
+
+impl Ord for Version {
+    fn cmp(&self, other: Version) -> i64 {
+        let by_major = self.major.cmp(other.major)
+        if by_major != 0 { return by_major }
+        let by_minor = self.minor.cmp(other.minor)
+        if by_minor != 0 { return by_minor }
+        self.name.cmp(other.name)
+    }
+}
+
+#[derive(PartialOrd, Ord)]
+struct P {
+    x: i64
+}
+
+fn order<T: Ord>(a: T, b: T) -> i64 {
+    a.cmp(b)
+}
+
+fn main() {
+    println(f"{"a".cmp("b")} {3.cmp(3)} {9u8.cmp(2)} {(-5).cmp(i64::MAX)} {'z'.cmp('a')}")
+    let xs = #[3, 1, 2]
+    println(f"{xs.to_vec()} {[1, 2].to_vec()} {xs[1..3].to_vec()}")
+    let mut vs = #[
+        Version { major: 1, minor: 2, name: "b" }
+        Version { major: i64::MIN, minor: 0, name: "z" }
+        Version { major: 1, minor: 2, name: "a" }
+        Version { major: i64::MAX, minor: 0, name: "y" }
+    ]
+    vs.sort()
+    for v in vs { println(f"{v.major}.{v.minor} {v.name}") }
+    println(f"{order(1, 2)} {order("b", "a")} {order(P { x: 1 }, P { x: 1 })}")
+    println(f"{P { x: 3 }.cmp(P { x: 9 })}")
+}

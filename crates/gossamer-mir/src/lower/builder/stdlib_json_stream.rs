@@ -576,7 +576,22 @@ impl<'a> Builder<'a> {
             b.emit_writer_call("gos_rt_json_writer_key", vec![writer, key_local], span);
             let value_local =
                 b.emit_rt_call(value_reader, vec![map_local, key_local], value_ty, span);
+            // `gos_rt_map_get_str_i64` lends the stored word: the map keeps
+            // its share. An aggregate's local takes shares of its fields, and a
+            // handle's local takes the sentinel once streamed, so the drop pass
+            // releases only what the local holds.
+            let lends = value_reader == "gos_rt_map_get_str_i64";
+            if lends && !b.is_lent_handle_ty(value_ty) {
+                b.share_lent_fields(value_local, value_ty, span);
+            }
             b.stream_json_member(writer, value_local, value_ty, span);
+            if lends && b.is_lent_handle_ty(value_ty) {
+                b.emit_assign(
+                    Place::local(value_local),
+                    Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                    span,
+                );
+            }
         });
         self.emit_writer_call("gos_rt_json_writer_end_object", vec![writer], span);
         self.emit_writer_call("gos_rt_vec_free", vec![keys], span);

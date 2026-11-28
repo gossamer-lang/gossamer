@@ -31,12 +31,6 @@ const MIXED_MODULES: &[&str] = &["fs", "os", "env", "path", "metrics", "bufio"];
 const MODULE_CAPABILITIES: &[(&str, Option<Capability>)] = &[
     // Process and signal control.
     ("process", Some(Capability::Exec)),
-    // Building a policy is pure, but the module exists to start a
-    // process under it, and a compile-time region has no business
-    // doing that. The whole module is denied rather than the one call
-    // that spawns: over-denial here costs nothing that
-    // `--comptime-io=full` does not restore.
-    ("exec", Some(Capability::Exec)),
     ("signal", Some(Capability::Exec)),
     ("Child", Some(Capability::Exec)),
     // Network. The whole surface is denied rather than the calls that
@@ -45,15 +39,11 @@ const MODULE_CAPABILITIES: &[(&str, Option<Capability>)] = &[
     // `--comptime-io=full` does not restore.
     ("net", Some(Capability::Network)),
     ("http", Some(Capability::Network)),
-    ("http_h3", Some(Capability::Network)),
     ("httptest", Some(Capability::Network)),
-    ("smtp", Some(Capability::Network)),
     ("websocket", Some(Capability::Network)),
     ("sse", Some(Capability::Network)),
     ("proxy", Some(Capability::Network)),
     ("static_files", Some(Capability::Network)),
-    ("session", Some(Capability::Network)),
-    ("csrf", Some(Capability::Network)),
     ("cookie", Some(Capability::Network)),
     ("chunked", Some(Capability::Network)),
     ("middleware", Some(Capability::Network)),
@@ -133,17 +123,16 @@ const MODULE_CAPABILITIES: &[(&str, Option<Capability>)] = &[
     ("ecdsa", None),
     ("ed25519", None),
     ("encoding", None),
-    ("EndedSpan", None),
     ("errors", None),
     ("Errors", None),
     ("f32", None),
     ("f64", None),
-    ("FieldError", None),
     ("flag", None),
     ("FlagMap", None),
     ("flate", None),
     ("fnv", None),
     ("Gauge", None),
+    ("Guard", None),
     ("gzip", None),
     ("hash", None),
     ("HashSet", None),
@@ -166,9 +155,9 @@ const MODULE_CAPABILITIES: &[(&str, Option<Capability>)] = &[
     ("iter", None),
     ("Iterator", None),
     ("json", None),
-    ("jwt", None),
     ("kdf", None),
     ("lifecycle", None),
+    ("mail", None),
     ("Map", None),
     ("math", None),
     ("MaxHeap", None),
@@ -190,6 +179,7 @@ const MODULE_CAPABILITIES: &[(&str, Option<Capability>)] = &[
     ("rand", None),
     ("Rc", None),
     ("regex", None),
+    ("rsa", None),
     ("Registry", None),
     ("result", None),
     ("Rng", None),
@@ -199,10 +189,14 @@ const MODULE_CAPABILITIES: &[(&str, Option<Capability>)] = &[
     ("Set", None),
     ("sha256", None),
     ("sha512", None),
+    ("sha3_256", None),
+    ("sha3_512", None),
+    ("sha384", None),
+    ("ecdh", None),
+    ("mlkem", None),
     ("Shared", None),
     ("slog", None),
     ("sort", None),
-    ("Span", None),
     ("stack", None),
     ("Stack", None),
     ("std", None),
@@ -214,12 +208,11 @@ const MODULE_CAPABILITIES: &[(&str, Option<Capability>)] = &[
     ("sync", None),
     ("tar", None),
     ("template", None),
+    ("text", None),
     ("testing", None),
     ("thread", None),
     ("time", None),
     ("toml", None),
-    ("trace", None),
-    ("Tracer", None),
     ("u16", None),
     ("u32", None),
     ("u64", None),
@@ -231,7 +224,6 @@ const MODULE_CAPABILITIES: &[(&str, Option<Capability>)] = &[
     ("utf16", None),
     ("utf8", None),
     ("uuid", None),
-    ("validate", None),
     ("Vec", None),
     ("WaitGroup", None),
     ("x509", None),
@@ -264,6 +256,7 @@ const NAME_CAPABILITIES: &[(&str, Capability)] = &[
     ("fs::permissions", Capability::Read),
     ("fs::read", Capability::Read),
     ("fs::read_dir", Capability::Read),
+    ("fs::read_link", Capability::Read),
     ("fs::read_to_string", Capability::Read),
     ("fs::walk_dir", Capability::Read),
     // fs - writes. `OpenOptions::open` counts as a write because the
@@ -280,33 +273,37 @@ const NAME_CAPABILITIES: &[(&str, Capability)] = &[
     ("fs::File::write_bytes", Capability::Write),
     ("fs::OpenOptions::open", Capability::Write),
     ("fs::copy", Capability::Write),
+    ("fs::copy_dir", Capability::Write),
     ("fs::create", Capability::Write),
     ("fs::create_dir", Capability::Write),
     ("fs::create_dir_all", Capability::Write),
     ("fs::create_dir_all_mode", Capability::Write),
     ("fs::create_dir_mode", Capability::Write),
+    ("fs::hard_link", Capability::Write),
+    ("fs::move", Capability::Write),
     ("fs::remove_dir", Capability::Write),
     ("fs::remove_dir_all", Capability::Write),
     ("fs::remove_file", Capability::Write),
     ("fs::rename", Capability::Write),
     ("fs::set_permissions", Capability::Write),
+    ("fs::symlink", Capability::Write),
     ("fs::sync_dir", Capability::Write),
     ("fs::temp_dir", Capability::Write),
     ("fs::temp_file", Capability::Write),
     ("fs::write", Capability::Write),
     ("fs::write_mode", Capability::Write),
+    // Leaves under injected `fs` wrappers that write, where the `__gos_fs_`
+    // prefix below would class them as reads.
+    ("__gos_fs_chown_raw", Capability::Write),
+    ("__gos_fs_temp_dir_raw", Capability::Write),
+    ("__gos_fs_temp_file_raw", Capability::Write),
     // os.
-    ("os::exec::kill", Capability::Exec),
-    ("os::exec::kill_group", Capability::Exec),
-    ("os::exec::pipeline_run", Capability::Exec),
-    ("os::exec::run", Capability::Exec),
-    ("os::exec::signal", Capability::Exec),
-    ("os::exec::spawn", Capability::Exec),
-    ("os::exec::wait_timeout", Capability::Exec),
     ("os::signal::on", Capability::Exec),
     ("os::signal::stop", Capability::Exec),
     ("os::signal::try_wait", Capability::Exec),
     ("os::signal::wait", Capability::Exec),
+    // The host name is the machine's, read as `env::var` reads a variable.
+    ("os::hostname", Capability::Read),
     // env. Reading a variable is I/O the `none` level denies and the
     // `confined` level permits; mutating the process environment or
     // the working directory is denied at both.
@@ -342,6 +339,9 @@ const BARE_PREFIX_CAPABILITIES: &[(&str, Capability)] = &[
     ("__gos_ffi_", Capability::Foreign),
     ("__gos_fd_", Capability::Read),
     ("__gos_bufio_", Capability::Write),
+    // DNS lookups and the TLS server configuration a listener serves with.
+    ("__gos_net_", Capability::Network),
+    ("__gos_tls_", Capability::Network),
 ];
 
 /// Name-to-capability map over every registered builtin.
@@ -551,7 +551,8 @@ mod comptime_gate_tests {
     fn every_wrapper_leaf_is_classified() {
         // A `__gos_` leaf is the native half of a source-level wrapper, so it
         // needs the capability of the call it implements. These families
-        // compute over values they are handed (rendering included), the zone database the `time`
+        // compute over values they are handed (rendering and HTML or mail
+        // parsing included), the zone database the `time`
         // leaves read is compiled in, a parallel adapter's leaf is a
         // callback GT0090 has already proven pure, a window check compares
         // the bounds it is handed, and a serde step reads or writes the
@@ -560,13 +561,25 @@ mod comptime_gate_tests {
             "__gos_codegen",
             "__gos_debug_quote",
             "__gos_dyn_",
+            "__gos_ecdh_",
             "__gos_f32_",
             "__gos_field_",
+            "__gos_html_",
+            "__gos_image_",
+            "__gos_keep",
+            "__gos_mail_",
+            "__gos_mlkem_",
+            "__gos_netip_",
             "__gos_par_",
             "__gos_pem_",
+            "__gos_rational_",
+            "__gos_release_binding",
+            "__gos_release_scrutinee",
+            "__gos_run_cleanups",
             "__gos_serde_",
             "__gos_strconv_",
             "__gos_tar_",
+            "__gos_template_",
             "__gos_time_",
             "__gos_windows_",
             "__gos_wrapping_",

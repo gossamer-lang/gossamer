@@ -250,6 +250,8 @@ pub(super) fn type_slot_count(tcx: &TyCtxt, ty: Ty) -> u32 {
                     .max(1)
             })
         }
+        // A 128-bit integer spans two slots.
+        TyKind::Int(int) if int.is_wide() => 2,
         _ => 1,
     }
 }

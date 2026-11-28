@@ -20,6 +20,7 @@ impl Vm {
             free_fn_names: Arc::new(rustc_hash::FxHashSet::default()),
             param_dispatch: Arc::new(crate::compile::ParamDispatch::default()),
             bare_fn_depth: rustc_hash::FxHashMap::default(),
+            cell_variants: false,
             qualified_names: RefCell::new(Vec::new()),
             pool: RefCell::new(FramePool::default()),
             mir_bodies: RefCell::new(None),
@@ -86,6 +87,7 @@ impl Vm {
             free_fn_names: Arc::new(rustc_hash::FxHashSet::default()),
             param_dispatch: Arc::new(crate::compile::ParamDispatch::default()),
             bare_fn_depth: rustc_hash::FxHashMap::default(),
+            cell_variants: false,
             qualified_names: RefCell::new(Vec::new()),
             pool: RefCell::new(FramePool::default()),
             mir_bodies: RefCell::new(mir_bodies),
@@ -664,6 +666,7 @@ impl Vm {
         // iterator>` / stateful-method mechanism). See
         // `compile::collect_mut_self_methods`.
         let method_muts = crate::compile::collect_mut_self_methods(program);
+        self.cell_variants = crate::compile::lends_captured_places(program, &method_muts);
         let impl_methods = crate::compile::collect_impl_method_names(program);
         self.free_fn_names = Arc::new(
             program
@@ -934,6 +937,7 @@ impl Vm {
                 source_map.as_deref(),
                 cov_map.as_deref(),
                 Some((&dispatch, instance.global.as_str())),
+                self.cell_variants,
             )?;
             validate_chunk_for_execution(&chunk)?;
             self.bump_globals_generation();
@@ -2351,6 +2355,7 @@ impl Vm {
                     source_map.as_deref(),
                     cov_map.as_deref(),
                     Some((&dispatch, "")),
+                    self.cell_variants,
                 )?;
                 validate_chunk_for_execution(&chunk)?;
                 let shared = chunk.into_shared();
@@ -2387,6 +2392,7 @@ impl Vm {
                         source_map.as_deref(),
                         cov_map.as_deref(),
                         Some((&dispatch, "")),
+                        self.cell_variants,
                     )?;
                     validate_chunk_for_execution(&chunk)?;
                     let shared = chunk.into_shared();
@@ -2457,6 +2463,7 @@ impl Vm {
                             source_map.as_deref(),
                             cov_map.as_deref(),
                             Some((&dispatch, "")),
+                            self.cell_variants,
                         )?;
                         validate_chunk_for_execution(&chunk)?;
                         let shared = chunk.into_shared();

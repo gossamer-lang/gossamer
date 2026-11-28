@@ -1,6 +1,6 @@
 inner: {"n":7,"label":"a \"quoted\" \u003cb\u003e\u0026\u003c/b\u003e \n tab\t é ✓"}
 widths: {"a":-8,"b":-300,"c":70000,"d":200,"e":60000,"f":4000000000,"g":18446744073709551615,"h":12,"i":-9007199254740993,"x":1.0,"y":0.1}
-specials: {"a":0,"b":0,"c":0,"d":0,"e":0,"f":0,"g":0,"h":0,"i":0,"x":null,"y":null}
+specials: ERR json::encode: NaN has no JSON number (RFC 8259 section 6)
 widths back: -8 -300 70000 200 60000 4000000000 18446744073709551615 12 -9007199254740993 100 0.1
 narrowing: ERR a: expected i8, found 300
 i64 fraction: ERR i: expected i64, found 1.5
@@ -10,7 +10,7 @@ big i64: ERR i: expected i64, found 1e30
 plain: Inner n=1 label=x
 reordered: Inner n=2 label=y
 unknown keys: Inner n=3 label=z
-duplicate: Inner n=9 label=last
+duplicate: ERR duplicate key `n`
 escapes: Inner n=0 label=é
 "\ 😀
 missing: ERR missing field `n`
@@ -38,10 +38,10 @@ pair not array: ERR pair: expected array, found string
 map value: ERR counts.b: expected i64, found string
 map not object: ERR counts: expected object, found array
 map struct: ERR by_name.k: missing field `label`
-map dup: {"flag":false,"text":"","nums":[],"grid":[],"inners":[],"maybe":null,"maybe_inner":null,"pair":[0,""],"counts":{"q":5},"by_name":{},"raw":null,"inner":{"n":0,"label":""}}
+map dup: ERR counts: duplicate key `q`
 nested inner: ERR inner.label: expected string, found 5
 bool wrong: ERR flag: expected bool, found 1
-first error wins: ERR flag: expected bool, found string
+first error wins: ERR inner.n: expected i64, found string
 attrs: {"full name":"Ada","retries":3,"tags":["x"],"note":null}
 attrs back: name=Ada cache=0 retries=3 tags=1 note=-
 attrs defaults: name=Bo cache=0 retries=0 tags=0 note=-

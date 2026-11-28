@@ -237,7 +237,7 @@ pub(super) fn coerce_arg_to(
     // Last resort: typed zero of the wanted shape so the call
     // doesn't fail the verifier.
     if want.is_int() {
-        Ok(builder.ins().iconst(want, 0))
+        Ok(super::lowering_rvalue::int_const(builder, want, 0))
     } else if want == types::F64 {
         Ok(builder.ins().f64const(0.0))
     } else if want == types::F32 {

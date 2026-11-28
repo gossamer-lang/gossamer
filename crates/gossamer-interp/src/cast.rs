@@ -42,6 +42,15 @@ pub enum CastTarget {
     Char,
     /// `bool` - only the same-type no-op is whitelisted.
     Bool,
+    /// `i128` (`signed`) or `u128`: an integer keeps its value modulo
+    /// 2^128, a float saturates at the target's range. `source_unsigned`
+    /// reads a 64-bit source's bits as a `u64`.
+    Wide {
+        /// `true` for `i128`.
+        signed: bool,
+        /// The source was declared `u64` / `usize`.
+        source_unsigned: bool,
+    },
 }
 
 impl CastTarget {
@@ -76,6 +85,14 @@ impl CastTarget {
             },
             TyKind::Int(IntTy::I64 | IntTy::Isize) => Self::I64,
             TyKind::Int(IntTy::U64 | IntTy::Usize) => Self::U64,
+            TyKind::Int(IntTy::I128) => Self::Wide {
+                signed: true,
+                source_unsigned: false,
+            },
+            TyKind::Int(IntTy::U128) => Self::Wide {
+                signed: false,
+                source_unsigned: false,
+            },
             TyKind::Float(FloatTy::F32) => Self::F32,
             TyKind::Float(FloatTy::F64) => Self::F64,
             TyKind::Char => Self::Char,
@@ -91,6 +108,10 @@ impl CastTarget {
         match self {
             Self::F32 if unsigned => Self::F32FromUnsigned,
             Self::F64 if unsigned => Self::F64FromUnsigned,
+            Self::Wide { signed, .. } => Self::Wide {
+                signed,
+                source_unsigned: unsigned,
+            },
             other => other,
         }
     }
@@ -113,6 +134,11 @@ fn int_base(v: &Value) -> Option<i64> {
     match v {
         Value::Int(n) => Some(*n),
         Value::Uint(n) => Some(*n as i64),
+        // A 128-bit value cast to a word keeps its low 64 bits.
+        Value::Wide(_) | Value::WideInline(..) => Some(match v.wide_int()? {
+            crate::value::wide::WideInt::I(n) => n as i64,
+            crate::value::wide::WideInt::U(n) => n as i64,
+        }),
         Value::Bool(b) => Some(i64::from(*b)),
         Value::Char(c) => Some(i64::from(u32::from(*c))),
         _ => None,
@@ -150,6 +176,19 @@ pub(crate) fn cast_scalar(v: &Value, target: CastTarget) -> Option<Value> {
             }
             int_base(v).map(|n| Value::Uint(n as u64))
         }
+        CastTarget::F32
+        | CastTarget::F64
+        | CastTarget::F32FromUnsigned
+        | CastTarget::F64FromUnsigned
+            if v.is_wide() =>
+        {
+            let f = match v.wide_int()? {
+                crate::value::wide::WideInt::I(n) => n as f64,
+                crate::value::wide::WideInt::U(n) => n as f64,
+            };
+            let single = matches!(target, CastTarget::F32 | CastTarget::F32FromUnsigned);
+            Some(Value::Float(if single { f64::from(f as f32) } else { f }))
+        }
         CastTarget::F32 => {
             if let Value::Float(f) = v {
                 return Some(Value::Float(f64::from(*f as f32)));
@@ -161,6 +200,27 @@ pub(crate) fn cast_scalar(v: &Value, target: CastTarget) -> Option<Value> {
                 return Some(Value::Float(*f));
             }
             int_base(v).map(|n| Value::Float(n as f64))
+        }
+        CastTarget::Wide {
+            signed,
+            source_unsigned,
+        } => {
+            let bits: u128 = match v {
+                Value::Float(f) if signed => return Some(Value::from_i128(*f as i128)),
+                Value::Float(f) => return Some(Value::from_u128(*f as u128)),
+                Value::Wide(_) | Value::WideInline(..) => match v.wide_int()? {
+                    crate::value::wide::WideInt::I(n) => n as u128,
+                    crate::value::wide::WideInt::U(n) => n,
+                },
+                Value::Uint(n) => u128::from(*n),
+                Value::Int(n) if source_unsigned => u128::from(*n as u64),
+                other => i128::from(int_base(other)?) as u128,
+            };
+            Some(if signed {
+                Value::from_i128(bits as i128)
+            } else {
+                Value::from_u128(bits)
+            })
         }
         CastTarget::F32FromUnsigned => {
             int_base(v).map(|n| Value::Float(f64::from(n as u64 as f32)))

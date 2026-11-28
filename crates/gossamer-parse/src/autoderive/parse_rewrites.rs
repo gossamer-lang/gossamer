@@ -111,6 +111,7 @@ impl gossamer_ast::VisitorMut for TupleCtorRewriter<'_> {
                     .map(|(value, name)| StructExprField {
                         name: gossamer_ast::Ident::new(name),
                         value: Some(value),
+                        shorthand: false,
                     })
                     .collect(),
                 base: None,
@@ -134,6 +135,7 @@ impl gossamer_ast::VisitorMut for TupleCtorRewriter<'_> {
             .map(|(value, name)| StructExprField {
                 name: gossamer_ast::Ident::new(name),
                 value: Some(value),
+                shorthand: false,
             })
             .collect();
         e.kind = ExprKind::Struct {
@@ -262,6 +264,8 @@ pub fn parse_with_autoderive_from(
         diags.extend(serde_attribute_diags(&sf));
     }
     diags.extend(derive_default_diags(&sf));
+    rewrite_duplicate_keys_args(&mut sf);
+    rewrite_serve_tls_config(&mut sf);
     rewrite_serde_generic_calls(&mut sf);
     specialize_inline_for_generics(&mut sf);
     expand_typeinfo_loops(&mut sf);
@@ -607,10 +611,57 @@ const MANGLED_STDLIB_NAMES: &[(&str, &str, &str)] = &[
     ("pem", "Block", "__gos_pem_Block"),
     ("x509", "parse_pem", "__gos_x509_parse_pem"),
     ("x509", "CertInfo", "__gos_x509_CertInfo"),
+    ("x509", "Extension", "__gos_x509_Extension"),
+    ("x509", "self_signed", "__gos_x509_self_signed"),
+    ("x509", "issue", "__gos_x509_issue"),
+    ("x509", "extensions", "__gos_x509_extensions"),
     ("fs", "metadata", "__gos_fs_metadata"),
     ("fs", "Metadata", "__gos_fs_Metadata"),
     ("fs", "temp_dir", "__gos_fs_temp_dir"),
+    ("fs", "temp_file", "__gos_fs_temp_file"),
+    ("fs", "chown", "__gos_fs_chown"),
+    ("tls", "ServerConfig", "__gos_tls_ServerConfig"),
+    ("net", "lookup_mx", "__gos_net_lookup_mx"),
+    ("net", "lookup_txt", "__gos_net_lookup_txt"),
+    ("net", "lookup_srv", "__gos_net_lookup_srv"),
+    ("net", "lookup_cname", "__gos_net_lookup_cname"),
+    ("net", "lookup_addr", "__gos_net_lookup_addr"),
+    ("net", "Mx", "__gos_net_Mx"),
+    ("net", "Srv", "__gos_net_Srv"),
+    ("fs", "disk_space", "__gos_fs_disk_space"),
+    ("fs", "DiskSpace", "__gos_fs_DiskSpace"),
     ("json", "entries", "__gos_json_entries"),
+    ("json", "Decoder", "__gos_json_Decoder"),
+    ("ecdh", "x25519_keypair", "__gos_ecdh_x25519_keypair"),
+    ("ecdh", "x25519", "__gos_ecdh_x25519"),
+    ("ecdh", "p256_keypair", "__gos_ecdh_p256_keypair"),
+    ("ecdh", "p256", "__gos_ecdh_p256"),
+    ("ecdh", "p384_keypair", "__gos_ecdh_p384_keypair"),
+    ("ecdh", "p384", "__gos_ecdh_p384"),
+    ("mlkem", "keypair_768", "__gos_mlkem_keypair_768"),
+    ("mlkem", "encapsulate_768", "__gos_mlkem_encapsulate_768"),
+    ("mlkem", "decapsulate_768", "__gos_mlkem_decapsulate_768"),
+    ("mlkem", "keypair_1024", "__gos_mlkem_keypair_1024"),
+    ("mlkem", "encapsulate_1024", "__gos_mlkem_encapsulate_1024"),
+    ("mlkem", "decapsulate_1024", "__gos_mlkem_decapsulate_1024"),
+    ("ecdh", "SharedSecret", "__gos_crypto_SharedSecret"),
+    ("mlkem", "SharedSecret", "__gos_crypto_SharedSecret"),
+    ("text_template", "Template", "__gos_text_template_Template"),
+    ("html_template", "Template", "__gos_html_template_Template"),
+    ("text_template", "MissingKey", "__gos_template_MissingKey"),
+    ("html_template", "MissingKey", "__gos_template_MissingKey"),
+    ("text_template", "render", "__gos_text_template_render"),
+    ("html_template", "render", "__gos_html_template_render"),
+    ("netip", "Prefix", "__gos_netip_Prefix"),
+    ("image", "decode", "__gos_image_decode"),
+    ("image", "set_max_pixels", "__gos_image_set_max_pixels"),
+    ("image", "Image", "__gos_image_Image"),
+    ("image", "Rgba", "__gos_image_Rgba"),
+    ("mail", "parse_address", "__gos_mail_parse_address"),
+    ("mail", "parse_address_list", "__gos_mail_parse_address_list"),
+    ("mail", "Address", "__gos_mail_Address"),
+    ("json", "DuplicateKeys", "__gos_json_DuplicateKeys"),
+    ("yaml", "DuplicateKeys", "__gos_json_DuplicateKeys"),
     ("fs", "read_dir", "__gos_fs_read_dir"),
     ("fs", "DirInfo", "__gos_fs_DirInfo"),
     ("fs", "walk_dir", "__gos_fs_walk_dir"),
@@ -623,20 +674,43 @@ const MANGLED_STDLIB_NAMES: &[(&str, &str, &str)] = &[
     ("process", "Stdio", "__gos_process_Stdio"),
     ("process", "Child", "__gos_process_Child"),
     ("process", "spawn_piped", "__gos_process_spawn_piped"),
-    ("exec", "run", "__gos_process_run"),
-    ("exec", "run_in", "__gos_process_run_in"),
-    ("exec", "pipeline_run", "__gos_process_pipeline_run"),
-    ("exec", "Output", "__gos_process_Output"),
-    ("exec", "Command", "__gos_process_Command"),
-    ("exec", "Stdio", "__gos_process_Stdio"),
-    ("exec", "Child", "__gos_process_Child"),
-    ("exec", "spawn_piped", "__gos_process_spawn_piped"),
     ("path", "Path", "__gos_path_Path"),
     ("collections", "IndexMap", "__gos_collections_IndexMap"),
     ("collections", "BitSet", "__gos_collections_BitSet"),
     ("bufio", "Reader", "__gos_bufio_Reader"),
     ("bufio", "Writer", "__gos_bufio_Writer"),
     ("math", "Decimal", "__gos_math_Decimal"),
+    ("math", "Rational", "__gos_math_Rational"),
+    ("strings", "shell_split", "__gos_strings_shell_split"),
+    ("strings", "shell_quote", "__gos_strings_shell_quote"),
+    ("strings", "shell_join", "__gos_strings_shell_join"),
+    ("math", "mean", "__gos_math_mean"),
+    ("math", "median", "__gos_math_median"),
+    ("math", "variance", "__gos_math_variance"),
+    ("math", "stdev", "__gos_math_stdev"),
+    ("math", "pvariance", "__gos_math_pvariance"),
+    ("math", "pstdev", "__gos_math_pstdev"),
+    ("math", "quantiles", "__gos_math_quantiles"),
+    ("math", "erf", "__gos_math_erf"),
+    ("math", "erfc", "__gos_math_erfc"),
+    ("math", "gamma", "__gos_math_gamma"),
+    ("math", "lgamma", "__gos_math_lgamma"),
+    ("math", "factorial", "__gos_math_factorial"),
+    ("math", "comb", "__gos_math_comb"),
+    ("math", "perm", "__gos_math_perm"),
+    ("math", "Complex", "__gos_math_Complex"),
+    ("rand", "range", "__gos_rand_range"),
+    ("rand", "range_f64", "__gos_rand_range_f64"),
+    ("rand", "chance", "__gos_rand_chance"),
+    ("rand", "choose", "__gos_rand_choose"),
+    ("rand", "shuffle", "__gos_rand_shuffle"),
+    ("rand", "sample", "__gos_rand_sample"),
+    ("rand", "weighted", "__gos_rand_weighted"),
+    ("rand", "normal", "__gos_rand_normal"),
+    ("rand", "exponential", "__gos_rand_exponential"),
+    ("rand", "from_os", "__gos_rand_from_os"),
+    ("fs", "TempDir", "__gos_fs_TempDir"),
+    ("fs", "TempFile", "__gos_fs_TempFile"),
     ("http", "Http2Config", "__gos_http_Http2Config"),
     ("Http2Config", "default", "__gos_http_Http2Config_default"),
     ("time", "Location", "__gos_time_Location"),
@@ -644,6 +718,7 @@ const MANGLED_STDLIB_NAMES: &[(&str, &str, &str)] = &[
     ("time", "CivilTime", "__gos_time_CivilTime"),
     ("time", "CivilResolution", "__gos_time_CivilResolution"),
     ("time", "format_in", "__gos_time_format_in"),
+    ("time", "parse", "__gos_time_parse"),
     ("time", "add_date", "__gos_time_add_date"),
     // tar/zip `read` route through the struct wrapper; `write`
     // lowers directly (no struct), so it is NOT rewritten.
@@ -711,21 +786,9 @@ const MANGLED_STDLIB_NAMES: &[(&str, &str, &str)] = &[
     // already express (SPEC 8.6's addition test).
     ("sync", "shield", "__gos_sync_shield"),
     ("sync", "with_timeout", "__gos_sync_with_timeout"),
-    // std::http::csrf request/response-integrated surface.
-    ("csrf", "Config", "__gos_http_csrf_Config"),
-    ("csrf", "config", "__gos_http_csrf_config"),
-    ("csrf", "RouteAuth", "__gos_http_csrf_RouteAuth"),
-    ("csrf", "extract_token", "__gos_http_csrf_extract_token"),
-    ("csrf", "origin_allowed", "__gos_http_csrf_origin_allowed"),
-    ("csrf", "check", "__gos_http_csrf_check"),
-    ("csrf", "attach_cookie", "__gos_http_csrf_attach_cookie"),
-    // std::http::session signed + AES-GCM store surface.
-    ("session", "Store", "__gos_http_session_Store"),
-    ("session", "signed", "__gos_http_session_signed"),
-    ("session", "encrypted", "__gos_http_session_encrypted"),
-    ("session", "save", "__gos_http_session_save"),
-    ("session", "load", "__gos_http_session_load"),
-    ("session", "with_session", "__gos_http_session_with_session"),
+    ("sync", "Semaphore", "__gos_sync_Semaphore"),
+    ("time", "Ticker", "__gos_time_Ticker"),
+    ("sync", "Permit", "__gos_sync_Permit"),
     // std::http::form url-encoded parser.
     ("form", "Form", "__gos_http_form_Form"),
     ("form", "parse", "__gos_http_form_parse"),
@@ -809,6 +872,7 @@ const MANGLED_STDLIB_NAMES: &[(&str, &str, &str)] = &[
     ("term", "size", "__gos_term_size"),
     ("term", "enter_raw", "__gos_term_enter_raw"),
     ("term", "read_input", "__gos_term_read_input"),
+    ("term", "read_password", "__gos_term_read_password"),
     ("term", "resized", "__gos_term_resized"),
 ];
 
@@ -829,7 +893,188 @@ pub fn stdlib_wrapper_spelling(mangled: &str) -> Option<String> {
     MANGLED_STDLIB_NAMES
         .iter()
         .find(|(_, _, name)| *name == mangled)
-        .map(|(parent, item, _)| format!("{parent}::{item}"))
+        .map(|(parent, item, _)| format!("{}::{item}", spelled_module(parent)))
+}
+
+/// The name a program spells the module a rewrite-table key stands for:
+/// both template modules are spelled `template`.
+fn spelled_module(key: &str) -> &str {
+    match key {
+        "text_template" | "html_template" => "template",
+        other => other,
+    }
+}
+
+/// The declaration of the standard type `module_path::name` that is written
+/// in Gossamer (`std::time` and `CivilTime`), as a program spells it: its
+/// fields with their defaults or its variants, then its public methods.
+/// `None` for a type that is not written in Gossamer.
+#[must_use]
+pub fn stdlib_wrapper_type_outline(module_path: &str, name: &str) -> Option<String> {
+    let import = module_path.strip_prefix("std::")?;
+    let mut segments = import.rsplit("::");
+    let parent = segments.next()?;
+    let key = nested_module_key(segments.next(), parent);
+    let mangled = mangled_stdlib_name(&key, name)?;
+    // A program that imports the module and names the type, which is what
+    // brings its wrappers in.
+    let probe = format!("use std::{import}\n\nfn probe(value: {parent}::{name}) {{}}\n");
+    let source = stdlib_wrapper_source(&probe);
+    let parsed = clean_parse(&source)?;
+    let text = |span: Span| {
+        let end = (span.end as usize).min(source.len());
+        source.get(span.start as usize..end).unwrap_or_default().trim().to_string()
+    };
+    let shape = |body: &StructBody| match body {
+        StructBody::Named(fields) => {
+            let fields: Vec<String> = fields
+                .iter()
+                .map(|f| {
+                    let default = f.default.as_ref().map(|d| format!(" = {}", text(d.span)));
+                    format!("{}: {}{}", f.name.name, text(f.ty.span), default.unwrap_or_default())
+                })
+                .collect();
+            Some(fields)
+        }
+        StructBody::Tuple(fields) => {
+            Some(vec![fields.iter().map(|f| text(f.ty.span)).collect::<Vec<_>>().join(", ")])
+        }
+        StructBody::Unit => None,
+    };
+    let mut out = String::new();
+    for item in &parsed.items {
+        let name = format!("{name}{}", declared_generics(&text(item.span), mangled));
+        match &item.kind {
+            ItemKind::Struct(decl) if decl.name.name == mangled => {
+                match (&decl.body, shape(&decl.body)) {
+                    (StructBody::Tuple(_), Some(fields)) => {
+                        out.push_str(&format!("struct {name}({})\n", fields.join(", ")));
+                        continue;
+                    }
+                    (StructBody::Unit, _) => {
+                        out.push_str(&format!("struct {name}\n"));
+                        continue;
+                    }
+                    _ => {}
+                }
+                out.push_str(&format!("struct {name} {{\n"));
+                // A field whose name starts `__` is the type's own state, which
+                // a program reaches through the methods.
+                let fields = shape(&decl.body).unwrap_or_default();
+                let public: Vec<&String> =
+                    fields.iter().filter(|field| !field.starts_with("__")).collect();
+                for field in &public {
+                    out.push_str(&format!("    {field}\n"));
+                }
+                if public.len() < fields.len() {
+                    out.push_str("    ..\n");
+                }
+                out.push_str("}\n");
+            }
+            ItemKind::Enum(decl) if decl.name.name == mangled => {
+                out.push_str(&format!("enum {name} {{\n"));
+                for variant in &decl.variants {
+                    let payload = match (&variant.body, shape(&variant.body)) {
+                        (StructBody::Named(_), Some(fields)) => format!(" {{ {} }}", fields.join(", ")),
+                        (StructBody::Tuple(_), Some(fields)) => format!("({})", fields.join(", ")),
+                        _ => String::new(),
+                    };
+                    out.push_str(&format!("    {}{payload}\n", variant.name.name));
+                }
+                out.push_str("}\n");
+            }
+            _ => {}
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    let methods = wrapper_type_methods(&parsed, mangled, &text);
+    if !methods.is_empty() {
+        out.push('\n');
+        for method in methods {
+            out.push_str(&format!("{method}\n"));
+        }
+    }
+    Some(demangle_wrapper_names(&out))
+}
+
+/// The generic parameters a declaration's text `decl` writes after the name
+/// `mangled`, or an empty string when it declares none.
+fn declared_generics(decl: &str, mangled: &str) -> String {
+    let after = decl.find(mangled).map_or("", |at| &decl[at + mangled.len()..]);
+    if !after.starts_with('<') {
+        return String::new();
+    }
+    let mut depth = 0usize;
+    for (i, c) in after.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return after[..=i].to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    String::new()
+}
+
+/// The signatures of the inherent methods the wrapper source declares on
+/// the type `mangled`, its own `__`-named helpers left out.
+fn wrapper_type_methods(
+    parsed: &SourceFile,
+    mangled: &str,
+    text: &impl Fn(Span) -> String,
+) -> Vec<String> {
+    parsed
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::Impl(decl)
+                if decl.trait_ref.is_none()
+                    && text(decl.self_ty.span)
+                        .strip_prefix(mangled)
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with('<')) =>
+            {
+                Some(decl)
+            }
+            _ => None,
+        })
+        .flat_map(|decl| decl.items.iter())
+        .filter_map(|member| match member {
+            ImplItem::Fn(f) if !f.name.name.starts_with("__") => {
+                let signature = text(f.span);
+                let cut = signature.find('{').unwrap_or(signature.len());
+                Some(signature[..cut].trim().to_string())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// `text` with each injected stdlib name spelled as a program writes it
+/// (`time::CivilTime` for `__gos_time_CivilTime`).
+fn demangle_wrapper_names(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("__gos_") {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        let end = tail
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(tail.len());
+        let mangled = &tail[..end];
+        match stdlib_wrapper_spelling(mangled) {
+            Some(spelling) => out.push_str(&spelling),
+            None => out.push_str(mangled),
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The spelling a program writes for the injected stdlib type `mangled`
@@ -838,31 +1083,16 @@ fn public_stdlib_type_spelling(mangled: &str) -> Option<String> {
     MANGLED_STDLIB_NAMES
         .iter()
         .find(|(_, item, name)| *name == mangled && item.starts_with(|c: char| c.is_ascii_uppercase()))
-        .map(|(parent, item, _)| format!("{parent}::{item}"))
+        .map(|(parent, item, _)| format!("{}::{item}", spelled_module(parent)))
 }
 
-/// Collapses the `csrf::RouteAuth::X` enum-variant and the
-/// `form::Form::parse` associated-function paths onto their injected
-/// names, guarded on the `csrf` / `form` head so a user's own
-/// `RouteAuth::X` / `Form::parse` is left alone. Returns true when it
-/// rewrote `path`.
+/// Collapses the `form::Form::parse` associated-function path onto its
+/// injected name, guarded on the `form` head so a user's own `Form::parse`
+/// is left alone. Returns true when it rewrote `path`.
 fn collapse_http_security_path(path: &mut gossamer_ast::PathExpr) -> bool {
     let n = path.segments.len();
     if n < 3 {
         return false;
-    }
-    if path.segments[n - 3].name.name.as_str() == "csrf"
-        && path.segments[n - 2].name.name.as_str() == "RouteAuth"
-    {
-        let variant = std::mem::replace(
-            &mut path.segments[n - 1],
-            gossamer_ast::PathSegment::new(""),
-        );
-        path.segments = vec![
-            gossamer_ast::PathSegment::new("__gos_http_csrf_RouteAuth"),
-            variant,
-        ];
-        return true;
     }
     if path.segments[n - 3].name.name.as_str() == "form"
         && path.segments[n - 2].name.name.as_str() == "Form"
@@ -1221,6 +1451,135 @@ mod range_contains_nodes {
             },
         )
     }
+}
+
+/// Rewrites the `duplicate_keys:` argument of `json::parse`, `yaml::parse`,
+/// and their typed `decode::<T>` forms into the policy's index, which the
+/// runtime reads on every tier: `json::parse(t, duplicate_keys: d)` becomes
+/// `json::__parse_with(t, __gos_json_duplicate_index(d))`, and a decode keeps
+/// its label for its stub's `duplicate_keys` parameter.
+pub fn rewrite_duplicate_keys_args(sf: &mut SourceFile) {
+    use gossamer_ast::VisitorMut;
+    use gossamer_ast::expr::{Expr, ExprKind};
+    use gossamer_ast::visitor::walk_expr_mut;
+
+    struct Rewriter {
+        named: std::collections::HashMap<NodeId, Vec<gossamer_ast::NamedArg>>,
+    }
+    impl VisitorMut for Rewriter {
+        fn visit_expr(&mut self, expr: &mut Expr) {
+            walk_expr_mut(self, expr);
+            let ExprKind::Call { callee, args } = &mut expr.kind else {
+                return;
+            };
+            let ExprKind::Path(path) = &mut callee.kind else {
+                return;
+            };
+            let names: Vec<&str> = path.segments.iter().map(|s| s.name.name.as_str()).collect();
+            let (module, op) = match names.as_slice() {
+                [.., module @ ("json" | "yaml"), op] => (Some(*module), *op),
+                [op @ ("from_json" | "from_yaml")] => (None, *op),
+                _ => return,
+            };
+            let parses = op == "parse";
+            let decodes = matches!(
+                (module, op),
+                (Some(_), "decode") | (Some("json") | None, "from_json") | (Some("yaml") | None, "from_yaml")
+            );
+            if !(parses || decodes) || args.len() != 2 {
+                return;
+            }
+            let labels = self.named.get_mut(&expr.id);
+            let labelled = labels
+                .as_ref()
+                .and_then(|labels| labels.iter().position(|l| l.name.name == "duplicate_keys"));
+            let index = match labelled {
+                Some(at) => labels.as_ref().map_or(1, |labels| labels[at].index),
+                None => 1,
+            };
+            if parses {
+                if let Some(last) = path.segments.last_mut() {
+                    last.name.name = "__parse_with".to_string();
+                }
+                // The policy goes second, unlabelled, as the entry takes it.
+                if let (Some(labels), Some(at)) = (labels, labelled) {
+                    labels.remove(at);
+                }
+                if index == 0 {
+                    args.swap(0, 1);
+                }
+            }
+            let slot = if parses { 1 } else { index };
+            let span = args[slot].span;
+            let value = std::mem::replace(&mut args[slot], Expr::new(NodeId::DUMMY, span, ExprKind::Tuple(Vec::new())));
+            let helper = Expr::new(
+                NodeId::DUMMY,
+                span,
+                ExprKind::Path(gossamer_ast::PathExpr {
+                    segments: vec![gossamer_ast::PathSegment::new("__gos_json_duplicate_index")],
+                }),
+            );
+            args[slot] = Expr::new(
+                NodeId::DUMMY,
+                span,
+                ExprKind::Call {
+                    callee: Box::new(helper),
+                    args: vec![value],
+                },
+            );
+        }
+    }
+    let mut rewriter = Rewriter {
+        named: std::mem::take(&mut sf.named_args),
+    };
+    rewriter.visit_source_file(sf);
+    rewriter.named.retain(|_, labels| !labels.is_empty());
+    sf.named_args = rewriter.named;
+}
+
+/// Rewrites `http::serve_tls_config(addr, config, handler)` into
+/// `http::__serve_tls_live(addr, config.id(), handler)`: the server takes the
+/// live configuration by its registry id, as the runtime holds it.
+pub fn rewrite_serve_tls_config(sf: &mut SourceFile) {
+    use gossamer_ast::VisitorMut;
+    use gossamer_ast::expr::{Expr, ExprKind};
+    use gossamer_ast::visitor::walk_expr_mut;
+
+    struct Rewriter;
+    impl VisitorMut for Rewriter {
+        fn visit_expr(&mut self, expr: &mut Expr) {
+            walk_expr_mut(self, expr);
+            let ExprKind::Call { callee, args } = &mut expr.kind else {
+                return;
+            };
+            let ExprKind::Path(path) = &mut callee.kind else {
+                return;
+            };
+            let names: Vec<&str> = path.segments.iter().map(|s| s.name.name.as_str()).collect();
+            if !matches!(names.as_slice(), [.., "http", "serve_tls_config"]) || args.len() != 3 {
+                return;
+            }
+            if let Some(last) = path.segments.last_mut() {
+                last.name.name = "__serve_tls_live".to_string();
+            }
+            let span = args[1].span;
+            let config =
+                std::mem::replace(&mut args[1], Expr::new(NodeId::DUMMY, span, ExprKind::Tuple(Vec::new())));
+            args[1] = Expr::new(
+                NodeId::DUMMY,
+                span,
+                ExprKind::MethodCall {
+                    receiver: Box::new(config),
+                    name: gossamer_ast::Ident::new("id"),
+                    name_span: span,
+                    desugared_from: None,
+                    generics: Vec::new(),
+                    args: Vec::new(),
+                },
+            );
+        }
+    }
+    Rewriter.visit_source_file(sf);
 }
 
 /// Walks the program rewriting every `json::set(&mut place, k, v)`

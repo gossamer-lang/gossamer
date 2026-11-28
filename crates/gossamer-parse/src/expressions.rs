@@ -2667,7 +2667,12 @@ impl Parser<'_> {
                 let name_span = self.peek_span();
                 let name = Ident::new(self.slice(name_span));
                 self.bump();
-                fields.push(StructExprField { name, value: None });
+                let value = self.alloc_path_expr(&name.name);
+                fields.push(StructExprField {
+                    name,
+                    value: Some(value),
+                    shorthand: true,
+                });
                 if !self.eat_list_separator() {
                     break;
                 }
@@ -2688,6 +2693,7 @@ impl Parser<'_> {
                 fields.push(StructExprField {
                     name,
                     value: Some(value),
+                    shorthand: false,
                 });
                 if !self.eat_list_separator() {
                     break;
@@ -2695,7 +2701,11 @@ impl Parser<'_> {
                 continue;
             };
             let value = Some(self.parse_expr_no_assign());
-            fields.push(StructExprField { name, value });
+            fields.push(StructExprField {
+                name,
+                value,
+                shorthand: false,
+            });
             if !self.eat_list_separator() {
                 break;
             }

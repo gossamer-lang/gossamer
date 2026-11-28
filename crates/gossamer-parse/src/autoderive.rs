@@ -6,6 +6,7 @@ include!("autoderive/reflect_paths.rs");
 include!("autoderive/serde_derive.rs");
 include!("autoderive/augment_entry.rs");
 include!("autoderive/stdlib_wrappers.rs");
+include!("autoderive/numeric_wrappers.rs");
 include!("autoderive/assoc_consts.rs");
 include!("autoderive/trait_defaults.rs");
 include!("autoderive/self_paths.rs");

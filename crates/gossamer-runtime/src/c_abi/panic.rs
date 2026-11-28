@@ -45,6 +45,13 @@ struct FaultState {
     /// The faults [`gos_rt_unwind_try_call`] caught for the landing pads
     /// running now, innermost last, each resumed when its pad has run.
     caught: Vec<Box<dyn std::any::Any + Send>>,
+    /// A `process::exit` a deferred expression raised inside a landing pad.
+    /// It replaces the fault the pad runs for, as `SystemExit` raised in a
+    /// `finally` does, once the pad's other deferred expressions have run.
+    pending_exit: Option<Box<dyn std::any::Any + Send>>,
+    /// The environments of `runtime::Guard` cleanups released on this
+    /// goroutine and not yet run, oldest first.
+    cleanups: std::collections::VecDeque<usize>,
 }
 
 /// Runs `f` on the running goroutine's [`FaultState`], creating it first.
@@ -61,6 +68,20 @@ fn with_fault_state<R>(f: impl FnOnce(&mut FaultState) -> R) -> R {
     // it is live during `f`, which runs no Gossamer code.
     let state = unsafe { &mut *(word as *mut FaultState) };
     f(state)
+}
+
+/// Queues the cleanup closure environment `env` of a released guard on the
+/// running goroutine, to run at its next cleanup point.
+pub(crate) fn queue_cleanup(env: usize) {
+    with_fault_state(|state| state.cleanups.push_back(env));
+}
+
+/// The oldest cleanup environment queued on the running goroutine.
+pub(crate) fn next_cleanup() -> Option<usize> {
+    if gossamer_coro::local_word() == 0 {
+        return None;
+    }
+    with_fault_state(|state| state.cleanups.pop_front())
 }
 
 /// Frees a finished goroutine's [`FaultState`].
@@ -208,7 +229,26 @@ pub unsafe extern "C" fn gos_rt_unwind_try_call_in_pad(thunk: *const u8, ctx: *m
     // SAFETY: forwarded from this function's own contract.
     match unsafe { catching_call(thunk, ctx) } {
         Ok(()) => 0,
-        Err(_nested) => 1,
+        Err(nested) => {
+            // A deferred expression that exits replaces the fault in flight,
+            // as `SystemExit` raised in a `finally` does; the frame's other
+            // deferred expressions still run before the exit leaves it.
+            if nested.downcast_ref::<GosExit>().is_some() {
+                with_fault_state(|state| state.pending_exit = Some(nested));
+            }
+            1
+        }
+    }
+}
+
+/// Continues the `process::exit` a deferred expression raised in the landing
+/// pad that has just run, in place of the fault the pad caught; returns when
+/// none did. A pad that holds its fault as a `landingpad` value calls this
+/// before resuming it.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn gos_rt_unwind_exit_if_pending() {
+    if let Some(exit) = with_fault_state(|state| state.pending_exit.take()) {
+        std::panic::resume_unwind(exit);
     }
 }
 
@@ -216,7 +256,11 @@ pub unsafe extern "C" fn gos_rt_unwind_try_call_in_pad(thunk: *const u8, ctx: *m
 /// deferred expressions have run.
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn gos_rt_unwind_resume() -> ! {
-    match with_fault_state(|state| state.caught.pop()) {
+    let (caught, exit) = with_fault_state(|state| (state.caught.pop(), state.pending_exit.take()));
+    if let Some(exit) = exit {
+        std::panic::resume_unwind(exit);
+    }
+    match caught {
         Some(payload) => std::panic::resume_unwind(payload),
         // A pad is entered only from a catching call that held its fault.
         None => std::process::abort(),
@@ -252,7 +296,13 @@ pub unsafe extern "C" fn gos_rt_call_main(entry: *const u8, out: *mut u8) {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| entry(out as *mut u8)))
     });
     MAIN_UNWINDS.with(|flag| flag.set(outer));
+    if result.is_ok() {
+        super::guard::run_cleanups();
+    }
     if let Err(payload) = result {
+        if let Some(GosExit(code)) = payload.downcast_ref::<GosExit>() {
+            exit_now(*code);
+        }
         if let Some(fault) = take_deferred_fault(&*payload) {
             reraise_deferred_fault(&fault);
         }
@@ -266,7 +316,7 @@ pub unsafe extern "C" fn gos_rt_call_main(entry: *const u8, out: *mut u8) {
 // `extern "C"` declares the function nounwind, so that unwind would
 // trip the nounwind contract and abort whenever a cleanup frame sits
 // between the panic and its catch.
-use gossamer_coro::GosPanic;
+use gossamer_coro::{GosExit, GosPanic};
 
 /// User panic hook installed via `runtime::set_panic_hook`: the
 /// environment of an `Fn(String)` called with the rendered message instead
@@ -323,7 +373,9 @@ pub(crate) fn install_silent_gos_hook() {
     ONCE.call_once(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            if info.payload().downcast_ref::<GosPanic>().is_some() {
+            if info.payload().downcast_ref::<GosPanic>().is_some()
+                || info.payload().downcast_ref::<GosExit>().is_some()
+            {
                 return;
             }
             prev(info);
@@ -384,7 +436,7 @@ pub unsafe extern "C-unwind" fn gos_rt_panic(msg: *const c_char) {
 /// the header a Gossamer `String` carries behind its body. Runtime callers
 /// already hold Rust text, so they hand it over directly rather than shaping a
 /// C string the ABI would have to treat as foreign.
-pub(crate) fn panic_text(text: &str) {
+pub(crate) fn panic_text(text: &str) -> ! {
     raise("GX0005", "panic: ", text.to_string());
 }
 
@@ -477,6 +529,9 @@ pub struct DeferredFault {
     pub code: String,
     /// The report's prefix (`panic: ` for a panic).
     pub prefix: String,
+    /// The code of a `process::exit` the domain held, which ends the program
+    /// rather than reporting a fault.
+    pub exit: Option<i32>,
 }
 
 /// Holds this thread's faults for a caller to re-raise, for the guard's life.
@@ -500,6 +555,15 @@ impl Drop for DeferredFaults {
 /// stack this thread recorded for it.
 #[must_use]
 pub fn take_deferred_fault(payload: &(dyn std::any::Any + Send)) -> Option<DeferredFault> {
+    if let Some(GosExit(code)) = payload.downcast_ref::<GosExit>() {
+        return Some(DeferredFault {
+            text: String::new(),
+            trace: String::new(),
+            code: String::new(),
+            prefix: String::new(),
+            exit: Some(*code),
+        });
+    }
     let text = with_unwind_notes(&payload.downcast_ref::<GosPanic>()?.0);
     let trace = DEFERRED_TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()));
     let (code, prefix) = DEFERRED_KIND.with(|k| std::mem::take(&mut *k.borrow_mut()));
@@ -513,12 +577,16 @@ pub fn take_deferred_fault(payload: &(dyn std::any::Any + Send)) -> Option<Defer
         trace,
         code,
         prefix,
+        exit: None,
     })
 }
 
 /// Raises a fault a deferred domain held, as though it had been raised here,
 /// reporting the call stack it was first raised with.
 pub fn reraise_deferred_fault(fault: &DeferredFault) -> ! {
+    if let Some(code) = fault.exit {
+        gos_rt_exit(code);
+    }
     raise_with_trace(
         &fault.code,
         &fault.prefix,
@@ -755,6 +823,22 @@ pub(crate) fn fatal_program_fault(code: &str, prefix: &str, text: &str, with_tra
     std::process::exit(101);
 }
 
+/// Ends the program for a fault raised where it cannot unwind, such as a
+/// cleanup running at a value's release: an exit ends the process with its
+/// code, and a panic is reported as a fault on `main`'s thread is.
+pub(crate) fn end_for_unreleasable_fault(payload: &(dyn std::any::Any + Send)) -> ! {
+    if let Some(GosExit(code)) = payload.downcast_ref::<GosExit>() {
+        exit_now(*code);
+    }
+    if let Some(fault) = take_deferred_fault(payload) {
+        fatal_program_fault(&fault.code, &fault.prefix, &fault.text, false);
+    }
+    let text = payload
+        .downcast_ref::<GosPanic>()
+        .map_or_else(|| "panic".to_string(), |panic| panic.0.clone());
+    fatal_program_fault("GX0005", "panic: ", &text, false)
+}
+
 /// Pushes a call-stack frame on entry to a Gossamer function.
 /// Codegen prologues emit one call per function entry; the
 /// `function`, `file`, `line`, and `column` identify the frame for panic
@@ -877,20 +961,33 @@ pub unsafe extern "C-unwind" fn gos_rt_panic_check(
 // Exit
 // ---------------------------------------------------------------
 
+/// `process::exit(code)`: unwinds the calling goroutine, running the
+/// deferred expressions of every frame it leaves, then ends the process
+/// with `code`. Where no root catches the unwind (a thread the runtime
+/// spawned for one unit of work), the process ends at once.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_exit(code: i32) -> ! {
-    // signal the netpoller thread to drain its
-    // current `poll()` cycle before `std::process::exit` kills it.
-    // Without this, in-flight TCP send buffers were terminated by
-    // RST (process death) instead of FIN (graceful close). The
-    // poller checks the flag at the top of each tick (1 ms ceiling).
+pub extern "C-unwind" fn gos_rt_exit(code: i32) -> ! {
+    let root_catches = DEFERRED_FAULTS.with(std::cell::Cell::get)
+        || gossamer_coro::in_goroutine()
+        || (MAIN_UNWINDS.with(std::cell::Cell::get) && !faults_are_isolated());
+    if root_catches {
+        install_silent_gos_hook();
+        gossamer_coro::install_exit_handler(exit_now);
+        std::panic::panic_any(GosExit(code));
+    }
+    exit_now(code)
+}
+
+/// Ends the process with `code` once an exit has unwound to its root: the
+/// exit hooks run, buffered output is written, and the netpoller drains.
+pub fn exit_now(code: i32) -> ! {
+    super::guard::run_cleanups();
     crate::c_abi::exit_hooks::run_exit_hooks();
+    // The netpoller drains its current poll cycle first, so in-flight TCP
+    // sends close with FIN rather than the RST of a process ending.
     crate::sched_global::request_shutdown();
-    // Drain the runtime's line-buffered stdout cache before
-    // process exit. Without the flush, `println!("...")` followed
-    // by `os::exit(N)` produces no output - `std::process::exit`
-    // skips the C++/atexit handlers that would normally drain
-    // stdio.
+    // `std::process::exit` runs no atexit handlers, so the runtime's
+    // buffered stdout is written here.
     gos_rt_flush_stdout();
     crate::c_abi::rc::report_live_at_exit();
 

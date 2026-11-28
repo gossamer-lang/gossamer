@@ -901,7 +901,7 @@ pub unsafe extern "C" fn gos_rt_fs_metadata_raw(path: *const c_char) -> i128 {
     })
 }
 
-/// `exec::run(prog, args) -> Result<Output, errors::Error>`.
+/// `process::run(prog, args) -> Result<Output, errors::Error>`.
 ///
 /// Spawns `prog` with `args` (a `Vec<String>` whose backing storage
 /// is a tight array of `*const c_char`), captures stdout/stderr,
@@ -939,7 +939,7 @@ pub unsafe extern "C" fn gos_rt_exec_run_raw(prog: *const c_char, args: *mut Gos
         // (C-ABI contract), which `exec_run_with` accepts with no directory or environment.
         unsafe {
             exec_run_with(
-                "exec::run",
+                "process::run",
                 prog,
                 args,
                 std::ptr::null(),

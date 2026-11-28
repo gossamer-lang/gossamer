@@ -502,7 +502,8 @@ pub(super) fn lower_place_read(
     // address-backed aggregate. Its consumers (`gos_rt_result_disc` /
     // `_payload`, stores, call args) take the packed value, so load the
     // 16-byte carrier rather than returning the field's address.
-    if is_carrier_ty(tcx, leaf_ty_mir) {
+    // A 128-bit integer is the same two words held by value.
+    if is_carrier_ty(tcx, leaf_ty_mir) || tcx.is_wide_int(leaf_ty_mir) {
         return Ok(builder
             .ins()
             .load(types::I128, MemFlagsData::new(), addr, 0));

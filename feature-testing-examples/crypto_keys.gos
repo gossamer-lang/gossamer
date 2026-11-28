@@ -1,0 +1,86 @@
+// SHA-384, the HMAC family with constant-time checks, P-256 and P-384 ECDSA
+// in DER and fixed `r || s` form, RSA key generation, X25519 / P-256 / P-384
+// key agreement, and ML-KEM encapsulation, the same on every tier.
+use std::crypto::{ecdh, ecdsa, hmac, insecure, kdf, mlkem, rsa, sha384}
+use std::encoding::hex
+
+fn main() {
+    println(f"sha384: {sha384::hex("abc".bytes())}")
+    let key = "key".bytes()
+    let msg = "The quick brown fox jumps over the lazy dog".bytes()
+    println(f"hmac-sha384: {hmac::sha384_hex(key, msg)}")
+    println(f"hmac-sha3-256: {hmac::sha3_256_hex(key, msg)}")
+    println(f"hmac-sha1: {insecure::hmac_sha1_hex(key, msg)}")
+    let tag = hmac::sha512_mac(key, msg)
+    println(f"verify: {hmac::verify_sha512(key, msg, tag)} {hmac::verify_sha512(key, "other".bytes(), tag)} {hmac::verify_sha384(key, msg, tag)}")
+    println(f"verify sha1: {insecure::verify_hmac_sha1(key, msg, insecure::hmac_sha1(key, msg))}")
+    println(f"hkdf-sha384: {hex::encode(kdf::hkdf_sha384("ikm".bytes(), "salt".bytes(), "info".bytes(), 16).unwrap())}")
+
+    for curve in #["P-256", "P-384"] {
+        let secret, public = if curve == "P-256" { ecdsa::keypair_pem().unwrap() } else { ecdsa::p384_keypair_pem().unwrap() }
+        let der = if curve == "P-256" { ecdsa::sign_pem(secret, msg).unwrap() } else { ecdsa::p384_sign_pem(secret, msg).unwrap() }
+        let fixed = if curve == "P-256" { ecdsa::sign_fixed_pem(secret, msg).unwrap() } else { ecdsa::p384_sign_fixed_pem(secret, msg).unwrap() }
+        let converted = if curve == "P-256" { ecdsa::der_to_fixed(der).unwrap() } else { ecdsa::p384_der_to_fixed(der).unwrap() }
+        let back = if curve == "P-256" { ecdsa::fixed_to_der(fixed).unwrap() } else { ecdsa::p384_fixed_to_der(fixed).unwrap() }
+        let ok = if curve == "P-256" { ecdsa::verify_fixed_pem(public, msg, fixed).is_ok() } else { ecdsa::p384_verify_fixed_pem(public, msg, fixed).is_ok() }
+        let der_ok = if curve == "P-256" { ecdsa::verify_pem(public, msg, der).is_ok() } else { ecdsa::p384_verify_pem(public, msg, der).is_ok() }
+        let forged = if curve == "P-256" { ecdsa::verify_fixed_pem(public, "x".bytes(), fixed).is_ok() } else { ecdsa::p384_verify_fixed_pem(public, "x".bytes(), fixed).is_ok() }
+        println(f"{curve}: fixed {fixed.len()} bytes, converts {converted == fixed} {back == der}, verifies {ok} {der_ok}, forged {forged}")
+    }
+    match ecdsa::fixed_to_der(#[1u8, 2, 3]) {
+        Ok(_) => println("short fixed accepted")
+        Err(e) => println(f"short fixed: {e}")
+    }
+
+    let rsa_secret, rsa_public = rsa::generate(bits: 2048).unwrap()
+    let signature = rsa::sign_pss_sha256(rsa_secret, msg).unwrap()
+    println(f"rsa: {rsa_secret.starts_with("-----BEGIN PRIVATE KEY-----")} {rsa::verify_pss_sha256(rsa_public, msg, signature).is_ok()} {signature.len()}")
+    match rsa::generate(bits: 1024) {
+        Ok(_) => println("1024 accepted")
+        Err(e) => println(f"1024: {e}")
+    }
+
+    for scheme in #["x25519", "p256", "p384"] {
+        let a_secret, a_public = match scheme {
+            "x25519" => ecdh::x25519_keypair().unwrap()
+            "p256" => ecdh::p256_keypair().unwrap()
+            _ => ecdh::p384_keypair().unwrap()
+        }
+        let b_secret, b_public = match scheme {
+            "x25519" => ecdh::x25519_keypair().unwrap()
+            "p256" => ecdh::p256_keypair().unwrap()
+            _ => ecdh::p384_keypair().unwrap()
+        }
+        let ab = match scheme {
+            "x25519" => ecdh::x25519(a_secret, b_public).unwrap()
+            "p256" => ecdh::p256(a_secret, b_public).unwrap()
+            _ => ecdh::p384(a_secret, b_public).unwrap()
+        }
+        let ba = match scheme {
+            "x25519" => ecdh::x25519(b_secret, a_public).unwrap()
+            "p256" => ecdh::p256(b_secret, a_public).unwrap()
+            _ => ecdh::p384(b_secret, a_public).unwrap()
+        }
+        let k1 = ab.hkdf_sha256("salt".bytes(), "app".bytes(), 32).unwrap()
+        let k2 = ba.hkdf_sha256("salt".bytes(), "app".bytes(), 32).unwrap()
+        println(f"{scheme}: public {a_public.len()} bytes, agree {k1 == k2}, raw {ab.raw_bytes().len()} bytes, shows {ab}")
+    }
+    let x_secret, _ = ecdh::x25519_keypair().unwrap()
+    match ecdh::x25519(x_secret, #[0u8; 32]) {
+        Ok(_) => println("zero peer accepted")
+        Err(e) => println(f"zero peer: {e}")
+    }
+
+    for set in #[768, 1024] {
+        let dk, ek = if set == 768 { mlkem::keypair_768().unwrap() } else { mlkem::keypair_1024().unwrap() }
+        let ciphertext, sent = if set == 768 { mlkem::encapsulate_768(ek).unwrap() } else { mlkem::encapsulate_1024(ek).unwrap() }
+        let received = if set == 768 { mlkem::decapsulate_768(dk, ciphertext).unwrap() } else { mlkem::decapsulate_1024(dk, ciphertext).unwrap() }
+        let k_sent = sent.hkdf_sha384(#[], "kem".bytes(), 32).unwrap()
+        let k_received = received.hkdf_sha384(#[], "kem".bytes(), 32).unwrap()
+        println(f"ML-KEM-{set}: dk {dk.len()}, ek {ek.len()}, ciphertext {ciphertext.len()}, agree {k_sent == k_received}")
+    }
+    match mlkem::encapsulate_768(#[1u8, 2]) {
+        Ok(_) => println("short key accepted")
+        Err(e) => println(f"short key: {e}")
+    }
+}

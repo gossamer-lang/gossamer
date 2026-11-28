@@ -55,6 +55,8 @@ pub(super) const STRING_METHODS: &[&str] = &[
     "to_uppercase",
     "to_title",
     "to_i64",
+    "to_i128",
+    "to_u128",
     "to_f64",
     "to_bool",
     "repeat",
@@ -100,12 +102,7 @@ pub(super) const VEC_ONLY_SEQUENCE_METHODS: &[&str] = &[
     "reserve",
     "reserve_exact",
     "capacity",
-    "append",
     "resize",
-    "resize_with",
-    "split_off",
-    "drain",
-    "shrink_to_fit",
     "dedup",
 ];
 

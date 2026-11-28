@@ -672,6 +672,78 @@ fn main() {
     assert!(stderr.contains("GT0043"), "expected GT0043, got: {stderr}");
 }
 
+#[test]
+fn a_grouped_std_import_binds_its_modules_beside_toolchain_imports() {
+    // `use std::process::Command` brings in wrapper code whose own imports of
+    // `errors`, `fs`, and `process` the toolchain adds; a module's grouped
+    // import of those modules is the program's own and still binds them.
+    let grouped = r#"
+mod services {
+    use std::{env, errors, fs, path, process}
+
+    pub fn tag() -> String { f"{env::temp_dir()}-{process::id()}-{apps::launcher()}" }
+
+    pub fn write(file: String) -> Result<(), errors::Error> {
+        fs::create_dir_all(path::join(file, "x"))?
+        Ok(())
+    }
+
+    pub mod apps {
+        use std::process::Command
+
+        pub fn launcher() -> String {
+            let _c = Command::new("true")
+            "ok"
+        }
+    }
+}
+
+fn main() { println(services::tag()) }
+"#;
+    let (ok, _stdout, stderr) = run_check("grouped_std_import", grouped);
+    assert!(ok, "a grouped import must bind its modules: {stderr}");
+
+    // A module only the toolchain's import binds stays out of the program's
+    // reach.
+    let unimported = r#"
+use std::process::Command
+
+fn main() {
+    let _c = Command::new("true")
+    println(fs::exists("/"))
+}
+"#;
+    let (ok, _stdout, stderr) = run_check("toolchain_import_only", unimported);
+    assert!(!ok, "a module the program never imported must be refused");
+    assert!(stderr.contains("GR0001"), "expected GR0001, got: {stderr}");
+}
+
+#[test]
+fn struct_literal_shorthand_is_resolved_and_checked() {
+    // `Point { x }` takes the binding named `x`, checked against the field's
+    // type, and is refused when no such binding is in scope.
+    let mismatched = r#"
+struct Plain { id: i64 }
+fn main() {
+    let id = "text"
+    let p = Plain { id }
+    println(p.id + 1)
+}
+"#;
+    let (ok, _stdout, stderr) = run_check("shorthand_type", mismatched);
+    assert!(!ok, "a shorthand field of the wrong type must be refused");
+    assert!(stderr.contains("GT0001"), "expected GT0001, got: {stderr}");
+
+    let unbound = r"
+struct Plain { id: i64 }
+fn make() -> Plain { Plain { id } }
+fn main() { println(make().id) }
+";
+    let (ok, _stdout, stderr) = run_check("shorthand_unbound", unbound);
+    assert!(!ok, "a shorthand field naming no binding must be refused");
+    assert!(stderr.contains("GR0001"), "expected GR0001, got: {stderr}");
+}
+
 // ---------- labelled arguments: the spelling SKILL.md and SPEC.md teach ----------
 
 /// Every `volume(..)` call the text spells, in order of appearance.

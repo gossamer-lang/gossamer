@@ -17,9 +17,9 @@ fn main() {
 
     let wide = "héllo wörld ✓"
     let mut picked = String::new()
-    picked.push_str(wide.substring(0, 2))
+    picked.push_str(wide.substring(0, 3))
     picked.push_str(wide.substring(1, 3))
-    picked += wide.substring(12, 16)
+    picked += wide.substring(12, 17)
     println("wide [{}] {}", picked, picked.byte_len())
 
     let mut edges = String::new()

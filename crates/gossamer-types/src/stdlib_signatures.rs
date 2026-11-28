@@ -223,6 +223,21 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::term",
+        name: "read_password",
+        signature: "fn read_password<D: os::fd::Descriptor>(prompt: String = \"\", fd: D = term::STDIN) -> Result<String, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::net::mail",
+        name: "parse_address",
+        signature: "fn parse_address(text: String) -> Result<mail::Address, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::net::mail",
+        name: "parse_address_list",
+        signature: "fn parse_address_list(text: String) -> Result<Vec<mail::Address>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::term",
         name: "resized",
         signature: "fn resized<D: os::fd::Descriptor>(fd: D = term::STDOUT) -> bool",
     },
@@ -412,6 +427,91 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         signature: "fn chacha20_poly1305_seal(key: Vec<u8>, nonce: Vec<u8>, data: Vec<u8>, aad: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
     },
     StdFunctionSignature {
+        module_path: "std::crypto::sha3_256",
+        name: "digest",
+        signature: "fn digest(data: Vec<u8>) -> Vec<u8>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::sha3_256",
+        name: "hex",
+        signature: "fn hex(data: Vec<u8>) -> String",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::sha3_512",
+        name: "digest",
+        signature: "fn digest(data: Vec<u8>) -> Vec<u8>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::sha3_512",
+        name: "hex",
+        signature: "fn hex(data: Vec<u8>) -> String",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::kdf",
+        name: "hkdf_sha256",
+        signature: "fn hkdf_sha256(ikm: Vec<u8>, salt: Vec<u8>, info: Vec<u8>, length: i64) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::kdf",
+        name: "hkdf_sha512",
+        signature: "fn hkdf_sha512(ikm: Vec<u8>, salt: Vec<u8>, info: Vec<u8>, length: i64) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::rsa",
+        name: "sign_pkcs1_sha256",
+        signature: "fn sign_pkcs1_sha256(secret_pem: String, message: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::rsa",
+        name: "encrypt_oaep_sha256",
+        signature: "fn encrypt_oaep_sha256(public_pem: String, plaintext: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::rsa",
+        name: "decrypt_oaep_sha256",
+        signature: "fn decrypt_oaep_sha256(secret_pem: String, ciphertext: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::rsa",
+        name: "sign_pss_sha256",
+        signature: "fn sign_pss_sha256(secret_pem: String, message: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::rsa",
+        name: "verify_pkcs1_sha256",
+        signature: "fn verify_pkcs1_sha256(public_pem: String, message: Vec<u8>, signature: Vec<u8>) -> Result<(), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::rsa",
+        name: "verify_pss_sha256",
+        signature: "fn verify_pss_sha256(public_pem: String, message: Vec<u8>, signature: Vec<u8>) -> Result<(), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::rsa",
+        name: "public_key_pem",
+        signature: "fn public_key_pem(secret_pem: String) -> Result<String, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::x509",
+        name: "self_signed",
+        signature: "fn self_signed(common_name: String, dns_names: Vec<String>, days: i64 = 365, is_ca: bool = false, client: bool = false, extensions: Vec<x509::Extension> = #[]) -> Result<(String, String), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::x509",
+        name: "issue",
+        signature: "fn issue(ca_cert_pem: String, ca_key_pem: String, common_name: String, dns_names: Vec<String>, days: i64 = 365, is_ca: bool = false, client: bool = false, extensions: Vec<x509::Extension> = #[]) -> Result<(String, String), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::x509",
+        name: "csr",
+        signature: "fn csr(common_name: String, dns_names: Vec<String>) -> Result<(String, String), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::x509",
+        name: "sign_csr",
+        signature: "fn sign_csr(csr_pem: String, ca_cert_pem: String, ca_key_pem: String, days: i64 = 365, client: bool = false) -> Result<String, errors::Error>",
+    },
+    StdFunctionSignature {
         module_path: "std::crypto::blake3",
         name: "digest",
         signature: "fn digest(data: Vec<u8>) -> Vec<u8>",
@@ -557,64 +657,259 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         signature: "fn verify_server_certificate_with_crls(chain_pem: String, roots_pem: String, hostname: String, crl_pem: String) -> Result<(), errors::Error>",
     },
     StdFunctionSignature {
-        module_path: "std::image",
-        name: "new",
-        signature: "fn new(width: i64, height: i64) -> i64",
+        module_path: "std::crypto::sha384",
+        name: "digest",
+        signature: "fn digest(data: Vec<u8>) -> Vec<u8>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::sha384",
+        name: "hex",
+        signature: "fn hex(data: Vec<u8>) -> String",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::hmac",
+        name: "sha384_mac",
+        signature: "fn sha384_mac(key: Vec<u8>, message: Vec<u8>) -> Vec<u8>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::hmac",
+        name: "sha384_hex",
+        signature: "fn sha384_hex(key: Vec<u8>, message: Vec<u8>) -> String",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::hmac",
+        name: "sha512_mac",
+        signature: "fn sha512_mac(key: Vec<u8>, message: Vec<u8>) -> Vec<u8>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::hmac",
+        name: "sha512_hex",
+        signature: "fn sha512_hex(key: Vec<u8>, message: Vec<u8>) -> String",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::hmac",
+        name: "sha3_256_mac",
+        signature: "fn sha3_256_mac(key: Vec<u8>, message: Vec<u8>) -> Vec<u8>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::hmac",
+        name: "sha3_256_hex",
+        signature: "fn sha3_256_hex(key: Vec<u8>, message: Vec<u8>) -> String",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::hmac",
+        name: "sha3_512_mac",
+        signature: "fn sha3_512_mac(key: Vec<u8>, message: Vec<u8>) -> Vec<u8>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::hmac",
+        name: "sha3_512_hex",
+        signature: "fn sha3_512_hex(key: Vec<u8>, message: Vec<u8>) -> String",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::hmac",
+        name: "verify_sha256",
+        signature: "fn verify_sha256(key: Vec<u8>, message: Vec<u8>, tag: Vec<u8>) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::hmac",
+        name: "verify_sha384",
+        signature: "fn verify_sha384(key: Vec<u8>, message: Vec<u8>, tag: Vec<u8>) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::hmac",
+        name: "verify_sha512",
+        signature: "fn verify_sha512(key: Vec<u8>, message: Vec<u8>, tag: Vec<u8>) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::hmac",
+        name: "verify_sha3_256",
+        signature: "fn verify_sha3_256(key: Vec<u8>, message: Vec<u8>, tag: Vec<u8>) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::hmac",
+        name: "verify_sha3_512",
+        signature: "fn verify_sha3_512(key: Vec<u8>, message: Vec<u8>, tag: Vec<u8>) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::insecure",
+        name: "hmac_sha1",
+        signature: "fn hmac_sha1(key: Vec<u8>, message: Vec<u8>) -> Vec<u8>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::insecure",
+        name: "hmac_sha1_hex",
+        signature: "fn hmac_sha1_hex(key: Vec<u8>, message: Vec<u8>) -> String",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::insecure",
+        name: "verify_hmac_sha1",
+        signature: "fn verify_hmac_sha1(key: Vec<u8>, message: Vec<u8>, tag: Vec<u8>) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdsa",
+        name: "sign_fixed_pem",
+        signature: "fn sign_fixed_pem(secret_pem: String, message: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdsa",
+        name: "verify_fixed_pem",
+        signature: "fn verify_fixed_pem(public_pem: String, message: Vec<u8>, signature: Vec<u8>) -> Result<(), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdsa",
+        name: "der_to_fixed",
+        signature: "fn der_to_fixed(signature: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdsa",
+        name: "fixed_to_der",
+        signature: "fn fixed_to_der(signature: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdsa",
+        name: "p384_keypair_pem",
+        signature: "fn p384_keypair_pem() -> Result<(String, String), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdsa",
+        name: "p384_sign_pem",
+        signature: "fn p384_sign_pem(secret_pem: String, message: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdsa",
+        name: "p384_verify_pem",
+        signature: "fn p384_verify_pem(public_pem: String, message: Vec<u8>, signature: Vec<u8>) -> Result<(), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdsa",
+        name: "p384_sign_fixed_pem",
+        signature: "fn p384_sign_fixed_pem(secret_pem: String, message: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdsa",
+        name: "p384_verify_fixed_pem",
+        signature: "fn p384_verify_fixed_pem(public_pem: String, message: Vec<u8>, signature: Vec<u8>) -> Result<(), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdsa",
+        name: "p384_der_to_fixed",
+        signature: "fn p384_der_to_fixed(signature: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdsa",
+        name: "p384_fixed_to_der",
+        signature: "fn p384_fixed_to_der(signature: Vec<u8>) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::rsa",
+        name: "generate",
+        signature: "fn generate(bits: i64 = 3072) -> Result<(String, String), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::kdf",
+        name: "hkdf_sha384",
+        signature: "fn hkdf_sha384(ikm: Vec<u8>, salt: Vec<u8>, info: Vec<u8>, length: i64) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdh",
+        name: "x25519_keypair",
+        signature: "fn x25519_keypair() -> Result<(Vec<u8>, Vec<u8>), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdh",
+        name: "x25519",
+        signature: "fn x25519(secret: Vec<u8>, peer_public: Vec<u8>) -> Result<ecdh::SharedSecret, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdh",
+        name: "p256_keypair",
+        signature: "fn p256_keypair() -> Result<(Vec<u8>, Vec<u8>), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdh",
+        name: "p256",
+        signature: "fn p256(secret: Vec<u8>, peer_public: Vec<u8>) -> Result<ecdh::SharedSecret, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdh",
+        name: "p384_keypair",
+        signature: "fn p384_keypair() -> Result<(Vec<u8>, Vec<u8>), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::ecdh",
+        name: "p384",
+        signature: "fn p384(secret: Vec<u8>, peer_public: Vec<u8>) -> Result<ecdh::SharedSecret, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::mlkem",
+        name: "keypair_768",
+        signature: "fn keypair_768() -> Result<(Vec<u8>, Vec<u8>), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::mlkem",
+        name: "encapsulate_768",
+        signature: "fn encapsulate_768(encapsulation_key: Vec<u8>) -> Result<(Vec<u8>, mlkem::SharedSecret), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::mlkem",
+        name: "decapsulate_768",
+        signature: "fn decapsulate_768(decapsulation_key: Vec<u8>, ciphertext: Vec<u8>) -> Result<mlkem::SharedSecret, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::mlkem",
+        name: "keypair_1024",
+        signature: "fn keypair_1024() -> Result<(Vec<u8>, Vec<u8>), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::mlkem",
+        name: "encapsulate_1024",
+        signature: "fn encapsulate_1024(encapsulation_key: Vec<u8>) -> Result<(Vec<u8>, mlkem::SharedSecret), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::mlkem",
+        name: "decapsulate_1024",
+        signature: "fn decapsulate_1024(decapsulation_key: Vec<u8>, ciphertext: Vec<u8>) -> Result<mlkem::SharedSecret, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::x509",
+        name: "extensions",
+        signature: "fn extensions(cert_pem: String) -> Result<Vec<x509::Extension>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::x509",
+        name: "private_key_pkcs8",
+        signature: "fn private_key_pkcs8(pem: String) -> Result<String, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::x509",
+        name: "private_key_der",
+        signature: "fn private_key_der(pem: String) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::x509",
+        name: "decrypt_private_key",
+        signature: "fn decrypt_private_key(pem: String, password: String) -> Result<String, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::x509",
+        name: "public_key_spki",
+        signature: "fn public_key_spki(pem: String) -> Result<String, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::crypto::x509",
+        name: "public_key_der",
+        signature: "fn public_key_der(pem: String) -> Result<Vec<u8>, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::image",
-        name: "filled",
-        signature: "fn filled(width: i64, height: i64, rgba: i64) -> i64",
+        name: "decode",
+        signature: "fn decode(bytes: Vec<u8>) -> Result<image::Image, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::image",
-        name: "decode_base64",
-        signature: "fn decode_base64(encoded: String) -> i64",
-    },
-    StdFunctionSignature {
-        module_path: "std::image",
-        name: "width",
-        signature: "fn width(image: i64) -> i64",
-    },
-    StdFunctionSignature {
-        module_path: "std::image",
-        name: "height",
-        signature: "fn height(image: i64) -> i64",
-    },
-    StdFunctionSignature {
-        module_path: "std::image",
-        name: "pixel",
-        signature: "fn pixel(image: i64, x: i64, y: i64) -> i64",
-    },
-    StdFunctionSignature {
-        module_path: "std::image",
-        name: "set_pixel",
-        signature: "fn set_pixel(image: i64, x: i64, y: i64, rgba: i64) -> bool",
-    },
-    StdFunctionSignature {
-        module_path: "std::image",
-        name: "from_rgba_bytes",
-        signature: "fn from_rgba_bytes(width: i64, height: i64, bytes: [u8]) -> i64",
-    },
-    StdFunctionSignature {
-        module_path: "std::image",
-        name: "release",
-        signature: "fn release(image: i64) -> bool",
-    },
-    StdFunctionSignature {
-        module_path: "std::image",
-        name: "to_rgba_bytes",
-        signature: "fn to_rgba_bytes(image: i64) -> Vec<u8>",
-    },
-    StdFunctionSignature {
-        module_path: "std::image",
-        name: "encode_png_base64",
-        signature: "fn encode_png_base64(image: i64) -> String",
-    },
-    StdFunctionSignature {
-        module_path: "std::image",
-        name: "encode_jpeg_base64",
-        signature: "fn encode_jpeg_base64(image: i64, quality: i64) -> String",
+        name: "set_max_pixels",
+        signature: "fn set_max_pixels(limit: i64) -> Result<(), errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::database::sql",
@@ -938,6 +1233,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::encoding::json",
+        name: "__parse_with",
+        signature: "fn __parse_with(source: String, duplicate_keys: i64) -> Result<json::Value, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::json",
         name: "set",
         signature: "fn set(value: json::Value, key: String, next: json::Value) -> json::Value",
     },
@@ -1085,6 +1385,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         module_path: "std::encoding::yaml",
         name: "parse",
         signature: "fn parse(source: String) -> Result<json::Value, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::yaml",
+        name: "__parse_with",
+        signature: "fn __parse_with(source: String, duplicate_keys: i64) -> Result<json::Value, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::encoding::yaml",
@@ -1274,7 +1579,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::fs",
         name: "temp_file",
-        signature: "fn temp_file(prefix: String) -> Result<(fs::File, String), io::Error>",
+        signature: "fn temp_file(prefix: String, parent: Option<String> = None) -> Result<(fs::File, String), io::Error>",
     },
     StdFunctionSignature {
         module_path: "std::fs",
@@ -1345,6 +1650,41 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         module_path: "std::fs",
         name: "rename",
         signature: "fn rename(src: String, dst: String) -> Result<(), io::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::fs",
+        name: "symlink",
+        signature: "fn symlink(target: String, link: String) -> Result<(), io::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::fs",
+        name: "hard_link",
+        signature: "fn hard_link(original: String, link: String) -> Result<(), io::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::fs",
+        name: "read_link",
+        signature: "fn read_link(path: String) -> Result<String, io::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::fs",
+        name: "copy_dir",
+        signature: "fn copy_dir(src: String, dst: String) -> Result<i64, io::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::fs",
+        name: "move",
+        signature: "fn move(src: String, dst: String) -> Result<(), io::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::fs",
+        name: "chown",
+        signature: "fn chown(path: String, uid: Option<i64> = None, gid: Option<i64> = None) -> Result<(), io::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::fs",
+        name: "disk_space",
+        signature: "fn disk_space(path: String) -> Result<fs::DiskSpace, io::Error>",
     },
     StdFunctionSignature {
         module_path: "std::fs",
@@ -1438,8 +1778,13 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::html::template",
-        name: "render_json",
-        signature: "fn render_json(template: String, json_text: String) -> Result<String, errors::Error>",
+        name: "render",
+        signature: "fn render<T>(source: String, data: T) -> Result<String, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::text::template",
+        name: "render",
+        signature: "fn render<T>(source: String, data: T) -> Result<String, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::http",
@@ -1498,6 +1843,16 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::http",
+        name: "serve_tls_config",
+        signature: "fn serve_tls_config(addr: String, config: tls::ServerConfig, handler: http::Handler) -> Result<(), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::http",
+        name: "__serve_tls_live",
+        signature: "fn __serve_tls_live(addr: String, config_id: i64, handler: http::Handler) -> Result<(), errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::http",
         name: "stream",
         signature: "fn stream(method: String, url: String, body: String, headers: Vec<(String, String)>) -> Result<http::ResponseStream, errors::Error>",
     },
@@ -1520,36 +1875,6 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         module_path: "std::http::cookie",
         name: "serialize",
         signature: "fn serialize(name: String, value: String) -> String",
-    },
-    StdFunctionSignature {
-        module_path: "std::http::csrf",
-        name: "attach_cookie",
-        signature: "fn attach_cookie(request: http::Request, secret: String) -> Result<http::Request, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::http::csrf",
-        name: "check",
-        signature: "fn check(request: http::Request, secret: String) -> Result<http::Request, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::http::csrf",
-        name: "extract_token",
-        signature: "fn extract_token(request: http::Request, secret: String) -> Result<http::Request, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::http::csrf",
-        name: "issue_token",
-        signature: "fn issue_token(secret: Vec<u8>) -> Result<String, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::http::csrf",
-        name: "origin_allowed",
-        signature: "fn origin_allowed(request: http::Request, secret: String) -> Result<http::Request, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::http::csrf",
-        name: "verify_token",
-        signature: "fn verify_token(cookie_token: String, supplied_token: String, secret: Vec<u8>) -> Result<(), errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::http::middleware",
@@ -1622,21 +1947,6 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         signature: "fn new() -> http::router::Router",
     },
     StdFunctionSignature {
-        module_path: "std::http::session",
-        name: "sign",
-        signature: "fn sign(value: String, secret: Vec<u8>) -> String",
-    },
-    StdFunctionSignature {
-        module_path: "std::http::session",
-        name: "verify",
-        signature: "fn verify(value: String, secret: Vec<u8>) -> Result<String, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::http::session",
-        name: "with_session",
-        signature: "fn with_session(request: http::Request, secret: String) -> Result<http::Request, errors::Error>",
-    },
-    StdFunctionSignature {
         module_path: "std::http::sse",
         name: "encode_comment",
         signature: "fn encode_comment(comment: String) -> String",
@@ -1705,11 +2015,6 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         module_path: "std::http::websocket",
         name: "serve",
         signature: "fn serve<H>(addr: String, handler: H) -> Result<(), errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::http_h3",
-        name: "serve",
-        signature: "fn serve(addr: String, cert_path: String, key_path: String, handler: http_h3::Handler) -> Result<(), errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::io",
@@ -1985,46 +2290,6 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         module_path: "std::iter",
         name: "zip",
         signature: "fn zip<A, B>(left: Vec<A>, right: Vec<B>) -> Vec<(A, B)>",
-    },
-    StdFunctionSignature {
-        module_path: "std::jwt",
-        name: "sign_eddsa",
-        signature: "fn sign_eddsa(claims_json: String, signing_key_pem: String) -> Result<String, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::jwt",
-        name: "sign_es256",
-        signature: "fn sign_es256(claims_json: String, signing_key_pem: String) -> Result<String, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::jwt",
-        name: "sign_hs",
-        signature: "fn sign_hs(alg: String, claims_json: String, key: Vec<u8>) -> Result<String, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::jwt",
-        name: "header",
-        signature: "fn header(token: String) -> Result<String, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::jwt",
-        name: "verify",
-        signature: "fn verify(token: String, alg: String, key: String, leeway_secs: i64, issuer: String, audience: String) -> Result<String, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::jwt",
-        name: "verify_eddsa",
-        signature: "fn verify_eddsa(token: String, verifying_key_pem: String, leeway_secs: i64) -> Result<String, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::jwt",
-        name: "verify_es256",
-        signature: "fn verify_es256(token: String, verifying_key_pem: String, leeway_secs: i64) -> Result<String, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::jwt",
-        name: "verify_hs",
-        signature: "fn verify_hs(token: String, alg: String, key: Vec<u8>, leeway_secs: i64) -> Result<String, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::math",
@@ -2463,6 +2728,31 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::net",
+        name: "lookup_mx",
+        signature: "fn lookup_mx(name: String, server: Option<String> = None) -> Result<Vec<net::Mx>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::net",
+        name: "lookup_txt",
+        signature: "fn lookup_txt(name: String, server: Option<String> = None) -> Result<Vec<String>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::net",
+        name: "lookup_srv",
+        signature: "fn lookup_srv(name: String, server: Option<String> = None) -> Result<Vec<net::Srv>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::net",
+        name: "lookup_cname",
+        signature: "fn lookup_cname(name: String, server: Option<String> = None) -> Result<String, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::net",
+        name: "lookup_addr",
+        signature: "fn lookup_addr(ip: String, server: Option<String> = None) -> Result<Vec<String>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::net",
         name: "lookup",
         signature: "fn lookup(host: String) -> Result<Vec<String>, errors::Error>",
     },
@@ -2702,44 +2992,9 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         signature: "fn family() -> String",
     },
     StdFunctionSignature {
-        module_path: "std::os::exec",
-        name: "kill",
-        signature: "fn kill(pid: i64) -> bool",
-    },
-    StdFunctionSignature {
-        module_path: "std::os::exec",
-        name: "kill_group",
-        signature: "fn kill_group(pid: i64) -> bool",
-    },
-    StdFunctionSignature {
-        module_path: "std::os::exec",
-        name: "pipeline_run",
-        signature: "fn pipeline_run(commands: Vec<String>) -> Result<process::Output, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::os::exec",
-        name: "run",
-        signature: "fn run(program: String, args: Vec<String>) -> Result<process::Output, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::os::exec",
-        name: "signal",
-        signature: "fn signal(pid: i64, signum: i64) -> bool",
-    },
-    StdFunctionSignature {
-        module_path: "std::os::exec",
-        name: "spawn",
-        signature: "fn spawn(program: String, args: Vec<String>) -> Result<i64, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::os::exec",
-        name: "spawn_piped",
-        signature: "fn spawn_piped(program: String, args: Vec<String>) -> Result<process::Child, errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::os::exec",
-        name: "wait_timeout",
-        signature: "fn wait_timeout(pid: i64, ms: i64) -> i64",
+        module_path: "std::os",
+        name: "hostname",
+        signature: "fn hostname() -> Result<String, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::os::signal",
@@ -2997,16 +3252,6 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         signature: "fn glob(pattern: String) -> Result<Vec<String>, errors::Error>",
     },
     StdFunctionSignature {
-        module_path: "std::net::smtp",
-        name: "send",
-        signature: "fn send(addr: String, from: String, to: String, subject: String, body: String) -> Result<(), errors::Error>",
-    },
-    StdFunctionSignature {
-        module_path: "std::net::smtp",
-        name: "send_auth",
-        signature: "fn send_auth(addr: String, from: String, to: String, subject: String, body: String, username: String, password: String) -> Result<(), errors::Error>",
-    },
-    StdFunctionSignature {
         module_path: "std::sort",
         name: "sort_stable",
         signature: "fn sort_stable(xs: Vec<T>) -> Vec<T>",
@@ -3060,6 +3305,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         module_path: "std::process",
         name: "run",
         signature: "fn run(program: String, args: Vec<String>) -> Result<process::Output, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::process",
+        name: "exec",
+        signature: "fn exec(program: String, args: Vec<String>) -> Result<(), errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::process",
@@ -3638,6 +3888,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::strings",
+        name: "to_i128",
+        signature: "fn to_i128(text: String) -> Option<i128>",
+    },
+    StdFunctionSignature {
+        module_path: "std::strings",
         name: "to_i64",
         signature: "fn to_i64(text: String) -> Option<i64>",
     },
@@ -3650,6 +3905,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         module_path: "std::strings",
         name: "to_title",
         signature: "fn to_title(text: String) -> String",
+    },
+    StdFunctionSignature {
+        module_path: "std::strings",
+        name: "to_u128",
+        signature: "fn to_u128(text: String) -> Option<u128>",
     },
     StdFunctionSignature {
         module_path: "std::strings",
@@ -3695,6 +3955,141 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         module_path: "std::sync",
         name: "channel_unbounded",
         signature: "fn channel_unbounded<T>() -> sync::Channel<T>",
+    },
+    StdFunctionSignature {
+        module_path: "std::strings",
+        name: "shell_split",
+        signature: "fn shell_split(text: String) -> Result<Vec<String>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::strings",
+        name: "shell_quote",
+        signature: "fn shell_quote(word: String) -> String",
+    },
+    StdFunctionSignature {
+        module_path: "std::strings",
+        name: "shell_join",
+        signature: "fn shell_join(words: [String]) -> String",
+    },
+    StdFunctionSignature {
+        module_path: "std::math",
+        name: "mean",
+        signature: "fn mean(xs: [f64]) -> Option<f64>",
+    },
+    StdFunctionSignature {
+        module_path: "std::math",
+        name: "median",
+        signature: "fn median(xs: [f64]) -> Option<f64>",
+    },
+    StdFunctionSignature {
+        module_path: "std::math",
+        name: "variance",
+        signature: "fn variance(xs: [f64]) -> Option<f64>",
+    },
+    StdFunctionSignature {
+        module_path: "std::math",
+        name: "stdev",
+        signature: "fn stdev(xs: [f64]) -> Option<f64>",
+    },
+    StdFunctionSignature {
+        module_path: "std::math",
+        name: "pvariance",
+        signature: "fn pvariance(xs: [f64]) -> Option<f64>",
+    },
+    StdFunctionSignature {
+        module_path: "std::math",
+        name: "pstdev",
+        signature: "fn pstdev(xs: [f64]) -> Option<f64>",
+    },
+    StdFunctionSignature {
+        module_path: "std::math",
+        name: "quantiles",
+        signature: "fn quantiles(xs: [f64], n: i64 = 4) -> Option<Vec<f64>>",
+    },
+    StdFunctionSignature {
+        module_path: "std::math",
+        name: "erf",
+        signature: "fn erf(x: f64) -> f64",
+    },
+    StdFunctionSignature {
+        module_path: "std::math",
+        name: "erfc",
+        signature: "fn erfc(x: f64) -> f64",
+    },
+    StdFunctionSignature {
+        module_path: "std::math",
+        name: "gamma",
+        signature: "fn gamma(x: f64) -> f64",
+    },
+    StdFunctionSignature {
+        module_path: "std::math",
+        name: "lgamma",
+        signature: "fn lgamma(x: f64) -> f64",
+    },
+    StdFunctionSignature {
+        module_path: "std::math",
+        name: "factorial",
+        signature: "fn factorial(n: i64) -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::math",
+        name: "comb",
+        signature: "fn comb(n: i64, k: i64) -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::math",
+        name: "perm",
+        signature: "fn perm(n: i64, k: i64) -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::math::rand",
+        name: "range",
+        signature: "fn range(rng: rand::Rng, low: i64, high: i64) -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::math::rand",
+        name: "range_f64",
+        signature: "fn range_f64(rng: rand::Rng, low: f64, high: f64) -> f64",
+    },
+    StdFunctionSignature {
+        module_path: "std::math::rand",
+        name: "chance",
+        signature: "fn chance(rng: rand::Rng, p: f64) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::math::rand",
+        name: "choose",
+        signature: "fn choose<T>(rng: rand::Rng, xs: [T]) -> Option<T>",
+    },
+    StdFunctionSignature {
+        module_path: "std::math::rand",
+        name: "shuffle",
+        signature: "fn shuffle<T>(rng: rand::Rng, xs: &mut Vec<T>)",
+    },
+    StdFunctionSignature {
+        module_path: "std::math::rand",
+        name: "sample",
+        signature: "fn sample<T>(rng: rand::Rng, xs: [T], k: i64) -> Vec<T>",
+    },
+    StdFunctionSignature {
+        module_path: "std::math::rand",
+        name: "weighted",
+        signature: "fn weighted(rng: rand::Rng, weights: [f64]) -> Option<i64>",
+    },
+    StdFunctionSignature {
+        module_path: "std::math::rand",
+        name: "normal",
+        signature: "fn normal(rng: rand::Rng, mean: f64, stdev: f64) -> f64",
+    },
+    StdFunctionSignature {
+        module_path: "std::math::rand",
+        name: "exponential",
+        signature: "fn exponential(rng: rand::Rng, rate: f64) -> f64",
+    },
+    StdFunctionSignature {
+        module_path: "std::math::rand",
+        name: "from_os",
+        signature: "fn from_os() -> Result<rand::Rng, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::sync",
@@ -3755,6 +4150,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         module_path: "std::time",
         name: "format_in",
         signature: "fn format_in(layout: String, unix_ms: i64, location: time::Location) -> Result<String, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::time",
+        name: "parse",
+        signature: "fn parse(layout: String, text: String, location: Option<time::Location> = None) -> Result<time::Time, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::time",

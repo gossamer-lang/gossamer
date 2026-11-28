@@ -271,6 +271,11 @@ impl<'a> Builder<'a> {
             // bare-name dispatch later (single-arg shape is *not*
             // matched here).
             "min" | "math::min" if args.len() == 2 => {
+                // A 128-bit bound answers its own type; the backends compare
+                // it at its width.
+                if let Some(wide) = args.iter().find(|a| self.tcx.is_wide_int(a.ty)) {
+                    return Some(("gos_rt_min_i64", wide.ty));
+                }
                 if let Some(unsigned) = args.iter().find(|a| arg_is_unsigned64(self.tcx, a)) {
                     return Some(("gos_rt_min_u64", unsigned.ty));
                 }
@@ -292,6 +297,11 @@ impl<'a> Builder<'a> {
                 (sym, ret)
             }
             "max" | "math::max" if args.len() == 2 => {
+                // A 128-bit bound answers its own type; the backends compare
+                // it at its width.
+                if let Some(wide) = args.iter().find(|a| self.tcx.is_wide_int(a.ty)) {
+                    return Some(("gos_rt_max_i64", wide.ty));
+                }
                 if let Some(unsigned) = args.iter().find(|a| arg_is_unsigned64(self.tcx, a)) {
                     return Some(("gos_rt_max_u64", unsigned.ty));
                 }
@@ -323,6 +333,11 @@ impl<'a> Builder<'a> {
     ) -> Option<(&'static str, gossamer_types::Ty)> {
         Some(match joined {
             "clamp" | "math::clamp" if args.len() == 3 => {
+                // A 128-bit bound answers its own type; the backends compare
+                // it at its width.
+                if let Some(wide) = args.iter().find(|a| self.tcx.is_wide_int(a.ty)) {
+                    return Some(("gos_rt_clamp_i64", wide.ty));
+                }
                 if let Some(unsigned) = args.iter().find(|a| arg_is_unsigned64(self.tcx, a)) {
                     return Some(("gos_rt_clamp_u64", unsigned.ty));
                 }

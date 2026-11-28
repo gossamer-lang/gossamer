@@ -1163,6 +1163,13 @@ where
 /// for [`string_from_prefixed`] to write the header into.
 pub(crate) const BODY_PREFIX_BYTES: usize = STRING_BODY_OFFSET;
 
+/// The block size a string of `content_len` bytes made by
+/// [`string_from_prefixed`] takes, so a buffer sized to it is adopted in
+/// place rather than grown.
+pub(crate) const fn prefixed_block_len(content_len: usize) -> usize {
+    STRING_BODY_OFFSET + content_len + 1 + str_index_bytes(content_len)
+}
+
 /// The string whose content is `buf[BODY_PREFIX_BYTES..]`, made
 /// from `buf`'s own block when a string can own it, so the content is not
 /// copied; otherwise a copy of the content.
@@ -2230,6 +2237,7 @@ pub unsafe extern "C" fn gos_rt_vec_take_vec_elem(
             // SAFETY: `v` is a live vector (contract), checked non-null above.
             let vec = unsafe { &mut *v };
             let sole_owner = crate::c_abi::vec::vec_rc(vec) == 1
+                && crate::c_abi::vec::vec_holds_buffer_alone(vec)
                 && !crate::c_abi::vec::vec_is_region(vec)
                 && !crate::c_abi::vec::vec_is_frame(vec)
                 && !crate::c_abi::vec::vec_is_window(vec)
@@ -2262,6 +2270,11 @@ pub unsafe extern "C" fn gos_rt_vec_clone(src: *const GosVec) -> *mut GosVec {
     ffi_entry!({
         if src.is_null() {
             return gos_rt_vec_new(8);
+        }
+        // A copy shares the source's buffer until one of the two writes.
+        // SAFETY: `src` is a handle from compiled code, live for the whole call.
+        if let Some(shared) = unsafe { crate::c_abi::vec::vec_share(src) } {
+            return shared;
         }
         // SAFETY: `src` is a handle from compiled code, checked non-null above and live for the whole call.
         let s = unsafe { &*src };
@@ -2467,8 +2480,8 @@ pub unsafe extern "C" fn gos_rt_os_read_dir(path: *const c_char) -> *mut GosVec 
 
 /// `s.substring(start, end)` - byte-range slice. Clamps `start`
 /// and `end` into `[0, byte_len(s)]` and returns the indicated byte
-/// substring as a fresh `*mut c_char`. Bounds inside a multibyte scalar
-/// advance to the next UTF-8 boundary. Mirrors the interp
+/// substring as a fresh `*mut c_char`. A bound inside a multibyte scalar
+/// panics. Mirrors the interp
 /// builtin so user code that calls `s.substring(a, b)` runs the
 /// same way under `gos` and `gos build` - without this
 /// helper the compiled tier saw `s.substring(...)` as an
@@ -2477,26 +2490,24 @@ pub unsafe extern "C" fn gos_rt_os_read_dir(path: *const c_char) -> *mut GosVec 
 /// `util::substring` calls `s.substring` recursively, which then
 /// stack-overflowed instead of reaching the runtime slice).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_str_substring(
+pub unsafe extern "C-unwind" fn gos_rt_str_substring(
     s: *const c_char,
     start: i64,
     end: i64,
 ) -> *mut c_char {
-    ffi_entry!({
-        if s.is_null() {
-            return alloc_cstring(b"");
-        }
-        // SAFETY: `s` is non-null (checked above) and this shim's live string argument (C-ABI
-        // contract).
-        let bytes = unsafe { substring_bytes(s, start, end) };
-        // SAFETY: `s` is live, and `bytes` is a window of its content.
-        unsafe { alloc_slice_cstring(s, bytes) }
-    })
+    if s.is_null() {
+        return alloc_cstring(b"");
+    }
+    // SAFETY: `s` is non-null (checked above) and this shim's live string argument (C-ABI
+    // contract).
+    let bytes = unsafe { substring_bytes(s, start, end) };
+    // SAFETY: `s` is live, and `bytes` is a window of its content.
+    unsafe { alloc_slice_cstring(s, bytes) }
 }
 
 /// The bytes `s.substring(start, end)` answers: the offsets clamped into the
-/// string, the end no earlier than the start, each moved forward to the next
-/// character boundary.
+/// string, the end no earlier than the start; an offset inside a character
+/// panics.
 ///
 /// # Safety
 ///
@@ -2522,6 +2533,15 @@ pub(crate) unsafe fn substring_bytes<'a>(s: *const c_char, start: i64, end: i64)
     let lo_byte = unsafe { typed_str_next_char_boundary(s, lo) }.unwrap_or(byte_len);
     // SAFETY: this `unsafe fn`'s caller passes `s` a live string body.
     let hi_byte = unsafe { typed_str_next_char_boundary(s, hi) }.unwrap_or(byte_len);
+    // An offset inside a character panics, as an index past the end of a
+    // sequence does.
+    for (asked, at, boundary) in [(start, lo, lo_byte), (end, hi, hi_byte)] {
+        if at < byte_len && boundary != at {
+            crate::c_abi::panic::panic_text(&format!(
+                "substring: byte offset {asked} is not on a character boundary"
+            ));
+        }
+    }
     // SAFETY: `s` is a live string body whose first `byte_len` bytes are its content.
     let bytes = unsafe { std::slice::from_raw_parts(s.cast::<u8>(), byte_len) };
     &bytes[lo_byte..hi_byte]
@@ -2534,28 +2554,26 @@ pub(crate) unsafe fn substring_bytes<'a>(s: *const c_char, start: i64, end: i64)
 /// place copies from below the current length, and a regrowth reads both
 /// before the old buffer is freed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_str_push_substring(
+pub unsafe extern "C-unwind" fn gos_rt_str_push_substring(
     acc: *const c_char,
     src: *const c_char,
     start: i64,
     end: i64,
 ) -> *mut c_char {
-    ffi_entry!({
-        let bytes: &[u8] = if src.is_null() {
-            &[]
-        } else {
-            // SAFETY: `src` is non-null (checked above) and this shim's live string argument
-            // (C-ABI contract).
-            unsafe { substring_bytes(src, start, end) }
-        };
-        // A slice of ASCII text is ASCII, so the accumulator's index is
-        // extended without scanning the bytes appended.
-        // SAFETY: `src` is this shim's string argument, null or live (C-ABI contract).
-        let ascii = unsafe { typed_str_is_ascii(src) };
-        // SAFETY: `acc` is this shim's accumulator argument, null or a share it hands on (C-ABI
-        // contract).
-        unsafe { str_append_parts(acc, &[bytes], ascii) }
-    })
+    let bytes: &[u8] = if src.is_null() {
+        &[]
+    } else {
+        // SAFETY: `src` is non-null (checked above) and this shim's live string argument
+        // (C-ABI contract).
+        unsafe { substring_bytes(src, start, end) }
+    };
+    // A slice of ASCII text is ASCII, so the accumulator's index is
+    // extended without scanning the bytes appended.
+    // SAFETY: `src` is this shim's string argument, null or live (C-ABI contract).
+    let ascii = unsafe { typed_str_is_ascii(src) };
+    // SAFETY: `acc` is this shim's accumulator argument, null or a share it hands on (C-ABI
+    // contract).
+    unsafe { str_append_parts(acc, &[bytes], ascii) }
 }
 
 #[unsafe(no_mangle)]
@@ -3131,6 +3149,48 @@ pub unsafe extern "C" fn gos_rt_str_to_i64_opt(s: *const c_char) -> i128 {
             Some(n) => gos_rt_result_new(0, n),
             None => gos_rt_result_new(1, 0),
         }
+    })
+}
+
+/// The bits of the 128-bit integer `s` spells in full (a `u128` when
+/// `unsigned` is non-zero), or `None`.
+///
+/// # Safety
+/// `s` is null or a live String body.
+unsafe fn parse_wide_arg(s: *const c_char, unsigned: i64) -> Option<u128> {
+    if s.is_null() {
+        return None;
+    }
+    // SAFETY: `s` is non-null (checked above) and a live string body (this `unsafe fn`'s
+    // contract).
+    let text = std::str::from_utf8(unsafe { gos_str_arg_bytes(s) }).ok()?;
+    if unsigned != 0 {
+        text.parse::<u128>().ok()
+    } else {
+        text.parse::<i128>().ok().map(i128::cast_unsigned)
+    }
+}
+
+/// 1 when `s` spells a 128-bit integer in full (a `u128` when `unsigned` is
+/// non-zero), else 0: the arm `s.to_i128()` / `s.to_u128()` answers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_str_wide_valid(s: *const c_char, unsigned: i64) -> i64 {
+    ffi_entry!({
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body.
+        let parsed = unsafe { parse_wide_arg(s, unsigned) };
+        i64::from(parsed.is_some())
+    })
+}
+
+/// The 128-bit integer `s` spells in full (a `u128` when `unsigned` is
+/// non-zero), or 0 when it spells none: the payload `s.to_i128()` /
+/// `s.to_u128()` answers once [`gos_rt_str_wide_valid`] accepts it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_str_wide_bits(s: *const c_char, unsigned: i64) -> i128 {
+    ffi_entry!({
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body.
+        let parsed = unsafe { parse_wide_arg(s, unsigned) };
+        parsed.unwrap_or(0).cast_signed()
     })
 }
 
@@ -3886,7 +3946,6 @@ pub unsafe extern "C-unwind" fn gos_rt_str_repeat(s: *const c_char, n: i64) -> *
         let n = n as usize;
         let Some(bytes) = s.len().checked_mul(n) else {
             crate::c_abi::panic::panic_text("string repeat capacity overflow");
-            return std::ptr::null_mut();
         };
         if crate::memory_limit::exceeds_commit_limit(bytes as u128) {
             crate::c_abi::panic::out_of_memory(bytes);
@@ -3982,6 +4041,24 @@ pub unsafe extern "C" fn gos_rt_parse_f64(s: *const c_char, ok_out: *mut i32) ->
     })
 }
 
+/// The decimal text of an `i128` passed as its low and high words.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_i128_to_str(low: i64, high: i64) -> *mut c_char {
+    ffi_entry!({
+        let bits = super::concat::wide_from_words(low.cast_unsigned(), high.cast_unsigned());
+        alloc_cstring(bits.cast_signed().to_string().as_bytes())
+    })
+}
+
+/// The decimal text of a `u128` passed as its low and high words.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_u128_to_str(low: i64, high: i64) -> *mut c_char {
+    ffi_entry!({
+        let bits = super::concat::wide_from_words(low.cast_unsigned(), high.cast_unsigned());
+        alloc_cstring(bits.to_string().as_bytes())
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_i64_to_str(n: i64) -> *mut c_char {
     ffi_entry!({
@@ -4060,6 +4137,51 @@ pub extern "C-unwind" fn gos_rt_f64_prec_to_str(x: f64, prec: i64) -> *mut c_cha
         }
         let prec = prec.min(64) as usize;
         alloc_cstring(format!("{x:.prec$}").as_bytes())
+    })
+}
+
+/// An integer's exact digits for a `{:.N}` spec: `prec` zeros after the
+/// point, so the digits never pass through a float.
+fn integer_prec_text(digits: String, prec: i64) -> *mut c_char {
+    if prec < 0 {
+        crate::c_abi::panic::panic_text("__fmt_prec: precision must be non-negative");
+    }
+    let zeros = prec.min(64) as usize;
+    let mut text = digits;
+    if zeros > 0 {
+        text.push('.');
+        text.extend(std::iter::repeat_n('0', zeros));
+    }
+    alloc_cstring(text.as_bytes())
+}
+
+/// `{x:.N}` of a signed integer up to 64 bits.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn gos_rt_i64_prec_to_str(x: i64, prec: i64) -> *mut c_char {
+    ffi_entry_passthrough!({ integer_prec_text(x.to_string(), prec) })
+}
+
+/// `{x:.N}` of an unsigned integer up to 64 bits, passed as its bits.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn gos_rt_u64_prec_to_str(x: i64, prec: i64) -> *mut c_char {
+    ffi_entry_passthrough!({ integer_prec_text(x.cast_unsigned().to_string(), prec) })
+}
+
+/// `{x:.N}` of an `i128`, passed as its low and high words.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn gos_rt_i128_prec_to_str(low: i64, high: i64, prec: i64) -> *mut c_char {
+    ffi_entry_passthrough!({
+        let bits = super::concat::wide_from_words(low.cast_unsigned(), high.cast_unsigned());
+        integer_prec_text(bits.cast_signed().to_string(), prec)
+    })
+}
+
+/// `{x:.N}` of a `u128`, passed as its low and high words.
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn gos_rt_u128_prec_to_str(low: i64, high: i64, prec: i64) -> *mut c_char {
+    ffi_entry_passthrough!({
+        let bits = super::concat::wide_from_words(low.cast_unsigned(), high.cast_unsigned());
+        integer_prec_text(bits.to_string(), prec)
     })
 }
 
@@ -4633,5 +4755,41 @@ mod slab_piece_tests {
                 gos_rt_str_free(source);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod integer_precision_tests {
+    use super::*;
+
+    fn text(p: *mut c_char) -> String {
+        // SAFETY: `p` is a live string the helper under test answered.
+        let out = String::from_utf8_lossy(unsafe { typed_str_bytes(p) }).into_owned();
+        // SAFETY: `p` is freed once, here.
+        unsafe { gos_rt_str_free(p) };
+        out
+    }
+
+    #[test]
+    fn an_integer_precision_keeps_every_digit_and_writes_zeros() {
+        assert_eq!(
+            text(gos_rt_i64_prec_to_str(9_007_199_254_740_993, 2)),
+            "9007199254740993.00"
+        );
+        assert_eq!(text(gos_rt_i64_prec_to_str(-3, 0)), "-3");
+        assert_eq!(
+            text(gos_rt_u64_prec_to_str(-1, 1)),
+            "18446744073709551615.0"
+        );
+        let big = (1i128 << 100) + 1;
+        let (low, high) = (big as i64, (big >> 64) as i64);
+        assert_eq!(
+            text(gos_rt_i128_prec_to_str(low, high, 1)),
+            format!("{big}.0")
+        );
+        assert_eq!(
+            text(gos_rt_u128_prec_to_str(-1, -1, 0)),
+            u128::MAX.to_string()
+        );
     }
 }

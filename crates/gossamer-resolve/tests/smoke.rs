@@ -618,7 +618,6 @@ fn a_member_a_gossamer_written_stdlib_module_does_not_export_is_unresolved() {
         ("panic", "panic"),
         ("query", "http::query"),
         ("sql", "database::sql"),
-        ("state", "http::state"),
         ("term", "term"),
         ("tls", "tls"),
     ];

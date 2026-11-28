@@ -609,24 +609,6 @@ pub(crate) fn lower_program_full(
         }
     }
 
-    // Refuse 128-bit integer types up front. Cranelift's pointer
-    // width on x86-64 is 64 bits and the runtime print path only
-    // covers i64/u64; silently truncating to i64 corrupts every
-    // value with the high half set. Surfacing the limit at build
-    // time matches the `i128_use_panics_native_build…` regression
-    // gate.
-    for body in bodies {
-        for (idx, local) in body.locals.iter().enumerate() {
-            if let TyKind::Int(IntTy::I128 | IntTy::U128) = tcx.kind_of(local.ty) {
-                bail!(
-                    "i128 / u128 are not supported by the compiled tier yet (in fn `{}`, local _{}); use the bytecode VM for now",
-                    body.name,
-                    idx
-                );
-            }
-        }
-    }
-
     // Declare every function up-front so call-sites can resolve.
     // We key the map by the resolver-assigned `DefId.local` so
     // `Operand::FnRef(def)` from MIR lowers to the right function

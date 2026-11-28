@@ -147,8 +147,37 @@ impl<'a> Lowerer<'a> {
             writeln!(self.out, "  store i64 0, ptr {base}{tbaa}").unwrap();
             return Ok(());
         }
+        // Which fields are 128-bit integers, read from the type the aggregate
+        // declares: a constant operand carries no width of its own.
+        let is_wide =
+            |tcx: &TyCtxt, ty: Ty| matches!(tcx.kind(ty), Some(TyKind::Int(it)) if it.is_wide());
+        let wide_fields: Vec<bool> = match self.tcx.kind(place_ty) {
+            Some(TyKind::Adt { def, substs }) if !self.tcx.is_inline_enum_ty(place_ty) => self
+                .tcx
+                .adt_field_tys(*def, substs)
+                .map(|tys| tys.iter().map(|ty| is_wide(self.tcx, *ty)).collect())
+                .unwrap_or_default(),
+            Some(TyKind::Tuple(elems)) => elems.iter().map(|ty| is_wide(self.tcx, *ty)).collect(),
+            Some(TyKind::Array { elem, .. }) if is_wide(self.tcx, *elem) => {
+                vec![true; operands.len()]
+            }
+            _ => Vec::new(),
+        };
         let mut slot_idx = 0u32;
-        for operand in operands {
+        for (index, operand) in operands.iter().enumerate() {
+            // A 128-bit field spans two slots and is stored as one `i128`.
+            if wide_fields.get(index).copied().unwrap_or(false) {
+                let v = self.lower_operand(operand)?;
+                let dst = self.fresh();
+                writeln!(
+                    self.out,
+                    "  {dst} = getelementptr i64, ptr {base}, i64 {slot_idx}"
+                )
+                .unwrap();
+                writeln!(self.out, "  store i128 {v}, ptr {dst}, align 8{tbaa}").unwrap();
+                slot_idx += 2;
+                continue;
+            }
             let op_ty = self.operand_ty(operand);
             let mut op_slots = slot_count(self.tcx, op_ty).unwrap_or(1);
             // `operand_ty` falls back to the return-slot type for

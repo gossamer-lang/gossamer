@@ -1,0 +1,33 @@
+// `process::pipeline_run` parity test.
+//
+// Builds a `[String]` of whitespace-tokenised shell commands and
+// runs them as a stdout-to-stdin chain. The output of the tail
+// stage is the captured `Output { stdout, stderr, code }` triple.
+//
+// Three tier compatibility: the VM, Cranelift, and LLVM all route
+// through `gos_rt_exec_pipeline_run_raw` (compiled tiers) or the
+// `builtin_exec_pipeline_run` function (interp tier); the
+// expected stdout must match across the three.
+
+use std::process
+
+fn main() {
+    let cmds: Vec<String> = #["printf hello", "tr a-z A-Z"]
+    match process::pipeline_run(cmds) {
+        Ok(out) => {
+            println("stdout: {}", out.stdout.trim())
+            println("code: {}", out.code)
+        }
+        Err(e) => println("error: {}", e.message())
+    }
+
+    let three: Vec<String> = Vec::from([
+        "printf 'a\\nb\\nc\\n'"
+        "sort -r"
+        "head -n 1"
+    ])
+    match process::pipeline_run(three) {
+        Ok(out) => println("3-stage tail: {}", out.stdout.trim())
+        Err(e) => println("3-stage err: {}", e.message())
+    }
+}

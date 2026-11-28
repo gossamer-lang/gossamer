@@ -1,0 +1,23 @@
+// A `{:.N}` precision on an integer of any width keeps its exact digits and
+// writes N zeros after the point; it never rounds through a float.
+
+newtype Cents = i64
+
+fn main() {
+    let a: i64 = 9007199254740993
+    let b: u64 = u64::MAX
+    let c: i128 = (1 << 100) + 1
+    let d: u128 = u128::MAX
+    let e: u8 = 7
+    let f: i32 = -3
+    let g: Cents = 12.into()
+    let h = 2.5
+    let s = "abcdef"
+    println(f"{a:.2}|{b:.1}|{c:.1}|{d:.0}|{e:.3}|{f:.1}|{h:.3}|{s:.2}|{a:>25.2}")
+    let steps: Vec<u64> = #[0, 1, 2]
+    for k in steps {
+        let n: i128 = (k as i128) * 1000000000000000000000
+        let m = u64::MAX - k
+        println(f"{n:.1} {m:.2} {g:.1}")
+    }
+}

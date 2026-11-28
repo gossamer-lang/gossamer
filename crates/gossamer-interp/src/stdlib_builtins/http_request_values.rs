@@ -42,30 +42,34 @@ fn arg_str(v: Option<&Value>) -> String {
 }
 
 pub(crate) fn install_http_request_values(globals: &mut Vec<(&'static str, Value)>) {
-    for key in ["Request::value", "http::Request::value"] {
-        globals.push((
-            key,
-            crate::builtins::builtin_pub(key, builtin_request_value as BuiltinFnPub),
-        ));
-    }
-    for key in ["Request::set_value", "http::Request::set_value"] {
-        globals.push((
-            key,
-            crate::builtins::builtin_pub(key, builtin_request_set_value as BuiltinFnPub),
-        ));
-    }
-    for key in ["Request::form_value", "http::Request::form_value"] {
-        globals.push((
-            key,
-            crate::builtins::builtin_pub(key, builtin_request_form_value as BuiltinFnPub),
-        ));
-    }
-    for key in ["Request::basic_auth", "http::Request::basic_auth"] {
-        globals.push((
-            key,
-            crate::builtins::builtin_pub(key, builtin_request_basic_auth as BuiltinFnPub),
-        ));
-    }
+    globals.push((
+        "http::Request::value",
+        crate::builtins::builtin_pub(
+            "http::Request::value",
+            builtin_request_value as BuiltinFnPub,
+        ),
+    ));
+    globals.push((
+        "http::Request::set_value",
+        crate::builtins::builtin_pub(
+            "http::Request::set_value",
+            builtin_request_set_value as BuiltinFnPub,
+        ),
+    ));
+    globals.push((
+        "http::Request::form_value",
+        crate::builtins::builtin_pub(
+            "http::Request::form_value",
+            builtin_request_form_value as BuiltinFnPub,
+        ),
+    ));
+    globals.push((
+        "http::Request::basic_auth",
+        crate::builtins::builtin_pub(
+            "http::Request::basic_auth",
+            builtin_request_basic_auth as BuiltinFnPub,
+        ),
+    ));
 }
 
 /// Reads the raw request body string from a Request value's `body`

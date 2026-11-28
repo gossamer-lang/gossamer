@@ -2,8 +2,7 @@
 
 use super::{
     FILE_SERVER_OFFSET, LEGACY_HANDLE_CTORS, PURE_HANDLE_HI_OFFSET, PURE_HANDLE_LO_OFFSET,
-    PURE_HANDLES, SYNC_HANDLE_HI_OFFSET, SYNC_HANDLE_LO_OFFSET, TRACE_ENDED_SPAN_OFFSET,
-    TRACE_SPAN_OFFSET, Ty, U8_VEC_OFFSET,
+    PURE_HANDLES, SYNC_HANDLE_HI_OFFSET, SYNC_HANDLE_LO_OFFSET, Ty, U8_VEC_OFFSET,
 };
 
 /// `(sentinel offset, name)` of the runtime handle the stdlib constructor
@@ -178,37 +177,6 @@ pub(super) const HANDLE_METHODS: &[(&str, &str, &[Shape], Shape)] = &[
     ),
     ("metrics::Registry", "render", &[], Shape::Str),
     (
-        "trace::Tracer",
-        "new",
-        &[],
-        Shape::Handle(40, "trace::Tracer"),
-    ),
-    (
-        "trace::Tracer",
-        "start_span",
-        &[Shape::Str],
-        Shape::Handle(TRACE_SPAN_OFFSET, "trace::Span"),
-    ),
-    (
-        "trace::Span",
-        "set_attribute",
-        &[Shape::Str, Shape::Str],
-        Shape::Unit,
-    ),
-    (
-        "trace::Span",
-        "set_status",
-        &[Shape::I64, Shape::Str],
-        Shape::Unit,
-    ),
-    (
-        "trace::Span",
-        "end",
-        &[],
-        Shape::Handle(TRACE_ENDED_SPAN_OFFSET, "trace::EndedSpan"),
-    ),
-    ("trace::EndedSpan", "to_otlp_json", &[], Shape::Str),
-    (
         "rand::Rng",
         "new",
         &[Shape::I64],
@@ -316,7 +284,7 @@ pub(super) fn is_shared_state_handle_def(local: u32) -> bool {
 pub(super) fn is_opaque_handle_def(local: u32) -> bool {
     let offset = u32::MAX - local;
     (PURE_HANDLE_LO_OFFSET..=PURE_HANDLE_HI_OFFSET).contains(&offset)
-        || (SYNC_HANDLE_LO_OFFSET..=TRACE_ENDED_SPAN_OFFSET).contains(&offset)
+        || (SYNC_HANDLE_LO_OFFSET..=SYNC_HANDLE_HI_OFFSET).contains(&offset)
         || OPAQUE_HANDLE_OFFSETS.contains(&offset)
 }
 
@@ -335,6 +303,18 @@ pub(super) fn stdlib_handle_def_offset(tail: &str) -> Option<u32> {
                 .or_else(|| stdlib_fs_handle(tail).map(|(offset, _)| offset))
                 .or_else(|| stdlib_io_handle(tail).map(|(offset, _)| offset));
         }
+    })
+}
+
+/// The qualified name a stdlib handle named by its last path segment is
+/// registered under wherever its constructor or annotation builds it, so a
+/// signature slot naming it gives the `DefId` the same spelling.
+pub(super) fn stdlib_handle_qualified_name(tail: &str) -> Option<&'static str> {
+    Some(match tail {
+        "Pattern" => "regex::Pattern",
+        "Response" => "http::Response",
+        "ResponseStream" => "http::ResponseStream",
+        _ => return None,
     })
 }
 

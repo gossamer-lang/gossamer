@@ -1,0 +1,22 @@
+// `process::exec` hands the process to another program and answers only when
+// that program cannot be started. Output printed before the hand-over reaches
+// the stream first, and the program's exit code becomes the process's own.
+
+use std::process
+
+#[cfg(unix)]
+const SHELL: String = "sh"
+#[cfg(unix)]
+const SCRIPT_FLAG: String = "-c"
+#[cfg(windows)]
+const SHELL: String = "cmd"
+#[cfg(windows)]
+const SCRIPT_FLAG: String = "/C"
+
+fn main() {
+    println("before the hand-over")
+    let missing = process::exec("no-such-program-for-gossamer", #[])
+    println(f"missing program answers: {missing.is_err()}")
+    let failed = process::exec(SHELL, #[SCRIPT_FLAG, "echo the shell runs now&& exit 7"])
+    println(f"never printed: {failed.is_err()}")
+}

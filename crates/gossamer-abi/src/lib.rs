@@ -151,6 +151,13 @@ pub const TUPLE_TAG_F32: u8 = 25;
 /// Rendering tag for a unit leaf: the slot holds no value and renders `()`.
 pub const TUPLE_TAG_UNIT: u8 = 26;
 
+/// Leaf tag for an `i128`: two slots, the value's low word then its high
+/// word, as a little-endian 128-bit store lays them.
+pub const TUPLE_TAG_I128: u8 = 40;
+
+/// Leaf tag for a `u128`, laid out as [`TUPLE_TAG_I128`].
+pub const TUPLE_TAG_U128: u8 = 41;
+
 /// How a [`DESC_PACKED`] leaf is stored and ordered.
 pub mod packed_leaf {
     /// A signed integer in one byte.
@@ -339,9 +346,9 @@ pub fn meta_symbol_arg(name: &str) -> Option<usize> {
 /// than an env blob.
 pub const I128_HANDLER_REGISTRATIONS: &[(&str, usize)] = &[
     ("gos_rt_http2_bind_and_run_h2c", 2),
-    ("gos_rt_http3_serve", 4),
     ("gos_rt_http_serve", 2),
     ("gos_rt_http_serve_tls", 4),
+    ("gos_rt_http_serve_tls_live", 3),
     ("gos_rt_http_server_serve", 2),
     ("gos_rt_httptest_record", 4),
     ("gos_rt_middleware_new", 1),
@@ -366,8 +373,8 @@ pub const I128_HANDLER_REGISTRATIONS: &[(&str, usize)] = &[
 
 pub use registry::{
     REGISTRY, all_llvm_declarations, answers_counted_element, answers_counted_payload,
-    combinator_abi_of, combinator_crossings, combinator_symbol, lookup, mints_owned_string,
-    mints_owned_vec, returns_fresh_aggregate,
+    combinator_abi_of, combinator_crossings, combinator_symbol, lookup, mints_owned_result,
+    mints_owned_string, mints_owned_vec, returns_fresh_aggregate,
 };
 pub use types::{AbiSig, AbiType, CombinatorAbi, ElemClass, Ownership, RuntimeEntry, Tier};
 

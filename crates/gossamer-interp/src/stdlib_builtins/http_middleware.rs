@@ -196,7 +196,7 @@ fn wrap_with(args: &[Value], kind: i64) -> RuntimeResult<Value> {
     let inner = args.first().cloned().unwrap_or(Value::Unit);
     let config = args.get(1).map(Value::to_string).unwrap_or_default();
     Ok(Value::struct_(
-        "Middleware",
+        "http::middleware::Handler",
         vec![
             ("__mw_inner", inner),
             ("__mw_kind", Value::Int(kind)),
@@ -295,7 +295,10 @@ pub(crate) fn builtin_mw_decode_basic_auth(args: &[Value]) -> RuntimeResult<Valu
 /// `gos_rt_middleware_serve` composition.
 pub(crate) fn builtin_mw_tag(args: &[Value]) -> RuntimeResult<Value> {
     let inner = args.first().cloned().unwrap_or(Value::Unit);
-    Ok(Value::struct_("Middleware", vec![("__mw_inner", inner)]))
+    Ok(Value::struct_(
+        "http::middleware::Handler",
+        vec![("__mw_inner", inner)],
+    ))
 }
 
 /// Body bytes of a Response field value, in either its String or its
@@ -392,7 +395,7 @@ fn request_body_len(request: &Value) -> usize {
 /// before the inner handler runs.
 fn response_value_from_parts(parts: &mw_std::ResponseParts) -> Value {
     Value::struct_(
-        "Response",
+        "http::Response",
         vec![
             ("status", Value::Int(parts.status)),
             (
@@ -486,7 +489,7 @@ pub(crate) fn native_middleware_serve(
     if !new_fields.iter().any(|(f, _)| *f == "headers") {
         new_fields.push(("headers", header_value(&parts.headers)));
     }
-    Ok(ok_variant(Value::struct_("Response", new_fields)))
+    Ok(ok_variant(Value::struct_("http::Response", new_fields)))
 }
 
 pub(crate) fn builtin_mw_accepts_gzip(args: &[Value]) -> RuntimeResult<Value> {

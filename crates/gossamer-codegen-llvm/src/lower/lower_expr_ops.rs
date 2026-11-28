@@ -86,8 +86,9 @@ impl<'a> Lowerer<'a> {
         let kind = numeric_kind(self.tcx, dest_ty);
         let tmp = self.fresh();
         match (op, kind) {
-            (UnOp::Neg, NumericKind::Int(_)) => {
-                writeln!(self.out, "  {tmp} = sub i64 0, {operand_v}").unwrap();
+            (UnOp::Neg, NumericKind::Int(int_ty)) => {
+                let width = if int_ty.is_wide() { "i128" } else { "i64" };
+                writeln!(self.out, "  {tmp} = sub {width} 0, {operand_v}").unwrap();
             }
             (UnOp::Neg, NumericKind::Float(_)) => {
                 // Both f32 and f64 are represented as `double` at runtime.
@@ -102,7 +103,10 @@ impl<'a> Lowerer<'a> {
                 // unresolved); use the operand's actual LLVM type
                 // so `xor i1 %v, -1` is generated for bools rather
                 // than the invalid `xor ptr`.
-                let operand_llvm = self.operand_llvm_ty(operand);
+                let operand_llvm = match kind {
+                    NumericKind::Int(int_ty) if int_ty.is_wide() => "i128".to_string(),
+                    _ => self.operand_llvm_ty(operand),
+                };
                 let ty = if operand_llvm == "ptr" || operand_llvm.is_empty() {
                     render_ty(self.tcx, dest_ty)
                 } else {
@@ -265,6 +269,31 @@ impl<'a> Lowerer<'a> {
             numeric_kind(self.tcx, self.body.local_ty(dest_local))
         {
             kind = NumericKind::Int(dest_int_ty);
+        }
+        // A 128-bit result is computed at 128 bits whatever its operands
+        // spell: two constants carry no type, and a shift's amount may be
+        // narrower than what it shifts.
+        if let NumericKind::Int(dest_int_ty) =
+            numeric_kind(self.tcx, self.body.local_ty(dest_local))
+            && dest_int_ty.is_wide()
+            && !matches!(
+                op,
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+            )
+        {
+            kind = NumericKind::Int(dest_int_ty);
+            operand_llvm = "i128".to_string();
+        }
+        // A constant past both 64-bit ranges is a 128-bit value: an
+        // operation on it is a 128-bit one, signed unless its typed side is
+        // already a 128-bit type of its own.
+        let wide_const = |operand: &Operand| {
+            matches!(operand, Operand::Const(value @ ConstValue::Int(_))
+                if super::const_llvm_ty(value) == "i128")
+        };
+        if (wide_const(lhs) || wide_const(rhs)) && operand_llvm != "i128" {
+            kind = NumericKind::Int(gossamer_types::IntTy::I128);
+            operand_llvm = "i128".to_string();
         }
         // Width mismatch correction: when one operand is the
         // narrower `i1` form (most often a `Copy(bool_place)`) but
@@ -519,6 +548,21 @@ impl<'a> Lowerer<'a> {
         // operand width; the VM masks the amount with `& 63`. Mask
         // i64 shift amounts the same way so `1 << 70` is `1 << 6`
         // on every tier.
+        // A shift amount has a type of its own, often narrower than a 128-bit
+        // value; the range guard already holds it in `0..128`.
+        if matches!(op, BinOp::Shl | BinOp::Shr) && operand_llvm == "i128" {
+            let amount_llvm = self.operand_llvm_ty(rhs);
+            if amount_llvm != "i128" {
+                let widened = self.fresh();
+                let amount_llvm = if amount_llvm == "i128" || amount_llvm.is_empty() {
+                    "i64".to_string()
+                } else {
+                    amount_llvm
+                };
+                writeln!(self.out, "  {widened} = zext {amount_llvm} {rhs_v} to i128").unwrap();
+                rhs_v = widened;
+            }
+        }
         if matches!(op, BinOp::Shl | BinOp::Shr) && operand_llvm == "i64" {
             let masked = self.fresh();
             writeln!(self.out, "  {masked} = and i64 {rhs_v}, 63").unwrap();
@@ -540,7 +584,14 @@ impl<'a> Lowerer<'a> {
                 BinOp::Mul => "mul",
                 _ => unreachable!(),
             };
-            let checked_llvm = format!("i{}", int_width(int_ty).min(64));
+            let checked_llvm = format!(
+                "i{}",
+                if int_ty.is_wide() {
+                    128
+                } else {
+                    int_width(int_ty).min(64)
+                }
+            );
             let checked_lhs = if operand_llvm == checked_llvm {
                 lhs_v.clone()
             } else {
@@ -801,12 +852,25 @@ impl<'a> Lowerer<'a> {
         target: gossamer_types::Ty,
         _dest_local: Local,
     ) -> Result<String, BuildError> {
+        // An integer constant cast to a 128-bit type is that constant: the
+        // literal already holds the value's bits at 128 bits.
+        if let Operand::Const(ConstValue::Int(n)) = operand
+            && self.tcx.is_wide_int(target)
+        {
+            return Ok(n.to_string());
+        }
         let src_v = self.lower_operand(operand)?;
         // Numeric constants classify directly: `operand_ty` resolves
         // a const's type by borrowing a same-kinded local's Ty, and
         // a body with no integer local would misclassify an Int
         // const as the unit return type (non-numeric).
         let (src_kind, src_llvm) = match operand {
+            Operand::Const(value @ ConstValue::Int(_)) if super::const_llvm_ty(value) == "i128" => {
+                (
+                    NumericKind::Int(gossamer_types::IntTy::I128),
+                    "i128".to_string(),
+                )
+            }
             Operand::Const(ConstValue::Int(_)) => (
                 NumericKind::Int(gossamer_types::IntTy::I64),
                 "i64".to_string(),
@@ -880,6 +944,20 @@ impl<'a> Lowerer<'a> {
         {
             return Ok(self.mask_to_int_width(&src_v, b));
         }
+        // A 128-bit source narrows to the word first; a narrower declared
+        // target then masks as any word does.
+        if let (NumericKind::Int(_), NumericKind::Int(b)) = (src_kind, dst_kind)
+            && src_llvm == "i128"
+            && dst_llvm == "i64"
+        {
+            let word = self.fresh();
+            writeln!(self.out, "  {word} = trunc i128 {src_v} to i64").unwrap();
+            return Ok(if int_width(b) < 64 {
+                self.mask_to_int_width(&word, b)
+            } else {
+                word
+            });
+        }
         // Float → int saturates at the TARGET's range on every tier, which
         // is what a reader of `300.7 as u8` expects: `255`, not the `300` a
         // conversion that stopped at the runtime word would answer, and `0`
@@ -911,6 +989,33 @@ impl<'a> Lowerer<'a> {
             let tmp = self.fresh();
             writeln!(self.out, "  {tmp} = call i64 @{intrinsic}({src_float} {v})").unwrap();
             return Ok(self.clamp_to_int_range(&tmp, b));
+        }
+        // A 128-bit target saturates at its own range through the 128-bit
+        // forms of the same intrinsics.
+        if let (NumericKind::Float(f), NumericKind::Int(b)) = (src_kind, dst_kind)
+            && dst_llvm == "i128"
+        {
+            let src_float = match f {
+                FloatTy::F32 => "float",
+                FloatTy::F64 => "double",
+            };
+            let conversion = if int_signed(b) { "fptosi" } else { "fptoui" };
+            let suffix = if src_float == "float" { "f32" } else { "f64" };
+            let intrinsic = format!("llvm.{conversion}.sat.i128.{suffix}");
+            self.runtime_refs
+                .insert(format!("declare i128 @{intrinsic}({src_float})"));
+            let v = if src_llvm == src_float {
+                src_v
+            } else {
+                self.coerce_llvm_value(&src_v, &src_llvm, src_float)
+            };
+            let tmp = self.fresh();
+            writeln!(
+                self.out,
+                "  {tmp} = call i128 @{intrinsic}({src_float} {v})"
+            )
+            .unwrap();
+            return Ok(tmp);
         }
         if src_llvm == dst_llvm {
             return Ok(src_v);
@@ -996,6 +1101,18 @@ impl<'a> Lowerer<'a> {
     /// the caller can store / return; the previous inline-print
     /// shortcut printed pieces eagerly and reordered output
     /// whenever a `format!` result outlived its emission point.
+    /// The low and high words of the `i128` value `value`, the shape every
+    /// runtime helper takes a 128-bit integer in.
+    pub(crate) fn split_wide(&mut self, value: &str) -> (String, String) {
+        let lo = self.fresh();
+        writeln!(self.out, "  {lo} = trunc i128 {value} to i64").unwrap();
+        let shifted = self.fresh();
+        writeln!(self.out, "  {shifted} = lshr i128 {value}, 64").unwrap();
+        let hi = self.fresh();
+        writeln!(self.out, "  {hi} = trunc i128 {shifted} to i64").unwrap();
+        (lo, hi)
+    }
+
     pub(crate) fn lower_concat_call(
         &mut self,
         args: &[Operand],
@@ -1039,12 +1156,25 @@ impl<'a> Lowerer<'a> {
                     "println/format of aggregate or variant types",
                 ));
             }
-            let value = self.lower_operand(arg)?;
+            let mut value = self.lower_operand(arg)?;
+            // A reference to a 128-bit integer (an element bound in place)
+            // renders the value it addresses.
+            if matches!(kind, ConcatKind::Wide(_))
+                && matches!(
+                    self.tcx.kind(self.operand_ty(arg)),
+                    Some(TyKind::Ref { .. })
+                )
+            {
+                let loaded = self.fresh();
+                writeln!(self.out, "  {loaded} = load i128, ptr {value}, align 8").unwrap();
+                value = loaded;
+            }
             let value = match kind {
                 ConcatKind::Unit => String::new(),
                 ConcatKind::StrPtr
                 | ConcatKind::Int
                 | ConcatKind::Uint
+                | ConcatKind::Wide(_)
                 | ConcatKind::Float
                 | ConcatKind::Bool
                 | ConcatKind::Char
@@ -1082,6 +1212,16 @@ impl<'a> Lowerer<'a> {
                 ConcatKind::Float => {
                     let widened = self.widen_to_f64(arg, &value);
                     writeln!(self.out, "  call void @{concat_f64}(double {widened})").unwrap();
+                }
+                ConcatKind::Wide(unsigned) => {
+                    let symbol = if unsigned {
+                        "gos_rt_concat_u128"
+                    } else {
+                        "gos_rt_concat_i128"
+                    };
+                    declare_rt(&mut self.runtime_refs, symbol);
+                    let (lo, hi) = self.split_wide(&value);
+                    writeln!(self.out, "  call void @{symbol}(i64 {lo}, i64 {hi})").unwrap();
                 }
                 ConcatKind::Bool => {
                     let widened = self.widen_bool_to_i32(arg, &value);

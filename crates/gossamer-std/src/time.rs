@@ -597,122 +597,66 @@ fn days_to_civil(days: i64) -> CivilDate {
     }
 }
 
-// --- Ticker / AfterFunc (Go's time.Ticker / time.AfterFunc) -------
+// --- AfterFunc (Go's time.AfterFunc) -------------------------------
 
-/// Recurring timer. Calls `tick` on each interval until the
-/// `stop` flag flips. The callback runs on the ticker's own
-/// thread; long-running callbacks block subsequent ticks.
-///
-/// Returned [`Ticker`] handle is `Drop`-safe - dropping it
-/// signals stop and joins the worker thread.
-pub struct Ticker {
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
-}
+/// The armed state of an [`after_func`] timer.
+const TIMER_ARMED: u8 = 0;
+/// The timer reached its deadline and ran its function.
+const TIMER_FIRED: u8 = 1;
+/// [`TimerHandle::cancel`] disarmed the timer first.
+const TIMER_CANCELLED: u8 = 2;
 
-impl Ticker {
-    /// Starts a new ticker that invokes `tick` every `interval`.
-    pub fn start(interval: Duration, mut tick: impl FnMut() + Send + 'static) -> Self {
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stop_for_thread = std::sync::Arc::clone(&stop);
-        let std_interval = interval.0;
-        let handle = std::thread::spawn(move || {
-            let mut next = gossamer_runtime::platform::Instant::now() + std_interval;
-            while !stop_for_thread.load(std::sync::atomic::Ordering::Acquire) {
-                let now = gossamer_runtime::platform::Instant::now();
-                if now < next {
-                    let remaining = next - now;
-                    // Sleep in short slices so we observe stop
-                    // promptly without busy-looping.
-                    let slice = std::cmp::min(remaining, std::time::Duration::from_millis(100));
-                    gossamer_runtime::platform::sleep(slice);
-                    continue;
-                }
-                tick();
-                next += std_interval;
-            }
-        });
-        Self {
-            stop,
-            handle: Some(handle),
-        }
-    }
-
-    /// Stops the ticker and waits for the worker thread to
-    /// finish. Idempotent - subsequent calls are no-ops.
-    pub fn stop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Release);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-    }
-}
-
-impl Drop for Ticker {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-/// One-shot timer (Go's `time.AfterFunc`). Schedules `f` to run
-/// after `delay` on a background thread. The returned
-/// [`TimerHandle`] can cancel the timer before it fires.
+/// One-shot timer (Go's `time.AfterFunc`): runs `f` once `delay` passes, on
+/// the runtime's poller thread, which every timer and I/O wait shares, so `f`
+/// must be short. The returned [`TimerHandle`] can cancel the timer before it
+/// fires; dropping the handle leaves the timer armed.
 pub fn after_func(delay: Duration, f: impl FnOnce() + Send + 'static) -> TimerHandle {
-    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let cancelled_for_thread = std::sync::Arc::clone(&cancelled);
-    let std_delay = delay.0;
-    let handle = std::thread::spawn(move || {
-        let deadline = gossamer_runtime::platform::Instant::now() + std_delay;
-        loop {
-            if cancelled_for_thread.load(std::sync::atomic::Ordering::Acquire) {
-                return;
+    let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(TIMER_ARMED));
+    let fire_state = std::sync::Arc::clone(&state);
+    let f = parking_lot::Mutex::new(Some(f));
+    let deadline = gossamer_runtime::platform::Instant::now() + delay.0;
+    let timer = crate::sched_global::add_timer(
+        deadline,
+        Box::new(move || {
+            let won = fire_state
+                .compare_exchange(
+                    TIMER_ARMED,
+                    TIMER_FIRED,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok();
+            if won && let Some(f) = f.lock().take() {
+                f();
             }
-            let now = gossamer_runtime::platform::Instant::now();
-            if now >= deadline {
-                break;
-            }
-            let slice = std::cmp::min(deadline - now, std::time::Duration::from_millis(100));
-            gossamer_runtime::platform::sleep(slice);
-        }
-        if !cancelled_for_thread.load(std::sync::atomic::Ordering::Acquire) {
-            f();
-        }
-    });
-    TimerHandle {
-        cancelled,
-        handle: Some(handle),
-    }
+        }),
+    );
+    TimerHandle { state, timer }
 }
 
 /// Handle returned by [`after_func`].
 pub struct TimerHandle {
-    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
+    state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    timer: crate::sched_global::TimerHandle,
 }
 
 impl TimerHandle {
-    /// Cancels the timer (no-op if it has already fired).
-    /// Returns `true` if the cancel happened before the timer
-    /// fired.
+    /// Cancels the timer, answering whether it was still armed: `false`
+    /// once it has fired or was cancelled before.
     pub fn cancel(&mut self) -> bool {
-        let was = self
-            .cancelled
-            .swap(true, std::sync::atomic::Ordering::AcqRel);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
+        let disarmed = self
+            .state
+            .compare_exchange(
+                TIMER_ARMED,
+                TIMER_CANCELLED,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok();
+        if disarmed {
+            crate::sched_global::cancel_timer(self.timer);
         }
-        !was
-    }
-}
-
-impl Drop for TimerHandle {
-    fn drop(&mut self) {
-        // Don't auto-cancel on drop - callers that fire-and-
-        // forget the handle expect the timer to still fire.
-        // We just detach the worker thread.
-        if let Some(h) = self.handle.take() {
-            let _ = h;
-        }
+        disarmed
     }
 }
 
@@ -813,46 +757,6 @@ mod tests {
     }
 
     #[test]
-    fn ticker_fires_repeatedly_until_stopped() {
-        // Structural check, not a rate check: receive N ticks on a
-        // channel and verify they all arrive. A slow CI scheduler
-        // stretches the test runtime; it does not stretch the
-        // assertion. The earlier wall-clock form ("sleep 150ms,
-        // expect >=4 ticks") encoded a runner-responsiveness
-        // assumption that breaks under macOS CI load.
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
-        let mut t = Ticker::start(Duration::from_millis(5), move || {
-            let _ = tx.send(());
-        });
-        // A genuinely broken ticker that never fires would hang
-        // forever without this bound; five seconds per tick is the
-        // failure envelope, not a rate expectation.
-        let per_tick_budget = std::time::Duration::from_secs(5);
-        for i in 0..4 {
-            rx.recv_timeout(per_tick_budget)
-                .unwrap_or_else(|e| panic!("ticker should fire tick {i}: {e}"));
-        }
-        t.stop();
-    }
-
-    #[test]
-    fn ticker_stops_on_drop() {
-        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counter_for_tick = std::sync::Arc::clone(&counter);
-        {
-            let _t = Ticker::start(Duration::from_millis(10), move || {
-                counter_for_tick.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            });
-            gossamer_runtime::platform::sleep(std::time::Duration::from_millis(40));
-        }
-        // After drop, no more ticks should land.
-        let snapshot = counter.load(std::sync::atomic::Ordering::Relaxed);
-        gossamer_runtime::platform::sleep(std::time::Duration::from_millis(80));
-        let post = counter.load(std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(snapshot, post, "ticker should stop on drop");
-    }
-
-    #[test]
     fn after_func_fires_after_delay() {
         // Condition-based wait: the callback signals a channel and the
         // test blocks on recv with a generous bound. This fails only if
@@ -871,9 +775,8 @@ mod tests {
     #[test]
     fn after_func_cancel_prevents_firing() {
         // Long delay so the cancel deterministically beats the deadline
-        // regardless of scheduler jitter. `cancel()` joins the timer
-        // thread, so once it returns the thread has exited and `fired`
-        // holds its final value - no post-cancel sleep race.
+        // regardless of scheduler jitter; a cancel that wins the timer's
+        // state means its function never runs.
         let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let fired_for_cb = std::sync::Arc::clone(&fired);
         let mut handle = after_func(Duration::from_secs(3600), move || {
@@ -885,5 +788,41 @@ mod tests {
             !fired.load(std::sync::atomic::Ordering::Acquire),
             "cancelled timer must not run its callback"
         );
+        assert!(!handle.cancel(), "a second cancel finds the timer disarmed");
+    }
+
+    #[test]
+    fn after_func_timers_share_the_poller_thread() {
+        // Each timer used to own a thread; a burst of them is now entries in
+        // the one poller's queue, every one of which fires.
+        let threads_before = thread_count();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handles: Vec<TimerHandle> = (0..200)
+            .map(|i| {
+                let tx = tx.clone();
+                after_func(Duration::from_millis(30), move || {
+                    let _ = tx.send(i);
+                })
+            })
+            .collect();
+        if let (Some(before), Some(during)) = (threads_before, thread_count()) {
+            assert!(
+                during < before + 8,
+                "{during} threads with 200 timers armed"
+            );
+        }
+        let mut seen: Vec<i32> = (0..200)
+            .map(|_| rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap())
+            .collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..200).collect::<Vec<_>>());
+        drop(handles);
+    }
+
+    /// Threads in this process, where the platform says.
+    fn thread_count() -> Option<usize> {
+        std::fs::read_dir("/proc/self/task")
+            .ok()
+            .map(Iterator::count)
     }
 }

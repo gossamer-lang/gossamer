@@ -1527,10 +1527,14 @@ pub(super) fn lower_intrinsic_call_string(
         // stack bytes for the rest. Scalars still go through the
         // 8-byte slot path so misaligned int / float types reach
         // the runtime as a clean little-endian 8-byte payload.
-        "gos_rt_vec_push" | "gos_rt_deque_push_back_wide" | "gos_rt_deque_push_front_wide" => {
+        "gos_rt_vec_push"
+        | "gos_rt_vec_push_owned"
+        | "gos_rt_deque_push_back_wide"
+        | "gos_rt_deque_push_front_wide" => {
             let callee: &'static str = match name {
                 "gos_rt_deque_push_back_wide" => "gos_rt_deque_push_back_wide",
                 "gos_rt_deque_push_front_wide" => "gos_rt_deque_push_front_wide",
+                "gos_rt_vec_push_owned" => "gos_rt_vec_push_owned",
                 _ => "gos_rt_vec_push",
             };
             let push_fn = intrinsics.extern_fn_by_name(module, callee)?;
@@ -1580,11 +1584,16 @@ pub(super) fn lower_intrinsic_call_string(
                     let slot_addr = builder.ins().stack_addr(ptr_ty, slot, 0);
                     store_i128_words(builder, value, slot_addr, 0);
                     slot_addr
-                } else if callee == "gos_rt_vec_push" {
+                } else if matches!(callee, "gos_rt_vec_push" | "gos_rt_vec_push_owned") {
                     // A scalar crosses as its word, which the runtime stores at
                     // the vector's own width (a packed `f32` narrows from it).
                     let v64 = coerce_arg_to(builder, value, types::I64)?;
-                    let push_word = intrinsics.extern_fn_by_name(module, "gos_rt_vec_push_i64")?;
+                    let word_push = if callee == "gos_rt_vec_push_owned" {
+                        "gos_rt_vec_push_i64_owned"
+                    } else {
+                        "gos_rt_vec_push_i64"
+                    };
+                    let push_word = intrinsics.extern_fn_by_name(module, word_push)?;
                     let fref = module.declare_func_in_func(push_word, builder.func);
                     let _ = builder.ins().call(fref, &[vec_p, v64]);
                     let unit = builder.ins().iconst(types::I64, 0);
@@ -1794,6 +1803,23 @@ pub(super) fn lower_intrinsic_call_string(
                 let call = builder.ins().call(fref, &[vec_p, i]);
                 builder.inst_results(call)[0]
             };
+            // A 128-bit integer destination is the value the element's two
+            // slots hold, as on the LLVM tier.
+            if destination.projection.is_empty()
+                && tcx.is_wide_int(resolve_place_ty(tcx, body, destination))
+            {
+                let value = builder
+                    .ins()
+                    .load(types::I128, MemFlagsData::trusted(), ptr, 0);
+                define_var_to(
+                    builder,
+                    locals,
+                    &intrinsics.body_cl_types,
+                    destination.local,
+                    value,
+                );
+                return Ok(true);
+            }
             // An aggregate destination is a copy of the element, as on the LLVM
             // tier: the drop pass gives it shares of its own, so it must not
             // name the vector's storage.

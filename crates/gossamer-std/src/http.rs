@@ -2006,7 +2006,7 @@ pub mod server {
 
         let shutdown = Arc::clone(&config.shutdown);
         let cfg_for_workers = config.clone();
-        let server_config = tls_config.rustls();
+        let server_config = tls_config.clone();
         let tx_for_accept = dispatch_tx.clone();
 
         let acceptor = std::thread::Builder::new()
@@ -2171,7 +2171,7 @@ pub mod server {
         listener: TcpListener,
         shutdown: Arc<AtomicBool>,
         config: Config,
-        server_config: std::sync::Arc<rustls::ServerConfig>,
+        server_config: crate::tls::ServerConfig,
         dispatch_tx: std::sync::mpsc::SyncSender<(Request, std::sync::mpsc::Sender<Response>)>,
     ) {
         let _ = listener.set_nonblocking(true);
@@ -2197,7 +2197,9 @@ pub mod server {
                         continue;
                     }
                     let cfg = config.clone();
-                    let tls_cfg = std::sync::Arc::clone(&server_config);
+                    // Read per connection, so a reloaded live configuration
+                    // reaches the next handshake.
+                    let tls_cfg = server_config.rustls();
                     let tx = dispatch_tx.clone();
                     let spawn = std::thread::Builder::new()
                         .name("gossamer-https-conn".to_string())

@@ -1,0 +1,95 @@
+// Both kinds of `http::ResponseStream` in one program: one the handler
+// writes itself (`ResponseStream::new`, `write`, `is_open`, `close`) and one
+// `http::stream` answers over an upstream response (`next_line`,
+// `next_chunk`). Each is the same type, so a function taking
+// `http::ResponseStream` reads either, and the proxy route hands the upstream
+// stream straight to `Response::stream`. The writer's code comes first in the
+// file, so the reader methods must not depend on which kind the program
+// names first. The handler reaches `serve` and a router as an `Fn`
+// parameter, a callable value rather than a closure built in place.
+//
+// Binds port 0, so it needs no port lock. Self-terminating: the client runs
+// in main and the program returns normally.
+
+use std::{errors, http, time}
+use std::http::router
+
+fn feed(body: http::ResponseStream) {
+    let mut i = 0
+    while i < 3 {
+        let _ = body.write(f"tick {i}\n")
+        i += 1
+    }
+    let _ = body.write_bytes("done".bytes())
+    println(f"writer open before close: {body.is_open()}")
+    body.close()
+}
+
+fn events() -> Result<http::Response, errors::Error> {
+    let body = http::ResponseStream::new()
+    cohort {
+        spawn(|| feed(body))
+    }?
+    Ok(http::Response::stream(200, "text/plain", body))
+}
+
+fn proxied(addr: String) -> Result<http::Response, errors::Error> {
+    let upstream = http::stream("GET", f"http://{addr}/events", "", #[])?
+    Ok(http::Response::stream(upstream.status, "text/plain", upstream))
+}
+
+/// Reads the first line, then the rest in chunks of at most four bytes. How
+/// the rest splits into chunks depends on when its frames arrive, so what is
+/// reported is the bytes and whether every chunk kept to the limit.
+fn drain(s: http::ResponseStream) -> String {
+    let mut text = ""
+    if let Some(line) = s.next_line() {
+        text += f"line {line.trim()};"
+    }
+    let mut rest: Vec<u8> = #[]
+    let mut within = true
+    while let Some(chunk) = s.next_chunk(4) {
+        within = within && chunk.len() <= 4
+        for b in chunk { rest.push(b) }
+    }
+    let tail = String::from_utf8(rest).unwrap_or("?")
+    text + f" rest {tail:?}, chunks within 4: {within}"
+}
+
+fn main() -> Result<(), errors::Error> {
+    let s = http::Server::new()
+    s.listen("127.0.0.1:0")?
+    let addr = s.addr()
+    let routes = |r: http::Request| -> Result<http::Response, errors::Error> {
+        match r.path {
+            "/events" => events()
+            _ => proxied(addr)
+        }
+    }
+    spawn(|| run(s, routes))
+    time::sleep(300)
+    let direct = http::stream("GET", f"http://{addr}/events", "", #[])?
+    println(f"direct {direct.status}: {drain(direct)}")
+    let through = http::stream("GET", f"http://{addr}/proxy", "", #[])?
+    println(f"proxied {through.status}: {drain(through)}")
+
+    let routed = http::Server::new()
+    routed.listen("127.0.0.1:0")?
+    let routed_addr = routed.addr()
+    let table = mount(routes)
+    spawn(|| { let _ = routed.serve(table) })
+    time::sleep(300)
+    let via_router = http::stream("GET", f"http://{routed_addr}/events", "", #[])?
+    println(f"routed {via_router.status}: {drain(via_router)}")
+    let _ = routed.shutdown(1000)
+    let _ = s.shutdown(1000)
+    Ok(())
+}
+
+fn mount(handler: Fn(http::Request) -> Result<http::Response, errors::Error>) -> router::Router {
+    router::Router::new().get("/events", handler)
+}
+
+fn run(s: http::Server, routes: Fn(http::Request) -> Result<http::Response, errors::Error>) {
+    let _ = s.serve(routes)
+}

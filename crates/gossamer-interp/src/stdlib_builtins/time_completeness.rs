@@ -127,6 +127,8 @@ pub(crate) fn install_time_completeness(globals: &mut Vec<(&'static str, Value)>
             ("__gos_time_civil_raw", builtin_time_civil_raw),
             ("__gos_time_resolve_raw", builtin_time_resolve_raw),
             ("__gos_time_format_in_raw", builtin_time_format_in_raw),
+            ("__gos_time_strftime_raw", builtin_time_strftime_raw),
+            ("__gos_time_strptime_raw", builtin_time_strptime_raw),
             (
                 "__gos_time_format_rfc3339_raw",
                 builtin_time_format_rfc3339_raw,
@@ -234,6 +236,43 @@ fn builtin_time_format_in_raw(args: &[Value]) -> RuntimeResult<Value> {
 
 #[cfg(target_arch = "wasm32")]
 fn builtin_time_format_in_raw(_args: &[Value]) -> RuntimeResult<Value> {
+    Ok(err_variant("civil time is unsupported on wasm32"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn builtin_time_strftime_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let ns = args.first().and_then(value_to_int).unwrap_or(0);
+    let spec = args.get(1).and_then(as_str).unwrap_or("");
+    let layout = args.get(2).and_then(as_str).unwrap_or("");
+    match gossamer_runtime::c_abi::time::strftime(ns, spec, layout) {
+        Ok(value) => Ok(ok_variant(Value::String(value.into()))),
+        Err(error) => Ok(err_variant(error)),
+    }
+}
+
+// Platform: wasm32 builds carry no time-zone support.
+#[cfg(target_arch = "wasm32")]
+fn builtin_time_strftime_raw(_args: &[Value]) -> RuntimeResult<Value> {
+    Ok(err_variant("civil time is unsupported on wasm32"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn builtin_time_strptime_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let layout = args.first().and_then(as_str).unwrap_or("");
+    let text = args.get(1).and_then(as_str).unwrap_or("");
+    let spec = args.get(2).and_then(as_str).unwrap_or("");
+    match gossamer_runtime::c_abi::time::strptime(layout, text, spec) {
+        Ok((ns, at)) => Ok(ok_variant(Value::Tuple(Arc::new(vec![
+            Value::Int(ns),
+            Value::String(at.into()),
+        ])))),
+        Err(error) => Ok(err_variant(error)),
+    }
+}
+
+// Platform: wasm32 builds carry no time-zone support.
+#[cfg(target_arch = "wasm32")]
+fn builtin_time_strptime_raw(_args: &[Value]) -> RuntimeResult<Value> {
     Ok(err_variant("civil time is unsupported on wasm32"))
 }
 

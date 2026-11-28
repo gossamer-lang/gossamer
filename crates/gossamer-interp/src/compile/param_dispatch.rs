@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use gossamer_hir::{
-    HirExpr, HirExprKind, HirFn, HirId, HirItemKind, HirProgram, for_each_child_expr,
-    for_each_child_expr_in_block,
+    HirBinaryOp, HirExpr, HirExprKind, HirFn, HirId, HirItemKind, HirProgram, HirUnaryOp,
+    for_each_child_expr, for_each_child_expr_in_block,
 };
 use gossamer_resolve::DefId;
 use gossamer_types::{GenericArg, Ty, TyCtxt, TyKind};
@@ -171,7 +171,9 @@ impl ParamDispatch {
         let mut dependent: HashSet<Callable> = fns
             .iter()
             .filter(|(_, (_, decl))| {
-                !param_function_paths(decl, tcx).is_empty() || renders_param_value(decl, tcx)
+                !param_function_paths(decl, tcx).is_empty()
+                    || renders_param_value(decl, tcx)
+                    || computes_on_param(decl, tcx)
             })
             .map(|(callable, _)| callable.clone())
             .collect();
@@ -484,6 +486,45 @@ fn renders_param_value(decl: &HirFn, tcx: &TyCtxt) -> bool {
         _ => {}
     });
     renders
+}
+
+/// Whether the body does arithmetic, bit, shift, or cast work on a value of a
+/// type parameter. Its width and signedness come from the instantiation (a
+/// `u8` sum overflows where an `i64` one does not), so each instantiation is
+/// compiled with its own operand types.
+fn computes_on_param(decl: &HirFn, tcx: &TyCtxt) -> bool {
+    let is_param = |ty: Ty| {
+        let mut ty = ty;
+        while let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
+            ty = *inner;
+        }
+        matches!(tcx.kind_of(ty), TyKind::Param { .. })
+    };
+    let mut computes = false;
+    visit_body(decl, &mut |expr| match &expr.kind {
+        HirExprKind::Binary { op, lhs, rhs }
+            if !matches!(
+                op,
+                HirBinaryOp::Eq
+                    | HirBinaryOp::Ne
+                    | HirBinaryOp::Lt
+                    | HirBinaryOp::Le
+                    | HirBinaryOp::Gt
+                    | HirBinaryOp::Ge
+                    | HirBinaryOp::And
+                    | HirBinaryOp::Or
+            ) && (is_param(lhs.ty) || is_param(rhs.ty)) =>
+        {
+            computes = true;
+        }
+        HirExprKind::Unary {
+            op: HirUnaryOp::Neg | HirUnaryOp::Not,
+            operand,
+        } if is_param(operand.ty) => computes = true,
+        HirExprKind::Cast { value, ty } if is_param(value.ty) || is_param(*ty) => computes = true,
+        _ => {}
+    });
+    computes
 }
 
 /// Whether `ty` names a type parameter anywhere in its structure.

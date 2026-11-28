@@ -58,6 +58,12 @@ pub enum IntTy {
 }
 
 impl IntTy {
+    /// Whether this is `i128` / `u128`, which no tier holds in a 64-bit word.
+    #[must_use]
+    pub const fn is_wide(self) -> bool {
+        matches!(self, Self::I128 | Self::U128)
+    }
+
     /// Returns the source-level name of this integer type (e.g. `i32`).
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -75,6 +81,27 @@ impl IntTy {
             Self::U128 => "u128",
             Self::Usize => "usize",
         }
+    }
+
+    /// The integer type a source-level name spells, the inverse of
+    /// [`IntTy::as_str`].
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "i8" => Self::I8,
+            "i16" => Self::I16,
+            "i32" => Self::I32,
+            "i64" => Self::I64,
+            "i128" => Self::I128,
+            "isize" => Self::Isize,
+            "u8" => Self::U8,
+            "u16" => Self::U16,
+            "u32" => Self::U32,
+            "u64" => Self::U64,
+            "u128" => Self::U128,
+            "usize" => Self::Usize,
+            _ => return None,
+        })
     }
 
     /// Returns `true` when this integer type is signed.

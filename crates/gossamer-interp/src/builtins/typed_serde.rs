@@ -10,7 +10,7 @@ type Reader = json_std::typed::TypedReader<SmolStr>;
 /// worker thread between two steps, so the tables are process-wide.
 struct SerdeHandles {
     readers: Vec<Option<Reader>>,
-    writers: Vec<Option<Vec<u8>>>,
+    writers: Vec<Option<gossamer_runtime::c_abi::typed_serde::SerdeWriter>>,
 }
 
 static SERDE_HANDLES: parking_lot::Mutex<SerdeHandles> = parking_lot::Mutex::new(SerdeHandles {
@@ -55,12 +55,20 @@ fn with_reader<T>(
 
 /// Runs `f` on the writer `args[0]` names.
 fn with_writer(args: &[Value], f: impl FnOnce(&mut Vec<u8>)) {
+    with_writer_state(args, |writer| f(&mut writer.bytes));
+}
+
+/// Runs `f` on the writer state `args[0]` names.
+fn with_writer_state(
+    args: &[Value],
+    f: impl FnOnce(&mut gossamer_runtime::c_abi::typed_serde::SerdeWriter),
+) {
     let Some(slot) = serde_slot(args) else {
         return;
     };
     let mut handles = SERDE_HANDLES.lock();
-    if let Some(out) = handles.writers.get_mut(slot).and_then(Option::as_mut) {
-        f(out);
+    if let Some(writer) = handles.writers.get_mut(slot).and_then(Option::as_mut) {
+        f(writer);
     }
 }
 
@@ -81,7 +89,7 @@ fn builtin_serde_rd_new(args: &[Value]) -> RuntimeResult<Value> {
 /// handles alike.
 fn builtin_serde_rd_new_value(args: &[Value]) -> RuntimeResult<Value> {
     let text = match args.first() {
-        Some(Value::Json(value)) => json_std::encode(value.as_value()),
+        Some(Value::Json(value)) => json_std::encode(&value.as_value()),
         Some(other) => json_std::encode(&crate::builtins::gossamer_to_json_value(other)),
         None => "null".to_owned(),
     };
@@ -97,9 +105,27 @@ fn open_converted(converted: Result<String, String>) -> RuntimeResult<Value> {
     })
 }
 
-/// `yaml::decode::<T>`'s reader.
+/// The `json::DuplicateKeys` policy a step's argument `index` names.
+fn duplicates_arg(args: &[Value], index: usize) -> json_std::DuplicateKeys {
+    match args.get(index) {
+        Some(Value::Int(n)) => json_std::DuplicateKeys::from_index(*n),
+        _ => json_std::DuplicateKeys::Error,
+    }
+}
+
+/// `yaml::decode::<T>`'s reader, reading a repeated mapping key as its
+/// second argument's policy says.
 fn builtin_serde_rd_new_yaml(args: &[Value]) -> RuntimeResult<Value> {
-    open_converted(gossamer_std::encoding::yaml::to_json_text(serde_text(args, 0)))
+    open_converted(gossamer_std::encoding::yaml::to_json_text_with(
+        serde_text(args, 0),
+        duplicates_arg(args, 1),
+    ))
+}
+
+fn builtin_serde_rd_duplicates(args: &[Value]) -> RuntimeResult<Value> {
+    let policy = duplicates_arg(args, 1);
+    with_reader(args, (), |r| r.set_duplicate_keys(policy));
+    Ok(Value::Unit)
 }
 
 /// `toml::decode::<T>`'s reader.
@@ -130,7 +156,7 @@ fn builtin_serde_rd_free(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_serde_rd_failed(args: &[Value]) -> RuntimeResult<Value> {
-    Ok(Value::Bool(with_reader(args, false, |r| r.failed())))
+    Ok(Value::Bool(with_reader(args, false, Reader::finish)))
 }
 
 fn builtin_serde_rd_error(args: &[Value]) -> RuntimeResult<Value> {
@@ -172,14 +198,31 @@ fn builtin_serde_rd_struct(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Unit)
 }
 
-fn builtin_serde_rd_field(args: &[Value]) -> RuntimeResult<Value> {
-    let index = serde_index(args, 1);
-    Ok(Value::Bool(with_reader(args, false, |r| r.enter_field(index))))
+fn builtin_serde_rd_next_field(args: &[Value]) -> RuntimeResult<Value> {
+    let index = with_reader(args, -1, |r| {
+        if r.next_field() {
+            i64::try_from(r.field_index()).unwrap_or(-1)
+        } else {
+            -1
+        }
+    });
+    Ok(Value::Int(index))
 }
 
 fn builtin_serde_rd_i64(args: &[Value]) -> RuntimeResult<Value> {
     let message = serde_text(args, 1).to_owned();
     Ok(Value::Int(with_reader(args, 0, |r| r.read_i64(&message))))
+}
+
+fn builtin_serde_rd_i128(args: &[Value]) -> RuntimeResult<Value> {
+    let message = serde_text(args, 1).to_owned();
+    let bits = with_reader(args, 0, |r| r.read_wide(&message, false));
+    Ok(Value::from_i128(bits.cast_signed()))
+}
+
+fn builtin_serde_rd_u128(args: &[Value]) -> RuntimeResult<Value> {
+    let message = serde_text(args, 1).to_owned();
+    Ok(Value::from_u128(with_reader(args, 0, |r| r.read_wide(&message, true))))
 }
 
 fn builtin_serde_rd_u64(args: &[Value]) -> RuntimeResult<Value> {
@@ -204,8 +247,8 @@ fn builtin_serde_rd_char(args: &[Value]) -> RuntimeResult<Value> {
 
 fn builtin_serde_rd_str(args: &[Value]) -> RuntimeResult<Value> {
     let message = serde_text(args, 1).to_owned();
-    let text = with_reader(args, String::new(), |r| r.read_string(&message));
-    Ok(Value::String(SmolStr::from(text)))
+    let text = with_reader(args, SmolStr::default(), |r| SmolStr::from(&*r.read_str(&message)));
+    Ok(Value::String(text))
 }
 
 fn builtin_serde_rd_json(args: &[Value]) -> RuntimeResult<Value> {
@@ -216,8 +259,12 @@ fn builtin_serde_rd_json(args: &[Value]) -> RuntimeResult<Value> {
 
 fn builtin_serde_rd_array(args: &[Value]) -> RuntimeResult<Value> {
     let message = serde_text(args, 1).to_owned();
-    let count = with_reader(args, 0, |r| r.begin_array(&message));
-    Ok(Value::Int(i64::try_from(count).unwrap_or(i64::MAX)))
+    with_reader(args, (), |r| r.begin_array(&message));
+    Ok(Value::Unit)
+}
+
+fn builtin_serde_rd_next_elem(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Bool(with_reader(args, false, Reader::next_elem)))
 }
 
 fn builtin_serde_rd_tuple(args: &[Value]) -> RuntimeResult<Value> {
@@ -242,20 +289,17 @@ fn builtin_serde_rd_at(args: &[Value]) -> RuntimeResult<Value> {
 
 fn builtin_serde_rd_map(args: &[Value]) -> RuntimeResult<Value> {
     let message = serde_text(args, 1).to_owned();
-    let count = with_reader(args, 0, |r| r.begin_map(&message));
-    Ok(Value::Int(i64::try_from(count).unwrap_or(i64::MAX)))
-}
-
-fn builtin_serde_rd_map_key(args: &[Value]) -> RuntimeResult<Value> {
-    let index = serde_index(args, 1);
-    let key = with_reader(args, String::new(), |r| r.map_key(index).to_owned());
-    Ok(Value::String(SmolStr::from(key)))
-}
-
-fn builtin_serde_rd_map_value(args: &[Value]) -> RuntimeResult<Value> {
-    let index = serde_index(args, 1);
-    with_reader(args, (), |r| r.enter_map_value(index));
+    with_reader(args, (), |r| r.begin_map(&message));
     Ok(Value::Unit)
+}
+
+fn builtin_serde_rd_next_entry(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Bool(with_reader(args, false, Reader::next_entry)))
+}
+
+fn builtin_serde_rd_entry_key(args: &[Value]) -> RuntimeResult<Value> {
+    let key = with_reader(args, String::new(), |r| r.entry_key().to_owned());
+    Ok(Value::String(SmolStr::from(key)))
 }
 
 fn builtin_serde_rd_enum(args: &[Value]) -> RuntimeResult<Value> {
@@ -280,14 +324,16 @@ fn builtin_serde_rd_tagged(args: &[Value]) -> RuntimeResult<Value> {
 fn builtin_serde_wr_new(_args: &[Value]) -> RuntimeResult<Value> {
     let mut handles = SERDE_HANDLES.lock();
     let slot = if let Some(free) = handles.writers.iter().position(Option::is_none) {
-        handles.writers[free] = Some(Vec::with_capacity(
-            gossamer_runtime::c_abi::typed_serde::SERDE_WRITER_CAPACITY,
-        ));
+        handles.writers[free] = Some(gossamer_runtime::c_abi::typed_serde::SerdeWriter {
+            bytes: Vec::with_capacity(gossamer_runtime::c_abi::typed_serde::SERDE_WRITER_CAPACITY),
+            non_finite: None,
+        });
         free
     } else {
-        handles.writers.push(Some(Vec::with_capacity(
-            gossamer_runtime::c_abi::typed_serde::SERDE_WRITER_CAPACITY,
-        )));
+        handles.writers.push(Some(gossamer_runtime::c_abi::typed_serde::SerdeWriter {
+            bytes: Vec::with_capacity(gossamer_runtime::c_abi::typed_serde::SERDE_WRITER_CAPACITY),
+            non_finite: None,
+        }));
         handles.writers.len() - 1
     };
     Ok(serde_handle(slot))
@@ -296,15 +342,46 @@ fn builtin_serde_wr_new(_args: &[Value]) -> RuntimeResult<Value> {
 fn builtin_serde_wr_finish(args: &[Value]) -> RuntimeResult<Value> {
     let bytes = serde_slot(args)
         .and_then(|slot| SERDE_HANDLES.lock().writers.get_mut(slot).and_then(Option::take))
+        .map(|writer| writer.bytes)
         .unwrap_or_default();
     Ok(Value::String(SmolStr::from(
         String::from_utf8_lossy(&bytes).into_owned(),
     )))
 }
 
+/// `json::encode`'s finish: the text, or the error for a NaN or an infinity
+/// the walk met.
+fn builtin_serde_wr_finish_json(args: &[Value]) -> RuntimeResult<Value> {
+    finish_json(args, false)
+}
+
+/// `json::encode_pretty`'s finish.
+fn builtin_serde_wr_finish_json_pretty(args: &[Value]) -> RuntimeResult<Value> {
+    finish_json(args, true)
+}
+
+fn finish_json(args: &[Value], pretty: bool) -> RuntimeResult<Value> {
+    let writer = serde_slot(args)
+        .and_then(|slot| SERDE_HANDLES.lock().writers.get_mut(slot).and_then(Option::take))
+        .unwrap_or_default();
+    if let Some(value) = writer.non_finite {
+        return Ok(crate::builtins::err_variant(
+            gossamer_runtime::c_abi::typed_serde::non_finite_message(value),
+        ));
+    }
+    let compact = String::from_utf8_lossy(&writer.bytes);
+    let text = if pretty {
+        json_std::typed::indent_text(&compact)
+    } else {
+        compact.into_owned()
+    };
+    Ok(converted_result(Ok(text)))
+}
+
 fn builtin_serde_wr_finish_pretty(args: &[Value]) -> RuntimeResult<Value> {
     let bytes = serde_slot(args)
         .and_then(|slot| SERDE_HANDLES.lock().writers.get_mut(slot).and_then(Option::take))
+        .map(|writer| writer.bytes)
         .unwrap_or_default();
     let compact = String::from_utf8_lossy(&bytes);
     Ok(Value::String(SmolStr::from(
@@ -316,6 +393,7 @@ fn builtin_serde_wr_finish_pretty(args: &[Value]) -> RuntimeResult<Value> {
 fn take_writer(args: &[Value]) -> String {
     let bytes = serde_slot(args)
         .and_then(|slot| SERDE_HANDLES.lock().writers.get_mut(slot).and_then(Option::take))
+        .map(|writer| writer.bytes)
         .unwrap_or_default();
     String::from_utf8_lossy(&bytes).into_owned()
 }
@@ -375,6 +453,25 @@ fn builtin_serde_wr_i64(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Unit)
 }
 
+/// Appends a 128-bit integer: a number when it fits 64 bits, else a string.
+fn write_wide(args: &[Value], unsigned: bool) -> RuntimeResult<Value> {
+    let bits = args
+        .get(1)
+        .and_then(if unsigned { Value::as_u128 } else { |v: &Value| v.as_i128().map(i128::cast_unsigned) })
+        .unwrap_or(0);
+    let text = json_std::typed::wide_json_text(bits, unsigned);
+    with_writer(args, |out| out.extend_from_slice(text.as_bytes()));
+    Ok(Value::Unit)
+}
+
+fn builtin_serde_wr_i128(args: &[Value]) -> RuntimeResult<Value> {
+    write_wide(args, false)
+}
+
+fn builtin_serde_wr_u128(args: &[Value]) -> RuntimeResult<Value> {
+    write_wide(args, true)
+}
+
 fn builtin_serde_wr_u64(args: &[Value]) -> RuntimeResult<Value> {
     let text = match args.get(1) {
         Some(Value::Uint(n)) => n.to_string(),
@@ -421,13 +518,19 @@ fn builtin_serde_wr_f32(args: &[Value]) -> RuntimeResult<Value> {
 
 fn builtin_serde_wr_f64_tree(args: &[Value]) -> RuntimeResult<Value> {
     let value = serde_float_arg(args);
-    with_writer(args, |out| gossamer_runtime::builtins::write_json_tree_float(out, value));
+    with_writer_state(args, |writer| {
+        writer.note_float(value);
+        gossamer_runtime::builtins::write_json_tree_float(&mut writer.bytes, value);
+    });
     Ok(Value::Unit)
 }
 
 fn builtin_serde_wr_f32_tree(args: &[Value]) -> RuntimeResult<Value> {
     let value = gossamer_runtime::builtins::f32_as_decimal_double(serde_float_arg(args));
-    with_writer(args, |out| gossamer_runtime::builtins::write_json_tree_float(out, value));
+    with_writer_state(args, |writer| {
+        writer.note_float(value);
+        gossamer_runtime::builtins::write_json_tree_float(&mut writer.bytes, value);
+    });
     Ok(Value::Unit)
 }
 
@@ -482,6 +585,7 @@ type SerdeBuiltin = fn(&[Value]) -> RuntimeResult<Value>;
 /// The `__gos_serde_*` builtins, by the names the serde pass calls.
 const SERDE_BUILTINS: &[(&str, SerdeBuiltin)] = &[
     ("__gos_serde_rd_array", builtin_serde_rd_array),
+    ("__gos_serde_rd_next_elem", builtin_serde_rd_next_elem),
     ("__gos_serde_rd_at", builtin_serde_rd_at),
     ("__gos_serde_rd_bool", builtin_serde_rd_bool),
     ("__gos_serde_rd_char", builtin_serde_rd_char),
@@ -491,16 +595,18 @@ const SERDE_BUILTINS: &[(&str, SerdeBuiltin)] = &[
     ("__gos_serde_rd_f64", builtin_serde_rd_f64),
     ("__gos_serde_rd_fail", builtin_serde_rd_fail),
     ("__gos_serde_rd_failed", builtin_serde_rd_failed),
-    ("__gos_serde_rd_field", builtin_serde_rd_field),
+    ("__gos_serde_rd_next_field", builtin_serde_rd_next_field),
     ("__gos_serde_rd_free", builtin_serde_rd_free),
+    ("__gos_serde_rd_i128", builtin_serde_rd_i128),
     ("__gos_serde_rd_i64", builtin_serde_rd_i64),
+    ("__gos_serde_rd_duplicates", builtin_serde_rd_duplicates),
     ("__gos_serde_rd_int", builtin_serde_rd_int),
     ("__gos_serde_rd_is_null", builtin_serde_rd_is_null),
     ("__gos_serde_rd_json", builtin_serde_rd_json),
     ("__gos_serde_rd_leave", builtin_serde_rd_leave),
     ("__gos_serde_rd_map", builtin_serde_rd_map),
-    ("__gos_serde_rd_map_key", builtin_serde_rd_map_key),
-    ("__gos_serde_rd_map_value", builtin_serde_rd_map_value),
+    ("__gos_serde_rd_next_entry", builtin_serde_rd_next_entry),
+    ("__gos_serde_rd_entry_key", builtin_serde_rd_entry_key),
     ("__gos_serde_rd_new", builtin_serde_rd_new),
     ("__gos_serde_rd_new_toml", builtin_serde_rd_new_toml),
     ("__gos_serde_rd_new_value", builtin_serde_rd_new_value),
@@ -509,6 +615,7 @@ const SERDE_BUILTINS: &[(&str, SerdeBuiltin)] = &[
     ("__gos_serde_rd_struct", builtin_serde_rd_struct),
     ("__gos_serde_rd_tagged", builtin_serde_rd_tagged),
     ("__gos_serde_rd_tuple", builtin_serde_rd_tuple),
+    ("__gos_serde_rd_u128", builtin_serde_rd_u128),
     ("__gos_serde_rd_u64", builtin_serde_rd_u64),
     ("__gos_serde_wr_bool", builtin_serde_wr_bool),
     ("__gos_serde_wr_char", builtin_serde_wr_char),
@@ -517,9 +624,12 @@ const SERDE_BUILTINS: &[(&str, SerdeBuiltin)] = &[
     ("__gos_serde_wr_f64", builtin_serde_wr_f64),
     ("__gos_serde_wr_f64_tree", builtin_serde_wr_f64_tree),
     ("__gos_serde_wr_finish", builtin_serde_wr_finish),
+    ("__gos_serde_wr_finish_json", builtin_serde_wr_finish_json),
+    ("__gos_serde_wr_finish_json_pretty", builtin_serde_wr_finish_json_pretty),
     ("__gos_serde_wr_finish_pretty", builtin_serde_wr_finish_pretty),
     ("__gos_serde_wr_finish_toml", builtin_serde_wr_finish_toml),
     ("__gos_serde_wr_finish_yaml", builtin_serde_wr_finish_yaml),
+    ("__gos_serde_wr_i128", builtin_serde_wr_i128),
     ("__gos_serde_wr_i64", builtin_serde_wr_i64),
     ("__gos_serde_wr_json", builtin_serde_wr_json),
     ("__gos_serde_wr_key", builtin_serde_wr_key),
@@ -527,5 +637,6 @@ const SERDE_BUILTINS: &[(&str, SerdeBuiltin)] = &[
     ("__gos_serde_wr_raw", builtin_serde_wr_raw),
     ("__gos_serde_wr_sep", builtin_serde_wr_sep),
     ("__gos_serde_wr_str", builtin_serde_wr_str),
+    ("__gos_serde_wr_u128", builtin_serde_wr_u128),
     ("__gos_serde_wr_u64", builtin_serde_wr_u64),
 ];

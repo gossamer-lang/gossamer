@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0147]: A `{v:.N}` precision on a value that is neither a number nor text. - here
+--- framed ---
+error[GT0147]: A `{v:.N}` precision on a value that is neither a number nor text.
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

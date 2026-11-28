@@ -3029,6 +3029,31 @@ impl Resolver {
         .then_some(resolution)
     }
 
+    /// Whether the value path `effective` (spelled `joined`) names a member a
+    /// standard module does not export. A head a `use` binds also names the
+    /// module the import targets (`use std::strings as json`), which a
+    /// standard module sharing its spelling does not export; a head bound to
+    /// a module of the program is the program's to check.
+    fn is_stdlib_phantom_member(&self, effective: &[&str], joined: &str) -> bool {
+        if !path_shape_is_validated(effective) || self.stdlib_member_resolves(joined, effective) {
+            return false;
+        }
+        let imported = self
+            .module_imports
+            .get(&(self.current_module.join("::"), effective[0].to_string()));
+        match imported.map(|target| target.strip_prefix("std::")) {
+            Some(None) => false,
+            Some(Some(module)) => {
+                let mut through: Vec<&str> = module.split("::").collect();
+                through.extend(effective[1..].iter().copied());
+                let through_joined = through.join("::");
+                !self.stdlib_member_resolves(&through_joined, &through)
+                    && !crate::stdlib_exports::is_stdlib_module_path_or_namespace(&through_joined)
+            }
+            None => true,
+        }
+    }
+
     fn resolve_value_path(&mut self, path: &PathExpr, anchor: NodeId, span: Span) {
         let Some(head) = path.segments.first() else {
             return;
@@ -3128,9 +3153,7 @@ impl Resolver {
                 self.resolve_path_generic_args(path);
                 return;
             }
-            let stdlib_phantom = path_shape_is_validated(&effective)
-                && !self.stdlib_member_resolves(&joined, &effective);
-            if stdlib_phantom {
+            if self.is_stdlib_phantom_member(&effective, &joined) {
                 self.emit(ResolveError::UnresolvedName { name: joined }, span);
                 self.resolutions.insert(anchor, Resolution::Err);
                 self.resolve_path_generic_args(path);
@@ -4058,7 +4081,7 @@ fn path_shape_is_validated(effective: &[&str]) -> bool {
         }
         [head, sub, _member]
             if (matches!(*head, "json" | "flag") && *sub == "Value")
-                || (matches!(*head, "process" | "exec") && !starts_lowercase(sub)) =>
+                || (*head == "process" && !starts_lowercase(sub)) =>
         {
             crate::stdlib_exports::is_stdlib_module_name(head)
         }

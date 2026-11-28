@@ -184,5 +184,5 @@ pub(crate) fn response_value_from_native(
         })
         .collect();
     fields.push(("headers", Value::Array(Arc::new(headers))));
-    Value::struct_("Response", Arc::unwrap_or_clone(Arc::new(fields)))
+    Value::struct_("http::Response", Arc::unwrap_or_clone(Arc::new(fields)))
 }

@@ -505,7 +505,7 @@ impl<'a> Builder<'a> {
     pub(super) fn lower_strconv_free(
         &mut self,
         joined: &str,
-        _args: &[HirExpr],
+        args: &[HirExpr],
     ) -> Option<(&'static str, gossamer_types::Ty)> {
         Some(match joined {
             // 0.10.0 - strconv free fns. parse_* return
@@ -527,7 +527,34 @@ impl<'a> Builder<'a> {
             // Format-spec intrinsics from `{:spec}` expansion. `__fmt_radix`
             // and `__fmt_upper` reuse the strconv/strings shims; `__fmt_pad`
             // applies width/alignment/fill to an already-rendered string.
+            "__fmt_radix" if args.first().is_some_and(|a| self.tcx.is_wide_int(a.ty)) => {
+                ("gos_rt_fmt_radix_i128", self.tcx.string_ty())
+            }
             "__fmt_radix" => ("gos_rt_fmt_radix_i64", self.tcx.string_ty()),
+            // An integer's `{:.N}` keeps its exact digits rather than widening
+            // to a float, which would round anything past 2^53.
+            "__fmt_prec"
+                if args
+                    .first()
+                    .is_some_and(|a| self.int_prec_operand(a.ty).is_some()) =>
+            {
+                let int = args.first().and_then(|a| self.int_prec_operand(a.ty))?;
+                let helper = match int {
+                    gossamer_types::IntTy::I128 => "gos_rt_i128_prec_to_str",
+                    gossamer_types::IntTy::U128 => "gos_rt_u128_prec_to_str",
+                    gossamer_types::IntTy::U8
+                    | gossamer_types::IntTy::U16
+                    | gossamer_types::IntTy::U32
+                    | gossamer_types::IntTy::U64
+                    | gossamer_types::IntTy::Usize => "gos_rt_u64_prec_to_str",
+                    gossamer_types::IntTy::I8
+                    | gossamer_types::IntTy::I16
+                    | gossamer_types::IntTy::I32
+                    | gossamer_types::IntTy::I64
+                    | gossamer_types::IntTy::Isize => "gos_rt_i64_prec_to_str",
+                };
+                (helper, self.tcx.string_ty())
+            }
             "__fmt_upper" => ("gos_rt_str_to_upper", self.tcx.string_ty()),
             "__fmt_pad" => ("gos_rt_fmt_pad", self.tcx.string_ty()),
             "strconv::format_i64" => ("gos_rt_strconv_format_i64", self.tcx.string_ty()),
@@ -536,6 +563,20 @@ impl<'a> Builder<'a> {
             "strconv::format_bool" => ("gos_rt_strconv_format_bool", self.tcx.string_ty()),
             _ => return None,
         })
+    }
+
+    /// The integer type a `{:.N}` operand of type `ty` renders as, through
+    /// references and newtypes.
+    fn int_prec_operand(&self, ty: gossamer_types::Ty) -> Option<gossamer_types::IntTy> {
+        let mut ty = ty;
+        loop {
+            match self.tcx.kind_of(ty) {
+                gossamer_types::TyKind::Ref { inner, .. }
+                | gossamer_types::TyKind::Nominal { repr: inner, .. } => ty = *inner,
+                gossamer_types::TyKind::Int(int) => return Some(*int),
+                _ => return None,
+            }
+        }
     }
 
     pub(super) fn lower_compress_free(
@@ -688,10 +729,6 @@ impl<'a> Builder<'a> {
             }
             "html::escape" => ("gos_rt_html_escape", self.tcx.string_ty()),
             "html::unescape" => ("gos_rt_html_unescape", self.tcx.string_ty()),
-            "html::template::render_json" => (
-                "gos_rt_html_template_render_json",
-                self.result_string_error_adt_ty(),
-            ),
             _ => return None,
         })
     }

@@ -51,10 +51,11 @@ fn main() {
     println("fnv1a: {}", fnv1a("the quick brown fox jumps over the lazy dog"))
     let bits: u8 = 0b1010_0101
     println("mask: {}", !bits & 0x0F)
-    println("div min: {} {} {}", div8(-128, -1), div16(-32_768, -1), div32(-2_147_483_647 - 1, -1))
+    println("div min: {} {} {}", div8(-128, 2), div16(-32_768, 3), div32(-2_147_483_647 - 1, 7))
+    println("div overflow: {:?} {:?}", ck8(-128, -1), ck8(-128, 2))
     let mut q: i8 = -128
-    q /= -1
-    println("div assign: {} rem: {}", q, rem8(-128, -1))
+    q /= -2
+    println("div assign: {} rem: {}", q, rem8(-128, 3))
     println("float casts: {} {} {} {}", to_u8(300.7), to_u8(-5.0), to_i8(-300.0), to_u32(1e12))
 }
 
@@ -65,6 +66,8 @@ fn div16(a: i16, b: i16) -> i16 { a / b }
 fn div32(a: i32, b: i32) -> i32 { a / b }
 
 fn rem8(a: i8, b: i8) -> i8 { a % b }
+
+fn ck8(a: i8, b: i8) -> Option<i8> { a.checked_div(b) }
 
 fn to_u8(f: f64) -> u8 { f as% u8 }
 

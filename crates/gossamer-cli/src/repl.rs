@@ -2217,13 +2217,13 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
                 if let Some(path) = &history_path {
                     let _ = editor.save_history(path);
                 }
-                gossamer_std::exec::terminate_live_children();
+                gossamer_std::process::terminate_live_children();
                 outln!();
                 return Ok(());
             }
             Err(err) => {
                 print_repl_error(&format!("repl: {err}"));
-                gossamer_std::exec::terminate_live_children();
+                gossamer_std::process::terminate_live_children();
                 return Ok(());
             }
         };
@@ -2288,7 +2288,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
                     }
                     // A program run here may have started children of its own;
                     // the session that started them is what ends them.
-                    gossamer_std::exec::terminate_live_children();
+                    gossamer_std::process::terminate_live_children();
                     return Ok(());
                 }
                 "bindings" | "b" => {

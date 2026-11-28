@@ -1,13 +1,16 @@
 //! The typed reader `from_json::<T>` decodes through.
 //!
-//! The document is validated once, as [`super::parse`] would read it, by the
-//! walk that also reads it into a [`Tape`]: every value in document order,
-//! each container with the extent of what it holds and each number already
-//! converted. The reader then walks the tape without building a tree: a
-//! struct records where each of its keys' values sits and reads them in
-//! declaration order, an array records where its elements sit, and a scalar
-//! is read from its node. A document too long for a tape is walked by byte
-//! offset instead, over the spans of its containers.
+//! The document is read in one pass from front to back, as `serde_json` and
+//! Zig's `std.json` read into a type: nothing is built besides the decoded
+//! value. Each step checks the text it consumes, and a value the walk passes
+//! over is checked as it is skipped, so a read that succeeds has seen a
+//! well-formed document. A read that fails, or finds text out of shape, is
+//! settled against [`super::validate_str`], so a document that does not
+//! parse reports the parser's error whatever it holds. A struct walks its object's members in document
+//! order and hands each to the field its key names, an array walks its
+//! elements, and a scalar is parsed where it stands. The reader keeps a frame
+//! per open container with where its walk stands, so a value read leaves the
+//! walk just past it and the next member is found without scanning again.
 //! The values and failures match what `json::parse` followed by `json::get`
 //! and the `json::as_*` accessors report, because the scanning is the same
 //! parser and the conversions are the same rules.
@@ -18,42 +21,40 @@
 //! reached by, so a failure carries the path to the value it names
 //! (`current.items[2]`), spelled with the document's own keys.
 
-use super::{
-    ContainerSpans, Error, Parser, Tape, TapeKind, Value, integral_i64, integral_u64,
-    unescape_string, validate_str_to_tape, validate_str_with_containers,
-};
+use std::collections::BTreeSet;
 
-/// What the reader walks a document by. A node is a tape index over a tape,
-/// and a byte offset over spans.
-#[derive(Debug)]
-enum Index {
-    /// The document's tape.
-    Tape(Tape),
-    /// Each object's and array's span, for a document too long for a tape.
-    Spans {
-        containers: ContainerSpans,
-        /// The slot in `containers` just past the last one looked up. A walk
-        /// steps over a container's members in document order, so the next
-        /// lookup is nearly always at or just after it.
-        cursor: std::cell::Cell<usize>,
-    },
-}
+use super::{Error, Parser, Value, integral_i64, integral_u64, validate_str};
 
 /// A walk over one validated JSON document held as `T`: an owned `String`,
 /// or text a caller keeps alive for the walk.
 #[derive(Debug)]
 pub struct TypedReader<T = String> {
     text: T,
-    index: Index,
     /// The values stepped into, the first `depth` of them live; the rest keep
     /// their buffers for the next step.
     frames: Vec<Frame>,
     depth: usize,
     error: Option<ReadError>,
-    /// The last key table `begin_struct` read, and where each name sits in
-    /// it: a decode reads the same few tables over and over.
-    table: String,
-    table_names: Vec<(usize, usize)>,
+    /// The key tables `begin_struct` has read: a decode reads the same few
+    /// over and over, and a struct's walk names the one it reads by index.
+    tables: Vec<Table>,
+    /// What a key an object repeats reads as.
+    duplicates: super::DuplicateKeys,
+    /// Set when a step found text that is not well-formed JSON, so the end of
+    /// the read checks the whole document.
+    suspect: std::cell::Cell<bool>,
+    /// Whether the document's shape is settled: checked against the parser,
+    /// or refused before any of it was read.
+    checked: bool,
+    /// The stack the walk skipping a value keeps, reused from one to the next.
+    stack: std::cell::RefCell<super::walk::Stack>,
+}
+
+/// A struct's field names as `begin_struct` takes them, and each name.
+#[derive(Debug)]
+struct Table {
+    text: String,
+    names: Vec<Box<[u8]>>,
 }
 
 /// The first failure and the path to the value it names.
@@ -92,19 +93,26 @@ enum Segment {
 struct Frame {
     node: Option<usize>,
     segment: Segment,
-    /// Per field of the struct begun here: its key's offset and its value's.
-    fields: Vec<Option<(usize, usize)>>,
+    /// Where a walk of this container stands: the offset just past the last
+    /// member it read, or its opening bracket before the first.
+    cursor: usize,
+    /// The offset just past this value, once a walk has reached its end.
+    end: Option<usize>,
+    /// Members the walk has met: a struct's ordinal, an array's index.
+    count: usize,
+    /// Per declared field of the struct begun here: whether its key has come.
+    seen: Vec<bool>,
+    /// The field the struct's walk stands on.
+    field: usize,
+    /// The key table of the struct begun here.
+    table: usize,
+    /// The keys a map's walk has met, kept where a repeat is refused or
+    /// skipped.
+    keys: BTreeSet<String>,
+    /// The key of the map entry the walk stands on.
+    key: String,
+    /// A tuple's element offsets.
     elems: Vec<usize>,
-    /// Per map entry: its key, the key's offset, and the value's offset.
-    entries: Vec<(MapKey, usize, usize)>,
-}
-
-/// A map entry's key: the span of the document that spells it, or its text
-/// with escapes resolved when it has any.
-#[derive(Debug)]
-enum MapKey {
-    Span(usize, usize),
-    Owned(String),
 }
 
 /// What kind of JSON value starts at an offset.
@@ -131,47 +139,36 @@ impl<T: AsRef<str>> TypedReader<T> {
     /// A reader over `text`, validated as `json::parse` validates a document.
     #[must_use]
     pub fn over(text: T) -> Self {
-        let mut reader = Self {
+        let mut reader = Self::unread(text);
+        if let Err(error) = super::check_size(reader.text.as_ref().as_bytes()) {
+            reader.reject(&error);
+            return reader;
+        }
+        let root = skip_ws(reader.text.as_ref().as_bytes(), 0);
+        reader.push(Some(root), Segment::None);
+        reader
+    }
+
+    /// A reader over `text` that has read nothing yet.
+    fn unread(text: T) -> Self {
+        Self {
             text,
-            index: Index::Tape(Tape::default()),
             frames: Vec::with_capacity(8),
             depth: 0,
             error: None,
-            table: String::new(),
-            table_names: Vec::new(),
-        };
-        let indexed = match validate_str_to_tape(reader.text.as_ref()) {
-            Ok(Some(tape)) => Ok((Index::Tape(tape), 0)),
-            Ok(None) => validate_str_with_containers(reader.text.as_ref()).map(|containers| {
-                let root = skip_ws(reader.text.as_ref().as_bytes(), 0);
-                let cursor = std::cell::Cell::new(0);
-                (Index::Spans { containers, cursor }, root)
-            }),
-            Err(error) => Err(error),
-        };
-        match indexed {
-            Ok((index, root)) => {
-                reader.index = index;
-                reader.push(Some(root), Segment::None);
-            }
-            Err(error) => reader.reject(&error),
+            tables: Vec::new(),
+            duplicates: super::DuplicateKeys::Error,
+            suspect: std::cell::Cell::new(false),
+            checked: false,
+            stack: std::cell::RefCell::default(),
         }
-        reader
     }
 
     /// A reader over a document already rejected with `error`, as for text
     /// that is not UTF-8.
     #[must_use]
     pub fn rejected(text: T, error: &Error) -> Self {
-        let mut reader = Self {
-            text,
-            index: Index::Tape(Tape::default()),
-            frames: Vec::with_capacity(1),
-            depth: 0,
-            error: None,
-            table: String::new(),
-            table_names: Vec::new(),
-        };
+        let mut reader = Self::unread(text);
         reader.reject(error);
         reader
     }
@@ -180,19 +177,12 @@ impl<T: AsRef<str>> TypedReader<T> {
     /// for a YAML or TOML document that did not convert.
     #[must_use]
     pub fn failing(text: T, message: &str) -> Self {
-        let mut reader = Self {
-            text,
-            index: Index::Tape(Tape::default()),
-            frames: Vec::with_capacity(1),
-            depth: 0,
-            error: None,
-            table: String::new(),
-            table_names: Vec::new(),
-        };
+        let mut reader = Self::unread(text);
         reader.error = Some(ReadError {
             message: message.to_owned(),
             path: String::new(),
         });
+        reader.checked = true;
         reader.push(None, Segment::None);
         reader
     }
@@ -202,6 +192,7 @@ impl<T: AsRef<str>> TypedReader<T> {
             message: error.to_string(),
             path: String::new(),
         });
+        self.checked = true;
         self.push(None, Segment::None);
     }
 
@@ -219,6 +210,12 @@ impl<T: AsRef<str>> TypedReader<T> {
     #[must_use]
     pub fn error(&self) -> Option<&ReadError> {
         self.error.as_ref()
+    }
+
+    /// Sets what a key an object repeats reads as: a failure naming it (the
+    /// default), its first value, or its last.
+    pub fn set_duplicate_keys(&mut self, duplicates: super::DuplicateKeys) {
+        self.duplicates = duplicates;
     }
 
     /// Records `message` as the failure at the current value, unless one is
@@ -240,6 +237,47 @@ impl<T: AsRef<str>> TypedReader<T> {
             let found = self.found();
             self.fail(&format!("expected {expected}, found {found}"));
         }
+    }
+
+    /// Settles a document the walk found out of shape: the error the parser
+    /// reports for it replaces any other, as a document that does not parse
+    /// is refused whatever it holds. Answers whether the document failed to
+    /// parse; a document that parses after all is left as it was.
+    fn malformed(&mut self) -> bool {
+        if std::mem::replace(&mut self.checked, true) {
+            return false;
+        }
+        match validate_str(self.text()) {
+            Ok(()) => false,
+            Err(error) => {
+                self.error = Some(ReadError {
+                    message: error.to_string(),
+                    path: String::new(),
+                });
+                true
+            }
+        }
+    }
+
+    /// Ends the read: the document must hold nothing past its value, and a
+    /// read that failed is checked against the whole document, so a
+    /// document that does not parse reports the parser's error rather than
+    /// the first value that did not fit. Answers whether the read failed.
+    pub fn finish(&mut self) -> bool {
+        let trailing = self.frames.first().and_then(|root| {
+            let end = root
+                .end
+                .or_else(|| root.node.map(|start| self.value_end(start)))?;
+            let bytes = self.text().as_bytes();
+            Some(skip_ws(bytes, end) != bytes.len())
+        });
+        if self.failed() || self.suspect.get() || trailing != Some(false) {
+            let malformed = self.malformed();
+            if !malformed && trailing == Some(true) && !self.failed() {
+                self.fail("trailing characters after the value");
+            }
+        }
+        self.failed()
     }
 
     /// The current value as a failure names it: a number by its text, any
@@ -288,11 +326,8 @@ impl<T: AsRef<str>> TypedReader<T> {
 
     /// The text of the key at node `offset`, escapes resolved.
     fn key_at(&self, offset: usize) -> std::borrow::Cow<'_, str> {
-        if let Index::Tape(tape) = &self.index {
-            return self.tape_string(tape, offset);
-        }
         let bytes = self.text().as_bytes();
-        let end = string_end(bytes, offset);
+        let end = string_end(bytes, offset).min(bytes.len());
         let raw = &self.text()[offset + 1..end.saturating_sub(1).max(offset + 1)];
         if raw.contains('\\') {
             let mut parser = Parser::new(self.text());
@@ -305,10 +340,20 @@ impl<T: AsRef<str>> TypedReader<T> {
         }
     }
 
-    /// Steps out of the value the last `enter_*` stepped into.
+    /// Steps out of the value the last step stepped into, leaving the walk of
+    /// the container that held it just past it.
     pub fn leave(&mut self) {
         if self.depth > 1 {
+            let child = &self.frames[self.depth - 1];
+            let end = match (child.end, child.node) {
+                (Some(end), _) => Some(end),
+                (None, Some(start)) if !self.failed() => Some(self.value_end(start)),
+                _ => None,
+            };
             self.depth -= 1;
+            if let Some(end) = end {
+                self.frames[self.depth - 1].cursor = end;
+            }
         }
     }
 
@@ -318,78 +363,144 @@ impl<T: AsRef<str>> TypedReader<T> {
         self.kind() == Kind::Null
     }
 
-    /// Records where each of `keys` (encoded by [`encode_names`]) starts in
-    /// the current value. A key the document repeats takes its last value, as
-    /// `json::get` reads it. A value that is not an object is a failure.
+    /// Begins a walk of the current object for the fields `keys` names
+    /// (encoded by [`encode_names`]). A value that is not an object is a
+    /// failure.
     pub fn begin_struct(&mut self, keys: &str) {
-        if self.table != keys {
-            self.table.clear();
-            self.table.push_str(keys);
-            self.table_names.clear();
-            self.table_names.extend(table_ranges(keys));
+        if self.failed() {
+            return;
         }
-        let mut fields = std::mem::take(&mut self.top_mut().fields);
-        fields.clear();
-        fields.resize(self.table_names.len(), None);
-        if !self.failed() {
-            if let Some(start) = self.object_start() {
-                let table = self.table.as_bytes();
-                let names = &self.table_names;
-                let field_of = |key: &[u8], ordinal: usize| {
-                    // Members are usually written in declaration order, so
-                    // the name at the member's own position is tried first.
-                    match names.get(ordinal) {
-                        Some(&(a, b)) if &table[a..b] == key => Some(ordinal),
-                        _ => names.iter().position(|&(a, b)| &table[a..b] == key),
-                    }
-                };
-                if let Index::Tape(tape) = &self.index {
-                    let bytes = self.text().as_bytes();
-                    let object = start as u32;
-                    let mut key = object + 2;
-                    for ordinal in 0..tape.count(object) as usize {
-                        let node = tape.node(key);
-                        let spelled = &bytes[node.start as usize + 1..node.end() as usize - 1];
-                        let index = if node.kind() == TapeKind::Str {
-                            field_of(spelled, ordinal)
-                        } else {
-                            field_of(self.tape_string(tape, key as usize).as_bytes(), ordinal)
-                        };
-                        if let Some(index) = index {
-                            fields[index] = Some((key as usize, key as usize + 1));
-                        }
-                        key = tape.extent(key + 1);
-                    }
-                } else {
-                    let mut ordinal = 0;
-                    self.for_each_entry(start, |key, key_at, value| {
-                        if let Some(index) = field_of(key, ordinal) {
-                            fields[index] = Some((key_at, value));
-                        }
-                        ordinal += 1;
-                    });
-                }
-            } else {
-                self.top_mut().fields = fields;
-                self.fail_expected("object");
-                return;
-            }
+        let Some(start) = self.object_start() else {
+            self.fail_expected("object");
+            return;
+        };
+        if !self.deep_enough() {
+            return;
         }
-        self.top_mut().fields = fields;
+        let table = if let Some(table) = self.tables.iter().rposition(|table| table.text == keys) {
+            table
+        } else {
+            self.tables.push(Table {
+                text: keys.to_owned(),
+                names: table_ranges(keys)
+                    .map(|(a, b)| keys.as_bytes()[a..b].into())
+                    .collect(),
+            });
+            self.tables.len() - 1
+        };
+        let fields = self.tables[table].names.len();
+        let top = self.top_mut();
+        top.table = table;
+        top.cursor = start + 1;
+        top.count = 0;
+        top.end = None;
+        // No field read yet: the next one checked first is the first.
+        top.field = usize::MAX;
+        top.seen.clear();
+        top.seen.resize(fields, false);
     }
 
-    /// Steps into field `index` of the struct [`Self::begin_struct`] began, and
-    /// answers whether the document has it. Nothing is stepped into when it
-    /// does not.
-    pub fn enter_field(&mut self, index: usize) -> bool {
-        let node = self.top().fields.get(index).copied().flatten();
-        match node {
-            Some((key, node)) if !self.failed() => {
-                self.push(Some(node), Segment::Key(key));
-                true
+    /// Steps into the next member of the struct [`Self::begin_struct`] began
+    /// whose key names one of its fields, answering whether there is one; a
+    /// member no field names is passed over. [`Self::field_index`] names the
+    /// field. A key the object repeats reads by the duplicate-key policy: a
+    /// failure, or its first or its last value.
+    pub fn next_field(&mut self) -> bool {
+        loop {
+            if self.failed() {
+                return false;
             }
-            _ => false,
+            let Some(key_at) = self.next_member(b'}') else {
+                return false;
+            };
+            // Fields are usually written in declaration order, so the field
+            // after the last one read is checked where its key stands first.
+            let ordinal = self.top().field.wrapping_add(1);
+            let bytes = self.text().as_bytes();
+            let expected = self.tables[self.top().table].names.get(ordinal);
+            let (index, key_end) = match expected {
+                Some(name)
+                    if bytes.get(key_at + 1..key_at + 1 + name.len()) == Some(&name[..])
+                        && bytes.get(key_at + 1 + name.len()) == Some(&b'"') =>
+                {
+                    (Some(ordinal), Some(key_at + name.len() + 2))
+                }
+                _ => (None, None),
+            };
+            let Some((key_end, value)) = self.key_and_value(key_at, key_end) else {
+                return false;
+            };
+            let index = index.or_else(|| self.field_at(key_at, key_end, ordinal));
+            self.top_mut().count += 1;
+            let Some(index) = index else {
+                let end = self.value_end(value);
+                self.top_mut().cursor = end;
+                continue;
+            };
+            if self.top().seen[index] {
+                match self.duplicates {
+                    super::DuplicateKeys::UseLast => {}
+                    super::DuplicateKeys::UseFirst => {
+                        let end = self.value_end(value);
+                        self.top_mut().cursor = end;
+                        continue;
+                    }
+                    super::DuplicateKeys::Error => {
+                        self.fail_duplicate(index);
+                        return false;
+                    }
+                }
+            }
+            let top = self.top_mut();
+            top.seen[index] = true;
+            top.field = index;
+            self.push(Some(value), Segment::Key(key_at));
+            return true;
         }
+    }
+
+    /// The field [`Self::next_field`] stepped into, by its place in the
+    /// struct's keys.
+    #[must_use]
+    pub fn field_index(&self) -> usize {
+        self.depth
+            .checked_sub(2)
+            .and_then(|at| self.frames.get(at))
+            .map_or(0, |frame| frame.field)
+    }
+
+    /// Which of the begun struct's fields the key `key_at..key_end` names,
+    /// when it is not the one written where the next field's stands.
+    #[cold]
+    #[inline(never)]
+    fn field_at(&self, key_at: usize, key_end: usize, ordinal: usize) -> Option<usize> {
+        let raw = &self.text().as_bytes()[key_at + 1..key_end - 1];
+        if raw.contains(&b'\\') {
+            let key = self.key_at(key_at);
+            self.field_named(key.as_bytes(), ordinal)
+        } else {
+            self.field_named(raw, ordinal)
+        }
+    }
+
+    /// Records the failure for a repeat of the begun struct's field `index`.
+    #[cold]
+    #[inline(never)]
+    fn fail_duplicate(&mut self, index: usize) {
+        let table = &self.tables[self.top().table];
+        let name = String::from_utf8_lossy(&table.names[index]).into_owned();
+        self.fail(&format!("duplicate key `{name}`"));
+    }
+
+    /// Which of the begun struct's fields `key` names. Members are usually
+    /// written in declaration order, so the name at the member's own position
+    /// is tried first.
+    fn field_named(&self, key: &[u8], ordinal: usize) -> Option<usize> {
+        let names = &self.tables[self.top().table].names;
+        if names.get(ordinal).is_some_and(|name| **name == *key) {
+            return Some(ordinal);
+        }
+        names.iter().position(|name| **name == *key)
     }
 
     /// The current value as an `i64`, by `json::as_i64`'s rule, or `0` with
@@ -423,25 +534,53 @@ impl<T: AsRef<str>> TypedReader<T> {
         n
     }
 
+    /// The current value as the bits of a 128-bit integer: a number, or a
+    /// string of decimal digits, read as a `u128` when `unsigned` and an
+    /// `i128` otherwise. `0` with a failure naming `expected` recorded when it
+    /// is neither, or does not fit.
+    pub fn read_wide(&mut self, expected: &str, unsigned: bool) -> u128 {
+        let text = match self.kind() {
+            Kind::Number => self.number_text().map(str::to_owned),
+            Kind::String => match self.scalar() {
+                Some(Value::String(s)) => Some(s),
+                _ => None,
+            },
+            _ => None,
+        };
+        let bits = text.and_then(|t| {
+            if unsigned {
+                t.parse::<u128>().ok()
+            } else {
+                t.parse::<i128>().ok().map(i128::cast_unsigned)
+            }
+        });
+        bits.unwrap_or_else(|| {
+            self.fail_expected(expected);
+            0
+        })
+    }
+
     /// The current value as an `f64`, by `json::as_f64`'s rule.
     pub fn read_f64(&mut self, expected: &str) -> f64 {
         // A number token reads as the nearest `f64` whether it is written
         // as an integer or not, which is what `as_f64` makes of each form.
-        let number = match (&self.index, self.node()) {
+        let number = match self.node() {
             _ if self.failed() => None,
-            (Index::Tape(tape), Some(node)) => {
-                let index = node as u32;
+            Some(start) if self.kind() == Kind::Number => {
                 // Each form converts to its nearest `f64`, as parsing the
                 // token's text as one does.
-                match tape.node(index).kind() {
-                    TapeKind::Float => Some(f64::from_bits(tape.word(index))),
-                    TapeKind::Int => Some(tape.word(index) as i64 as f64),
-                    TapeKind::Uint => Some(tape.word(index) as f64),
-                    _ => None,
+                match super::walk::number_at(self.text(), start) {
+                    Some((kind, word, end)) => {
+                        self.top_mut().end = Some(end);
+                        Some(match kind {
+                            super::TapeKind::Int => word.cast_signed() as f64,
+                            super::TapeKind::Uint => word as f64,
+                            _ => f64::from_bits(word),
+                        })
+                    }
+                    None if self.malformed() => None,
+                    None => self.number_text().and_then(|text| text.parse::<f64>().ok()),
                 }
-            }
-            _ if self.kind() == Kind::Number => {
-                self.number_text().and_then(|text| text.parse::<f64>().ok())
             }
             _ => None,
         };
@@ -452,15 +591,15 @@ impl<T: AsRef<str>> TypedReader<T> {
         n
     }
 
+    /// The text of the number token at the current value. A token the fast
+    /// reader does not take whole leaves the read to be checked against the
+    /// parser at its end.
     fn number_text(&self) -> Option<&str> {
-        let node = self.node()?;
-        let (start, end) = match &self.index {
-            Index::Tape(tape) => {
-                let at = tape.node(node as u32);
-                (at.start as usize, at.end() as usize)
-            }
-            Index::Spans { .. } => (node, scan_value_end(self.text().as_bytes(), node)),
-        };
+        let start = self.node()?;
+        let end = scan_value_end(self.text().as_bytes(), start);
+        if super::walk::number_at(self.text(), start).map(|(_, _, at)| at) != Some(end) {
+            self.suspect.set(true);
+        }
         self.text().get(start..end)
     }
 
@@ -491,23 +630,39 @@ impl<T: AsRef<str>> TypedReader<T> {
 
     /// The current value as a string.
     pub fn read_string(&mut self, expected: &str) -> String {
-        let Some(Value::String(s)) = self.scalar() else {
+        self.read_str(expected).into_owned()
+    }
+
+    /// [`Self::read_string`] without a copy for a string that has no escape:
+    /// its text is the span of the document between its quotes.
+    pub fn read_str(&mut self, expected: &str) -> std::borrow::Cow<'_, str> {
+        if self.kind() != Kind::String {
             self.fail_expected(expected);
-            return String::new();
+            return std::borrow::Cow::Borrowed("");
+        }
+        let Some(start) = self.node() else {
+            return std::borrow::Cow::Borrowed("");
         };
-        s
+        let Some(end) = super::walk::string_end(self.text(), start) else {
+            self.suspect.set(true);
+            return std::borrow::Cow::Borrowed("");
+        };
+        self.top_mut().end = Some(end);
+        let raw = &self.text()[start + 1..end - 1];
+        if !raw.contains('\\') {
+            return std::borrow::Cow::Borrowed(raw);
+        }
+        let mut parser = Parser::new(self.text());
+        parser.cursor = start;
+        std::borrow::Cow::Owned(parser.parse_string().unwrap_or_default())
     }
 
     /// The text of the current value, `null` when it is absent, for a field
     /// that keeps the document as `json::Value`.
     #[must_use]
     pub fn raw_value(&self) -> &str {
-        match (self.node(), &self.index) {
-            (Some(node), Index::Tape(tape)) if !self.failed() => {
-                let at = tape.node(node as u32);
-                &self.text()[at.start as usize..at.end() as usize]
-            }
-            (Some(start), Index::Spans { .. }) if !self.failed() => {
+        match self.node() {
+            Some(start) if !self.failed() => {
                 let end = self.value_end(start);
                 &self.text()[start..end]
             }
@@ -515,21 +670,43 @@ impl<T: AsRef<str>> TypedReader<T> {
         }
     }
 
-    /// The element count of the current value, recording a failure naming
-    /// `expected` and answering `0` when it is not an array.
-    pub fn begin_array(&mut self, expected: &str) -> usize {
+    /// Begins a walk of the current array's elements, recording a failure
+    /// naming `expected` when it is not an array.
+    pub fn begin_array(&mut self, expected: &str) {
         if self.failed() {
-            return 0;
+            return;
         }
         if self.kind() != Kind::Array {
             self.fail_expected(expected);
-            return 0;
+            return;
         }
-        let mut elems = std::mem::take(&mut self.top_mut().elems);
-        self.current_elems(&mut elems);
-        let count = elems.len();
-        self.top_mut().elems = elems;
-        count
+        let Some(start) = self.node() else {
+            return;
+        };
+        if !self.deep_enough() {
+            return;
+        }
+        let top = self.top_mut();
+        top.cursor = start + 1;
+        top.count = 0;
+        top.end = None;
+    }
+
+    /// Steps into the next element of the array [`Self::begin_array`] began,
+    /// answering whether there is one.
+    pub fn next_elem(&mut self) -> bool {
+        if self.failed() {
+            return false;
+        }
+        let Some(at) = self.next_member(b']') else {
+            return false;
+        };
+        let top = self.top_mut();
+        let index = top.count;
+        top.count += 1;
+        top.cursor = at;
+        self.push(Some(at), Segment::Index(index));
+        true
     }
 
     /// Checks that the current value is an array of exactly `len` elements,
@@ -578,79 +755,68 @@ impl<T: AsRef<str>> TypedReader<T> {
         self.push(node, Segment::Index(index));
     }
 
-    /// The entry count of the current value, recording a failure naming
-    /// `expected` and answering `0` when it is not an object. Entries are in
-    /// key order, and a key the document repeats keeps its last value, as
-    /// `json::keys` and `json::get` read them.
-    pub fn begin_map(&mut self, expected: &str) -> usize {
+    /// Begins a walk of the current object's entries, recording a failure
+    /// naming `expected` when it is not an object.
+    pub fn begin_map(&mut self, expected: &str) {
         if self.failed() {
-            return 0;
+            return;
         }
         let Some(start) = self.object_start() else {
             self.fail_expected(expected);
-            return 0;
+            return;
         };
-        let mut entries = std::mem::take(&mut self.top_mut().entries);
-        entries.clear();
-        let text = self.text().as_ptr() as usize;
-        self.for_each_entry(start, |_, key_at, value| {
-            let key = match self.key_at(key_at) {
-                std::borrow::Cow::Borrowed(spelled) => {
-                    let offset = spelled.as_ptr() as usize - text;
-                    MapKey::Span(offset, offset + spelled.len())
-                }
-                std::borrow::Cow::Owned(resolved) => MapKey::Owned(resolved),
+        if !self.deep_enough() {
+            return;
+        }
+        let top = self.top_mut();
+        top.cursor = start + 1;
+        top.count = 0;
+        top.end = None;
+        top.keys.clear();
+    }
+
+    /// Steps into the value of the next entry of the map [`Self::begin_map`]
+    /// began, answering whether there is one; [`Self::entry_key`] is its key.
+    /// Entries come in document order. A key the object repeats reads by the
+    /// duplicate-key policy: a failure, its first value, or its last, which a
+    /// later insert of the same key leaves in place.
+    pub fn next_entry(&mut self) -> bool {
+        loop {
+            if self.failed() {
+                return false;
+            }
+            let Some(key_at) = self.next_member(b'}') else {
+                return false;
             };
-            entries.push((key, key_at, value));
-        });
-        if entries.len() > 1 {
-            // A stable sort keeps a repeated key's occurrences in document
-            // order, so the last of each run is the value `json::get` answers.
-            entries.sort_by(|a, b| self.entry_key(&a.0).cmp(self.entry_key(&b.0)));
-            entries.dedup_by(|later, kept| {
-                let repeated = self.entry_key(&later.0) == self.entry_key(&kept.0);
-                if repeated {
-                    std::mem::swap(later, kept);
+            let Some((_, value)) = self.key_and_value(key_at, None) else {
+                return false;
+            };
+            self.top_mut().count += 1;
+            let key = self.key_at(key_at).into_owned();
+            if self.duplicates != super::DuplicateKeys::UseLast
+                && !self.top_mut().keys.insert(key.clone())
+            {
+                if self.duplicates == super::DuplicateKeys::Error {
+                    self.fail(&format!("duplicate key `{key}`"));
+                    return false;
                 }
-                repeated
-            });
-        }
-        let count = entries.len();
-        self.top_mut().entries = entries;
-        count
-    }
-
-    fn entry_key<'k>(&'k self, key: &'k MapKey) -> &'k str {
-        match key {
-            MapKey::Span(start, end) => &self.text()[*start..*end],
-            MapKey::Owned(text) => text,
+                let end = self.value_end(value);
+                self.top_mut().cursor = end;
+                continue;
+            }
+            self.top_mut().key = key;
+            self.push(Some(value), Segment::Key(key_at));
+            return true;
         }
     }
 
-    /// The key of entry `index` of the map [`Self::begin_map`] began.
+    /// The key of the entry [`Self::next_entry`] stepped into.
     #[must_use]
-    pub fn map_key(&self, index: usize) -> &str {
-        self.top()
-            .entries
-            .get(index)
-            .map_or("", |(key, _, _)| self.entry_key(key))
-    }
-
-    /// Steps into the value of entry `index` of the map [`Self::begin_map`]
-    /// began.
-    pub fn enter_map_value(&mut self, index: usize) {
-        let entry = if self.failed() {
-            None
-        } else {
-            self.top()
-                .entries
-                .get(index)
-                .map(|&(_, key, value)| (key, value))
-        };
-        match entry {
-            Some((key, value)) => self.push(Some(value), Segment::Key(key)),
-            None => self.push(None, Segment::None),
-        }
+    pub fn entry_key(&self) -> &str {
+        self.depth
+            .checked_sub(2)
+            .and_then(|at| self.frames.get(at))
+            .map_or("", |frame| frame.key.as_str())
     }
 
     /// Selects the variant of an externally tagged enum. `variants` lists
@@ -792,14 +958,23 @@ impl<T: AsRef<str>> TypedReader<T> {
         if let Some(frame) = self.frames.get_mut(self.depth) {
             frame.node = node;
             frame.segment = segment;
+            frame.end = None;
         } else {
-            self.frames.push(Frame {
-                node,
-                segment,
-                ..Frame::default()
-            });
+            self.push_new_frame(node, segment);
         }
         self.depth += 1;
+    }
+
+    /// Grows the frame stack by one, which a walk does once per depth it
+    /// first reaches.
+    #[cold]
+    #[inline(never)]
+    fn push_new_frame(&mut self, node: Option<usize>, segment: Segment) {
+        self.frames.push(Frame {
+            node,
+            segment,
+            ..Frame::default()
+        });
     }
 
     fn node(&self) -> Option<usize> {
@@ -813,28 +988,7 @@ impl<T: AsRef<str>> TypedReader<T> {
         let Some(node) = self.node() else {
             return Kind::Null;
         };
-        match &self.index {
-            Index::Tape(tape) => match tape.node(node as u32).kind() {
-                TapeKind::Null => Kind::Null,
-                TapeKind::False | TapeKind::True => Kind::Bool,
-                TapeKind::Int | TapeKind::Uint | TapeKind::Float => Kind::Number,
-                TapeKind::Str | TapeKind::StrEscaped => Kind::String,
-                TapeKind::Array => Kind::Array,
-                TapeKind::Object => Kind::Object,
-            },
-            Index::Spans { .. } => kind_at(self.text().as_bytes(), node),
-        }
-    }
-
-    /// The text of the string at tape node `node`, escapes resolved.
-    fn tape_string(&self, tape: &Tape, node: usize) -> std::borrow::Cow<'_, str> {
-        let at = tape.node(node as u32);
-        let raw = &self.text()[at.start as usize + 1..at.end() as usize - 1];
-        if at.kind() == TapeKind::StrEscaped {
-            std::borrow::Cow::Owned(unescape_string(raw))
-        } else {
-            std::borrow::Cow::Borrowed(raw)
-        }
+        kind_at(self.text().as_bytes(), node)
     }
 
     fn object_start(&self) -> Option<usize> {
@@ -842,42 +996,61 @@ impl<T: AsRef<str>> TypedReader<T> {
     }
 
     /// The current scalar, parsed where it stands; `None` for a container or
-    /// an absent value.
-    fn scalar(&self) -> Option<Value> {
+    /// an absent value. A scalar read records where it ends, so stepping out
+    /// of it scans nothing again.
+    fn scalar(&mut self) -> Option<Value> {
         if self.failed() {
             return None;
         }
-        if let (Index::Tape(tape), Some(node)) = (&self.index, self.node()) {
-            let index = node as u32;
-            let word = || tape.word(index);
-            return match tape.node(index).kind() {
-                TapeKind::Null => Some(Value::Null),
-                TapeKind::False => Some(Value::Bool(false)),
-                TapeKind::True => Some(Value::Bool(true)),
-                TapeKind::Int => Some(Value::Int(word() as i64)),
-                TapeKind::Uint => Some(Value::Uint(word())),
-                TapeKind::Float => Some(Value::Number(f64::from_bits(word()))),
-                TapeKind::Str | TapeKind::StrEscaped => {
-                    Some(Value::String(self.tape_string(tape, node).into_owned()))
+        let (value, end) = match self.kind() {
+            Kind::Null => {
+                let start = self.node();
+                if let Some(start) = start
+                    && self.text().as_bytes().get(start..start + 4) != Some(b"null")
+                {
+                    self.suspect.set(true);
+                    return None;
                 }
-                TapeKind::Array | TapeKind::Object => None,
-            };
-        }
-        match self.kind() {
-            Kind::Null => Some(Value::Null),
-            Kind::Array | Kind::Object => None,
+                (Some(Value::Null), start.map(|start| start + 4))
+            }
+            Kind::Array | Kind::Object => return None,
             Kind::Number => {
                 let start = self.node()?;
-                let end = scan_value_end(self.text().as_bytes(), start);
-                number_value(&self.text()[start..end])
+                match super::walk::number_at(self.text(), start) {
+                    Some((super::TapeKind::Int, word, end)) => {
+                        (Some(Value::Int(word.cast_signed())), Some(end))
+                    }
+                    Some((super::TapeKind::Uint, word, end)) => {
+                        (Some(Value::Uint(word)), Some(end))
+                    }
+                    Some((_, word, end)) => (Some(Value::Number(f64::from_bits(word))), Some(end)),
+                    // The fast reader declines a number out of its shape or
+                    // range; one the document holds after all is read from
+                    // its text.
+                    None => {
+                        if self.malformed() {
+                            return None;
+                        }
+                        let end = scan_value_end(self.text().as_bytes(), start);
+                        (number_value(&self.text()[start..end]), Some(end))
+                    }
+                }
             }
             Kind::Bool | Kind::String => {
                 let start = self.node()?;
                 let mut parser = Parser::new(self.text());
                 parser.cursor = start;
-                parser.parse_value().ok()
+                let Ok(value) = parser.parse_value() else {
+                    self.suspect.set(true);
+                    return None;
+                };
+                (Some(value), Some(parser.cursor))
             }
+        };
+        if end.is_some() {
+            self.top_mut().end = end;
         }
+        value
     }
 
     /// The element offsets of the current array, into `elems`.
@@ -886,15 +1059,6 @@ impl<T: AsRef<str>> TypedReader<T> {
         let Some(start) = self.node() else {
             return;
         };
-        if let Index::Tape(tape) = &self.index {
-            let array = start as u32;
-            let mut at = array + 2;
-            for _ in 0..tape.count(array) {
-                elems.push(at as usize);
-                at = tape.extent(at);
-            }
-            return;
-        }
         let bytes = self.text().as_bytes();
         let mut cursor = skip_ws(bytes, start + 1);
         if bytes.get(cursor) == Some(&b']') {
@@ -906,7 +1070,11 @@ impl<T: AsRef<str>> TypedReader<T> {
             cursor = skip_ws(bytes, self.value_end(cursor));
             match bytes.get(cursor) {
                 Some(b',') => cursor += 1,
-                _ => return,
+                Some(b']') => return,
+                _ => {
+                    self.suspect.set(true);
+                    return;
+                }
             }
         }
     }
@@ -914,17 +1082,6 @@ impl<T: AsRef<str>> TypedReader<T> {
     /// Calls `f` with each key of the object at `start`, the offset of the
     /// key's opening quote, and the offset of its value, in document order.
     fn for_each_entry(&self, start: usize, mut f: impl FnMut(&[u8], usize, usize)) {
-        if let Index::Tape(tape) = &self.index {
-            let object = start as u32;
-            let mut key = object + 2;
-            for _ in 0..tape.count(object) {
-                let value = key + 1;
-                let text = self.tape_string(tape, key as usize);
-                f(text.as_bytes(), key as usize, value as usize);
-                key = tape.extent(value);
-            }
-            return;
-        }
         let bytes = self.text().as_bytes();
         let mut cursor = skip_ws(bytes, start + 1);
         if bytes.get(cursor) == Some(&b'}') {
@@ -932,8 +1089,10 @@ impl<T: AsRef<str>> TypedReader<T> {
         }
         loop {
             let key_start = skip_ws(bytes, cursor);
-            let key_end = string_end(bytes, key_start);
-            let raw = &bytes[key_start + 1..key_end.saturating_sub(1).max(key_start + 1)];
+            let Some((key_end, value)) = self.key_and_value(key_start, None) else {
+                return;
+            };
+            let raw = &bytes[key_start + 1..key_end - 1];
             // A key without an escape is its own bytes; one with an escape is
             // read the way the parser reads any string.
             let unescaped;
@@ -941,6 +1100,7 @@ impl<T: AsRef<str>> TypedReader<T> {
                 let mut parser = Parser::new(self.text());
                 parser.cursor = key_start;
                 let Ok(text) = parser.parse_string() else {
+                    self.suspect.set(true);
                     return;
                 };
                 unescaped = text;
@@ -948,63 +1108,105 @@ impl<T: AsRef<str>> TypedReader<T> {
             } else {
                 raw
             };
-            // The document validated, so a `:` follows every key.
-            cursor = skip_ws(bytes, key_end);
-            cursor = skip_ws(bytes, cursor + 1);
-            let value = cursor;
             f(key, key_start, value);
             cursor = skip_ws(bytes, self.value_end(value));
             match bytes.get(cursor) {
                 Some(b',') => cursor += 1,
-                _ => return,
+                Some(b'}') => return,
+                _ => {
+                    self.suspect.set(true);
+                    return;
+                }
             }
         }
     }
 
-    /// The offset just past the value starting at `start`: a container's from
-    /// the spans validation recorded, anything else by scanning it.
+    /// The offset just past the value starting at `start`, found by scanning
+    /// it.
     fn value_end(&self, start: usize) -> usize {
-        let bytes = self.text().as_bytes();
-        match bytes.get(start) {
-            Some(b'{' | b'[') => match (&self.index, self.container_slot(start)) {
-                (Index::Spans { containers, .. }, Some(slot)) => containers[slot].1,
-                _ => scan_value_end(bytes, start),
+        let mut stack = self.stack.borrow_mut();
+        super::walk::value_end(self.text(), start, super::max_depth(), &mut stack).unwrap_or_else(
+            || {
+                self.suspect.set(true);
+                self.text().len()
             },
-            _ => scan_value_end(bytes, start),
-        }
+        )
     }
 
-    /// The slot of the container opening at `start`: found by stepping
-    /// forward from the last lookup, which a walk in document order reaches
-    /// in a step or two, else by a search of the whole table.
-    fn container_slot(&self, start: usize) -> Option<usize> {
-        let Index::Spans { containers, cursor } = &self.index else {
+    /// Where the next member of the container being walked starts, or `None`
+    /// at its end, `close`, which the walk steps past; a comma separates
+    /// members and none trails the last. Text out of that shape ends the walk
+    /// and leaves the read to be checked whole.
+    fn next_member(&mut self, close: u8) -> Option<usize> {
+        let bytes = self.text().as_bytes();
+        let top = self.top();
+        let mut at = skip_ws(bytes, top.cursor);
+        if top.count > 0 {
+            match bytes.get(at) {
+                Some(b',') => at = skip_ws(bytes, at + 1),
+                Some(&byte) if byte == close => {
+                    self.top_mut().end = Some(at + 1);
+                    return None;
+                }
+                _ => {
+                    self.suspect.set(true);
+                    return None;
+                }
+            }
+        } else if bytes.get(at) == Some(&close) {
+            self.top_mut().end = Some(at + 1);
+            return None;
+        }
+        if at >= bytes.len() || bytes[at] == close {
+            self.suspect.set(true);
+            return None;
+        }
+        Some(at)
+    }
+
+    /// The offset just past the key whose quote opens at `key_at`, and the
+    /// offset of its value after the `:`; `None` for text out of that shape.
+    fn key_and_value(&self, key_at: usize, key_end: Option<usize>) -> Option<(usize, usize)> {
+        let bytes = self.text().as_bytes();
+        if bytes.get(key_at) != Some(&b'"') {
+            self.suspect.set(true);
+            return None;
+        }
+        let key_end = key_end.or_else(|| super::walk::string_end(self.text(), key_at));
+        let Some(key_end) = key_end else {
+            self.suspect.set(true);
             return None;
         };
-        let from = cursor.get();
-        let ahead = containers
-            .get(from..)
-            .unwrap_or_default()
-            .iter()
-            .take(4)
-            .position(|(open, _)| *open == start)
-            .map(|offset| from + offset);
-        let slot = ahead.or_else(|| {
-            containers
-                .binary_search_by_key(&start, |(open, _)| *open)
-                .ok()
-        })?;
-        cursor.set(slot + 1);
-        Some(slot)
+        let colon = skip_ws(bytes, key_end);
+        if bytes.get(colon) != Some(&b':') {
+            self.suspect.set(true);
+            return None;
+        }
+        Some((key_end, skip_ws(bytes, colon + 1)))
+    }
+
+    /// Whether a container may open at the current depth.
+    fn deep_enough(&self) -> bool {
+        if self.depth > super::max_depth() {
+            self.suspect.set(true);
+            return false;
+        }
+        true
     }
 }
 
 static ROOT_ABSENT: Frame = Frame {
     node: None,
     segment: Segment::None,
-    fields: Vec::new(),
+    cursor: 0,
+    end: None,
+    count: 0,
+    seen: Vec::new(),
+    field: 0,
+    table: 0,
+    keys: BTreeSet::new(),
+    key: String::new(),
     elems: Vec::new(),
-    entries: Vec::new(),
 };
 
 fn shape_message(name: &str) -> String {
@@ -1319,8 +1521,30 @@ fn decode_variants(encoded: &str) -> Vec<(bool, &str)> {
     variants
 }
 
+/// The JSON text of a 128-bit integer's `bits` (a `u128` when `unsigned`):
+/// a number when the value fits 64 bits, which every JSON reader holds
+/// exactly, and a string of its decimal digits otherwise.
+#[must_use]
+pub fn wide_json_text(bits: u128, unsigned: bool) -> String {
+    if unsigned {
+        if u64::try_from(bits).is_ok() {
+            bits.to_string()
+        } else {
+            format!("\"{bits}\"")
+        }
+    } else {
+        let value = bits.cast_signed();
+        if i64::try_from(value).is_ok() {
+            value.to_string()
+        } else {
+            format!("\"{value}\"")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::DuplicateKeys;
     use super::{TypedReader, encode_names, encode_variants, scan_value_end};
 
     /// `scan_value_end` read byte by byte, for comparison with the scan that
@@ -1425,32 +1649,67 @@ mod tests {
         reader.error().map(ToString::to_string)
     }
 
+    /// The fields `next_field` steps into, by index, each read with `read`.
+    fn fields(r: &mut TypedReader, mut read: impl FnMut(&mut TypedReader, usize)) -> Vec<usize> {
+        let mut seen = Vec::new();
+        while r.next_field() {
+            let index = r.field_index();
+            seen.push(index);
+            read(r, index);
+            r.leave();
+        }
+        seen
+    }
+
     #[test]
-    fn a_struct_reads_fields_in_declaration_order_with_the_last_duplicate() {
-        let mut r = TypedReader::new(r#"{"b": "x", "a": 1, "a": 2, "zz": [1, {"q": null}]}"#);
-        r.begin_struct(&encode_names(["a", "b", "c"]));
-        assert!(r.enter_field(0));
-        assert_eq!(r.read_i64("a"), 2);
-        r.leave();
-        assert!(r.enter_field(1));
-        assert_eq!(r.read_string("b"), "x");
-        r.leave();
-        assert!(!r.enter_field(2));
-        assert!(!r.failed());
+    fn a_struct_reads_its_fields_in_document_order_with_the_chosen_duplicate() {
+        let text = r#"{"b": "x", "a": 1, "a": 2, "zz": [1, {"q": null}]}"#;
+        for (policy, order, expected) in [
+            (DuplicateKeys::UseFirst, vec![1, 0], 1),
+            (DuplicateKeys::UseLast, vec![1, 0, 0], 2),
+        ] {
+            let mut r = TypedReader::new(text);
+            r.set_duplicate_keys(policy);
+            r.begin_struct(&encode_names(["a", "b", "c"]));
+            let mut a = 0;
+            let mut b = String::new();
+            let seen = fields(&mut r, |r, index| match index {
+                0 => a = r.read_i64("a"),
+                _ => b = r.read_string("b"),
+            });
+            assert_eq!(seen, order);
+            assert_eq!((a, b.as_str()), (expected, "x"));
+            assert!(!r.finish());
+        }
+    }
+
+    #[test]
+    fn a_struct_refuses_a_repeated_field_key_by_default() {
+        let mut r = TypedReader::new(r#"{"b": "x", "a": 1, "a": 2}"#);
+        r.begin_struct(&encode_names(["a", "b"]));
+        fields(&mut r, |_, _| {});
+        assert!(r.finish());
+        assert_eq!(message(&r).as_deref(), Some("duplicate key `a`"));
+        // A repeated key no field reads is no field's value.
+        let mut r = TypedReader::new(r#"{"a": 1, "zz": 1, "zz": 2}"#);
+        r.begin_struct(&encode_names(["a"]));
+        assert_eq!(fields(&mut r, |r, _| assert_eq!(r.read_i64("a"), 1)), [0]);
+        assert!(!r.finish());
     }
 
     #[test]
     fn the_first_failure_is_kept_with_the_path_to_its_value() {
         let mut r = TypedReader::new(r#"{"inner": {"n": "x"}, "m": true}"#);
         r.begin_struct(&encode_names(["inner", "m"]));
-        assert!(r.enter_field(0));
+        assert!(r.next_field());
         r.begin_struct(&encode_names(["n"]));
-        assert!(r.enter_field(0));
+        assert!(r.next_field());
         assert_eq!(r.read_i64("i64"), 0);
         r.leave();
+        assert!(!r.next_field());
         r.leave();
-        assert!(r.enter_field(1) || r.failed());
-        assert_eq!(r.read_i64("i64"), 0);
+        assert!(!r.next_field());
+        assert!(r.finish());
         assert_eq!(
             message(&r).as_deref(),
             Some("inner.n: expected i64, found string")
@@ -1461,11 +1720,14 @@ mod tests {
     fn a_path_names_elements_by_index_and_odd_keys_in_quotes() {
         let mut r = TypedReader::new(r#"{"a b": [1, {"q\"": 2.5}]}"#);
         r.begin_struct(&encode_names(["a b"]));
-        assert!(r.enter_field(0));
-        assert_eq!(r.begin_array("array"), 2);
-        r.enter_elem(1);
+        assert!(r.next_field());
+        r.begin_array("array");
+        assert!(r.next_elem());
+        assert_eq!(r.read_i64("i64"), 1);
+        r.leave();
+        assert!(r.next_elem());
         r.begin_struct(&encode_names(["q\""]));
-        assert!(r.enter_field(0));
+        assert!(r.next_field());
         r.read_i64("i64");
         assert_eq!(
             message(&r).as_deref(),
@@ -1474,16 +1736,53 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_struct_keeps_its_own_fields_and_path() {
+        let mut r = TypedReader::new(r#"{"current": {"list": []}, "after": 1}"#);
+        r.begin_struct(&encode_names(["current", "after"]));
+        assert!(r.next_field());
+        assert_eq!(r.field_index(), 0);
+        r.begin_struct(&encode_names(["temperature", "list"]));
+        assert!(r.next_field());
+        assert_eq!(r.field_index(), 1);
+        r.begin_array("array");
+        assert!(!r.next_elem());
+        r.leave();
+        assert!(!r.next_field());
+        r.fail("missing field `temperature`");
+        assert_eq!(
+            message(&r).as_deref(),
+            Some("current: missing field `temperature`")
+        );
+    }
+
+    #[test]
     fn a_struct_from_a_value_that_is_not_an_object_fails() {
         let mut r = TypedReader::new(r#"{"inner": [1]}"#);
         r.begin_struct(&encode_names(["inner"]));
-        assert!(r.enter_field(0));
+        assert!(r.next_field());
         r.begin_struct(&encode_names(["n"]));
-        assert!(!r.enter_field(0));
+        assert!(!r.next_field());
         assert_eq!(
             message(&r).as_deref(),
             Some("inner: expected object, found array")
         );
+    }
+
+    #[test]
+    fn an_array_walks_its_elements_and_ends_at_its_close() {
+        let mut r = TypedReader::new(" [ 1 , [2, 3] , \"x\" ] ");
+        r.begin_array("array");
+        let mut raw = Vec::new();
+        while r.next_elem() {
+            raw.push(r.raw_value().to_owned());
+            r.leave();
+        }
+        assert_eq!(raw, ["1", "[2, 3]", "\"x\""]);
+        assert!(!r.finish());
+        let mut r = TypedReader::new("[]");
+        r.begin_array("array");
+        assert!(!r.next_elem());
+        assert!(!r.finish());
     }
 
     #[test]
@@ -1502,8 +1801,8 @@ mod tests {
         let mut r = TypedReader::new(r#"{"r": 2, "type": "Circle"}"#);
         assert_eq!(r.begin_tagged(&table, "type", "Shape", 0), 1);
         r.begin_struct(&encode_names(["r"]));
-        assert!(r.enter_field(0));
-        assert_eq!(r.read_i64("i64"), 2);
+        assert_eq!(fields(&mut r, |r, _| assert_eq!(r.read_i64("i64"), 2)), [0]);
+        assert!(!r.finish());
         let mut r = TypedReader::new(r#"{"r": 2}"#);
         r.begin_tagged(&table, "type", "Shape", 0);
         assert_eq!(message(&r).as_deref(), Some("missing field `type`"));
@@ -1517,8 +1816,44 @@ mod tests {
 
     #[test]
     fn an_invalid_document_fails_with_the_parse_error() {
-        let r = TypedReader::new(r#"{"n": 1,"#);
-        assert_eq!(message(&r).as_deref(), Some("expected string at 1:9"));
+        // However far the walk gets, a document that does not parse reports
+        // the parser's error: one cut short, one with a bad separator, one
+        // whose bad text is a value no field reads, and one with text after
+        // its value.
+        for text in [
+            r#"{"n": 1,"#,
+            r#"{"n": 1 "m": 2}"#,
+            r#"{"zz": [1 2], "n": 1}"#,
+            r#"{"n": 1} x"#,
+            r#"{"n": 01}"#,
+        ] {
+            let expected = super::super::validate_str(text).unwrap_err().to_string();
+            let mut r = TypedReader::new(text);
+            r.begin_struct(&encode_names(["n"]));
+            fields(&mut r, |r, _| {
+                r.read_i64("i64");
+            });
+            assert!(r.finish(), "{text}");
+            assert_eq!(message(&r), Some(expected), "{text}");
+        }
+        assert_eq!(
+            super::super::validate_str(r#"{"n": 1,"#)
+                .unwrap_err()
+                .to_string(),
+            "expected string at 1:9"
+        );
+        let mut r = TypedReader::new("[1, 2 3]");
+        r.begin_tuple(2, "array", "2-tuple");
+        r.enter_elem(0);
+        r.read_i64("i64");
+        r.leave();
+        assert!(r.finish());
+        let mut r = TypedReader::new(r#"{"a":1,"#);
+        r.begin_map("map");
+        while r.next_entry() {
+            r.leave();
+        }
+        assert!(r.finish());
     }
 
     #[test]
@@ -1541,13 +1876,32 @@ mod tests {
     }
 
     #[test]
-    fn maps_answer_sorted_keys_with_the_last_value_of_a_repeat() {
-        let mut r = TypedReader::new(r#"{"q": 2, "b": 1, "q": 5}"#);
-        assert_eq!(r.begin_map("m"), 2);
-        assert_eq!(r.map_key(0), "b");
-        assert_eq!(r.map_key(1), "q");
-        r.enter_map_value(1);
-        assert_eq!(r.read_i64("v"), 5);
+    fn maps_answer_keys_in_document_order_with_the_chosen_value_of_a_repeat() {
+        let text = r#"{"q": 2, "b": 1, "q": 5}"#;
+        for (policy, expected) in [
+            (DuplicateKeys::UseFirst, vec![("q", 2), ("b", 1)]),
+            (DuplicateKeys::UseLast, vec![("q", 2), ("b", 1), ("q", 5)]),
+        ] {
+            let mut r = TypedReader::new(text);
+            r.set_duplicate_keys(policy);
+            r.begin_map("m");
+            let mut entries = Vec::new();
+            while r.next_entry() {
+                let key = r.entry_key().to_owned();
+                entries.push((key, r.read_i64("v")));
+                r.leave();
+            }
+            let entries: Vec<_> = entries.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+            assert_eq!(entries, expected);
+            assert!(!r.finish());
+        }
+        let mut r = TypedReader::new(text);
+        r.begin_map("m");
+        while r.next_entry() {
+            r.leave();
+        }
+        assert!(r.finish());
+        assert_eq!(message(&r).as_deref(), Some("duplicate key `q`"));
     }
 
     #[test]

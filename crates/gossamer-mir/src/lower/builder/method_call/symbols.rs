@@ -764,16 +764,17 @@ impl<'a> Builder<'a> {
                 // address of its slot block, the way `gos_rt_vec_push` takes
                 // one; every other element is the word itself. The two shapes
                 // need different entry points because a one-slot struct is
-                // indistinguishable from a scalar once it is in the vec.
+                // indistinguishable from a scalar once it is in the vec. A
+                // 128-bit element spans two slots, so it goes by address too.
                 TyKind::Vec(elem) | TyKind::Slice(elem) => {
-                    if self.is_inline_slot_block(*elem) {
+                    if self.is_inline_slot_block(*elem) || self.tcx.is_wide_int(*elem) {
                         Some("gos_rt_vec_insert_slots_safe")
                     } else {
                         Some("gos_rt_vec_insert_safe")
                     }
                 }
                 TyKind::Array { elem, .. } => {
-                    if self.is_inline_slot_block(*elem) {
+                    if self.is_inline_slot_block(*elem) || self.tcx.is_wide_int(*elem) {
                         Some("gos_rt_vec_insert_slots_safe")
                     } else {
                         Some("gos_rt_vec_insert_safe")
@@ -1085,6 +1086,7 @@ impl<'a> Builder<'a> {
             (Some("http::Request"), "form_value") => Some("gos_rt_http_request_form_value"),
             (Some("http::Request"), "basic_auth") => Some("gos_rt_http_request_basic_auth"),
             (Some("http::Response"), "with_header") => Some("gos_rt_http_response_with_header"),
+            (Some("http::Response"), "bytes") => Some("gos_rt_http_response_raw_bytes"),
             (Some("http::Response"), "status") => Some("gos_rt_http_response_status"),
             (Some("http::Response"), "body") => Some("gos_rt_http_response_body"),
             (Some("bufio::Scanner"), "scan") => Some("gos_rt_bufio_scanner_scan"),
@@ -1385,15 +1387,6 @@ impl<'a> Builder<'a> {
             (Some("math::rand::Rng"), "next_u32") => Some("gos_rt_math_rng_next_u32"),
             (Some("math::rand::Rng"), "range_u64") => Some("gos_rt_math_rng_range_u64"),
             (Some("math::rand::Rng"), "next_f64") => Some("gos_rt_math_rng_next_f64"),
-            (Some("validate::FieldError"), "path") => Some("gos_rt_field_error_path"),
-            (Some("validate::FieldError"), "message") => Some("gos_rt_field_error_message"),
-            (Some("validate::FieldError"), "code") => Some("gos_rt_field_error_code"),
-            (Some("validate::Errors"), "add") => Some("gos_rt_validate_errors_add"),
-            (Some("validate::Errors"), "is_empty") => Some("gos_rt_validate_errors_is_empty"),
-            (Some("validate::Errors"), "len") => Some("gos_rt_validate_errors_len"),
-            (Some("validate::Errors"), "count") => Some("gos_rt_validate_errors_count"),
-            (Some("validate::Errors"), "get") => Some("gos_rt_validate_errors_get"),
-            (Some("validate::Errors"), "collect") => Some("gos_rt_validate_errors_collect"),
             (Some("sync::RwLock"), "read") => Some("gos_rt_rwlock_get"),
             (Some("sync::RwLock"), "write") => Some("gos_rt_rwlock_set"),
             (Some("sync::Shared"), "get") => Some("gos_rt_shared_get"),
@@ -1419,11 +1412,6 @@ impl<'a> Builder<'a> {
             (Some("metrics::Histogram"), "count") => Some("gos_rt_metrics_histogram_count"),
             (Some("metrics::Registry"), "register") => Some("gos_rt_metrics_registry_register"),
             (Some("metrics::Registry"), "render") => Some("gos_rt_metrics_registry_render"),
-            (Some("trace::Tracer"), "start_span") => Some("gos_rt_trace_tracer_start_span"),
-            (Some("trace::Span"), "set_attribute") => Some("gos_rt_trace_span_set_attribute"),
-            (Some("trace::Span"), "set_status") => Some("gos_rt_trace_span_set_status"),
-            (Some("trace::Span"), "end") => Some("gos_rt_trace_span_end"),
-            (Some("trace::EndedSpan"), "to_otlp_json") => Some("gos_rt_trace_ended_to_otlp_json"),
             (Some("bytes::Builder"), "write") => Some("gos_rt_bytes_builder_write"),
             (Some("bytes::Builder"), "write_char") => Some("gos_rt_bytes_builder_write_char"),
             (Some("bytes::Builder"), "build") => Some("gos_rt_bytes_builder_build"),
@@ -1458,6 +1446,7 @@ impl<'a> Builder<'a> {
             (Some("net::TcpStream"), "start_tls") => Some("gos_rt_tcp_start_tls"),
             (Some("net::TcpStream"), "start_tls_insecure") => Some("gos_rt_tcp_start_tls_insecure"),
             (Some("net::TcpStream"), "start_tls_ca") => Some("gos_rt_tcp_start_tls_ca"),
+            (Some("net::TcpStream"), "start_tls_identity") => Some("gos_rt_tcp_start_tls_identity"),
             (Some("net::TcpStream"), "peer_certificate") => Some("gos_rt_tcp_tls_peer_cert"),
             (Some("net::TcpStream"), "close") => Some("gos_rt_tcp_stream_close"),
             (Some("fs::File"), "read") => Some("gos_rt_fs_file_read"),

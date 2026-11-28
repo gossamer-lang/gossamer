@@ -1,0 +1,24 @@
+// Shell-style quoting, statistics, special functions, and complex numbers,
+// written in Gossamer so every tier answers alike.
+use std::{math, strings}
+
+fn main() {
+    let words = strings::shell_split("vim -c 'set nu' \"a b\" c\\ d")
+    println(f"{words:?}")
+    println(f"{strings::shell_split("unclosed 'quote").is_err()}")
+    println(strings::shell_quote("it's a file"))
+    println(strings::shell_join(#["ls", "-l", "my dir", ""]))
+    let xs = #[2.5, 3.25, 5.5, 1.0, 7.75, 4.0]
+    println(f"mean {math::mean(xs):?} median {math::median(xs):?}")
+    println(f"variance {math::variance(xs).unwrap_or(0.0):.6} stdev {math::stdev(xs).unwrap_or(0.0):.6}")
+    println(f"pvariance {math::pvariance(xs).unwrap_or(0.0):.6} pstdev {math::pstdev(xs).unwrap_or(0.0):.6}")
+    println(f"quantiles {math::quantiles(xs):?}")
+    println(f"empty {math::mean(#[]):?}")
+    println(f"erf {math::erf(0.5):.12} {math::erf(2.5):.12} erfc {math::erfc(3.0):.12}")
+    println(f"gamma {math::gamma(5.0)} {math::gamma(0.5):.12} lgamma {math::lgamma(10.5):.10}")
+    println(f"factorial {math::factorial(10)} comb {math::comb(52, 5)} perm {math::perm(10, 3)}")
+    let a = math::Complex::new(1.0, 2.0)
+    let b = math::Complex::new(3.0, -1.0)
+    println(f"{a + b} {a * b} {a / b} {-a} {a.conj()} {a.abs():.6}")
+    println(f"{math::Complex::new(-4.0, 0.0).sqrt()}")
+}

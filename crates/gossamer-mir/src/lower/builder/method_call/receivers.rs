@@ -1397,12 +1397,6 @@ impl<'a> Builder<'a> {
             TyKind::Adt { def, .. } if def.local == VEC_STACK_DEF_LOCAL => {
                 Some("collections::VecStack")
             }
-            TyKind::Adt { def, .. } if def.local == VALIDATE_ERRORS_DEF_LOCAL => {
-                Some("validate::Errors")
-            }
-            TyKind::Adt { def, .. } if def.local == VALIDATE_FIELD_ERROR_DEF_LOCAL => {
-                Some("validate::FieldError")
-            }
             // A handle that arrives as a parameter carries no construction
             // site to recover the kind from, so the sentinel itself has to
             // answer it - otherwise `fn f(p: &regex::Pattern)` dispatches by

@@ -91,6 +91,20 @@ impl Value {
         }
     }
 
+    /// Chases a `.a.b.c` lookup, `None` when a step names a key the value
+    /// does not hold.
+    #[must_use]
+    pub fn find(&self, path: &str) -> Option<Value> {
+        let mut cursor = self.clone();
+        for segment in path.split('.').filter(|s| !s.is_empty()) {
+            cursor = match cursor {
+                Value::Map(m) => m.get(segment).cloned()?,
+                _ => return None,
+            };
+        }
+        Some(cursor)
+    }
+
     /// Chases a `.a.b.c` lookup. Returns [`Value::Null`] for any
     /// missing intermediate.
     #[must_use]
@@ -302,6 +316,30 @@ pub enum Error {
     /// `{{ end }}` arrived without a matching opener (or vice versa).
     #[error("template: unbalanced action: {0}")]
     Unbalanced(String),
+    /// A parse error at a place in the source, counted from 1.
+    #[error("template:{line}:{column}: {message}")]
+    At {
+        /// The line of the action that failed.
+        line: usize,
+        /// The column, in characters, where that action opens.
+        column: usize,
+        /// What was wrong there.
+        message: String,
+    },
+    /// A field or key the template names is not in the data, under
+    /// [`MissingKey::Error`].
+    #[error("template: {0}: the data has no such field or key")]
+    Missing(String),
+}
+
+/// What a field or key the data does not hold renders as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MissingKey {
+    /// An error naming the path, so a misspelt field is caught.
+    Error,
+    /// The empty value: nothing in text, false in a condition.
+    #[default]
+    Empty,
 }
 
 /// Parses a template source.
@@ -309,11 +347,33 @@ pub fn parse(source: &str) -> Result<Template, Error> {
     let tokens = tokenize(source);
     let mut iter = tokens.into_iter().peekable();
     let mut defines = std::collections::HashMap::new();
-    let nodes = parse_block(&mut iter, false, &mut defines)?;
-    if iter.peek().is_some() {
-        return Err(Error::Unbalanced("trailing tokens".into()));
+    let nodes =
+        parse_block(&mut iter, false, &mut defines).map_err(|(at, e)| locate(source, at, e))?;
+    if let Some(Token::Action { at, .. }) = iter.peek() {
+        return Err(locate(
+            source,
+            *at,
+            Error::Unbalanced("trailing tokens".into()),
+        ));
     }
     Ok(Template { nodes, defines })
+}
+
+/// `error` placed at byte `at` of `source`, by line and character column.
+fn locate(source: &str, at: usize, error: Error) -> Error {
+    let before = &source[..at.min(source.len())];
+    let line = before.matches('\n').count() + 1;
+    let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+    let message = match error {
+        Error::Parse(m) => m,
+        Error::Unbalanced(m) => format!("unbalanced action: {m}"),
+        other => other.to_string(),
+    };
+    Error::At {
+        line,
+        column,
+        message,
+    }
 }
 
 impl Template {
@@ -347,12 +407,25 @@ impl Template {
         funcs: &FuncMap,
         escaper: Option<ValueEscaper<'_>>,
     ) -> Result<String, Error> {
+        self.render_with_missing(data, funcs, escaper, MissingKey::Empty)
+    }
+
+    /// [`Self::render_with`], with what a field the data does not hold
+    /// renders as.
+    pub fn render_with_missing(
+        &self,
+        data: &Value,
+        funcs: &FuncMap,
+        escaper: Option<ValueEscaper<'_>>,
+        missing: MissingKey,
+    ) -> Result<String, Error> {
         let defaults = FuncMap::defaults();
         let ctx = RenderCtx {
             funcs,
             defaults: &defaults,
             defines: &self.defines,
             escaper,
+            missing,
         };
         let mut sink = Sink {
             out: String::with_capacity(64),
@@ -360,6 +433,49 @@ impl Template {
         };
         render_nodes(&self.nodes, std::slice::from_ref(data), &ctx, &mut sink)?;
         Ok(sink.out)
+    }
+}
+
+/// Renders `source` against a data context given as JSON text: objects as
+/// maps, arrays as sequences, numbers, strings, booleans, and `null`. No
+/// escaping is applied, so this is for configuration, code, and mail text,
+/// not HTML.
+///
+/// # Errors
+/// JSON text that does not parse, or a template that does not.
+pub fn render_json(source: &str, json_data: &str) -> Result<String, Error> {
+    render(source, &json_to_value(json_data)?)
+}
+
+/// The template value the JSON `text` describes; empty text is `null`.
+///
+/// # Errors
+/// The text is not JSON.
+pub fn json_to_value(text: &str) -> Result<Value, Error> {
+    if text.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| Error::Parse(format!("template data: {e}")))?;
+    Ok(json_value(&v))
+}
+
+fn json_value(v: &serde_json::Value) -> Value {
+    match v {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .map_or_else(|| Value::Float(n.as_f64().unwrap_or(0.0)), Value::Int),
+        serde_json::Value::String(s) => Value::String(s.clone()),
+        serde_json::Value::Array(items) => Value::Seq(items.iter().map(json_value).collect()),
+        serde_json::Value::Object(map) => {
+            let mut m = std::collections::BTreeMap::new();
+            for (k, val) in map {
+                m.insert(k.clone(), json_value(val));
+            }
+            Value::Map(m)
+        }
     }
 }
 
@@ -389,6 +505,8 @@ enum Token {
         body: String,
         trim_left: bool,
         trim_right: bool,
+        /// Byte offset of the action's `{{`.
+        at: usize,
     },
 }
 
@@ -399,6 +517,7 @@ fn tokenize(source: &str) -> Vec<Token> {
     let mut text_start = 0;
     while cursor < bytes.len() {
         if cursor + 1 < bytes.len() && bytes[cursor] == b'{' && bytes[cursor + 1] == b'{' {
+            let action_start = cursor;
             if cursor > text_start {
                 tokens.push(Token::Text(
                     String::from_utf8_lossy(&bytes[text_start..cursor]).into_owned(),
@@ -454,6 +573,7 @@ fn tokenize(source: &str) -> Vec<Token> {
                 body,
                 trim_left,
                 trim_right,
+                at: action_start,
             });
             text_start = cursor;
         } else {
@@ -505,7 +625,7 @@ fn parse_block<I>(
     tokens: &mut std::iter::Peekable<I>,
     inside_block: bool,
     defines: &mut std::collections::HashMap<String, Vec<Node>>,
-) -> Result<Vec<Node>, Error>
+) -> Result<Vec<Node>, (usize, Error)>
 where
     I: Iterator<Item = Token>,
 {
@@ -517,12 +637,13 @@ where
                     nodes.push(Node::Text(t));
                 }
             }
-            Token::Action { body, .. } => {
+            Token::Action { body, at, .. } => {
                 let body = body.clone();
+                let at = *at;
                 let trimmed = body.trim();
                 if trimmed == "end" || trimmed == "else" {
                     if !inside_block {
-                        return Err(Error::Unbalanced(trimmed.to_string()));
+                        return Err((at, Error::Unbalanced(trimmed.to_string())));
                     }
                     return Ok(nodes);
                 }
@@ -543,7 +664,7 @@ where
                     let closer = tokens.next();
                     match closer {
                         Some(Token::Action { body, .. }) if body.trim() == "end" => {}
-                        _ => return Err(Error::Unbalanced("expected end after if".into())),
+                        _ => return Err((at, Error::Unbalanced("expected end after if".into()))),
                     }
                     nodes.push(Node::If {
                         cond,
@@ -556,7 +677,9 @@ where
                     let closer = tokens.next();
                     match closer {
                         Some(Token::Action { body, .. }) if body.trim() == "end" => {}
-                        _ => return Err(Error::Unbalanced("expected end after range".into())),
+                        _ => {
+                            return Err((at, Error::Unbalanced("expected end after range".into())));
+                        }
                     }
                     nodes.push(Node::Range { path, body });
                 } else if let Some(rest) = trimmed.strip_prefix("with ") {
@@ -571,7 +694,7 @@ where
                     }
                     match tokens.next() {
                         Some(Token::Action { body, .. }) if body.trim() == "end" => {}
-                        _ => return Err(Error::Unbalanced("expected end after with".into())),
+                        _ => return Err((at, Error::Unbalanced("expected end after with".into()))),
                     }
                     nodes.push(Node::With {
                         path,
@@ -583,7 +706,12 @@ where
                     let body = parse_block(tokens, true, defines)?;
                     match tokens.next() {
                         Some(Token::Action { body, .. }) if body.trim() == "end" => {}
-                        _ => return Err(Error::Unbalanced("expected end after define".into())),
+                        _ => {
+                            return Err((
+                                at,
+                                Error::Unbalanced("expected end after define".into()),
+                            ));
+                        }
                     }
                     // A definition contributes no output where it is
                     // written; it is reachable by name from anywhere.
@@ -598,8 +726,11 @@ where
                         .map(str::to_string);
                     nodes.push(Node::Invoke { name, arg });
                 } else if trimmed == "block" || trimmed.starts_with("block ") {
-                    return Err(Error::Unbalanced(
-                        "block is not supported; write define plus template".into(),
+                    return Err((
+                        at,
+                        Error::Unbalanced(
+                            "block is not supported; write define plus template".into(),
+                        ),
                     ));
                 } else {
                     nodes.push(Node::Substitute(parse_pipeline(trimmed)));
@@ -619,33 +750,34 @@ fn unquote(text: &str) -> String {
         .to_string()
 }
 
-fn resolve(stack: &[Value], expr: &str) -> Value {
+fn resolve(stack: &[Value], expr: &str, missing: MissingKey) -> Result<Value, Error> {
     let expr = expr.trim();
     if expr.starts_with('"') && expr.ends_with('"') && expr.len() >= 2 {
-        return Value::String(expr[1..expr.len() - 1].to_string());
+        return Ok(Value::String(expr[1..expr.len() - 1].to_string()));
     }
     if let Ok(n) = expr.parse::<i64>() {
-        return Value::Int(n);
+        return Ok(Value::Int(n));
     }
     if expr == "." {
-        return stack.last().cloned().unwrap_or(Value::Null);
+        return Ok(stack.last().cloned().unwrap_or(Value::Null));
     }
     if let Some(rest) = expr.strip_prefix('.') {
-        if let Some(top) = stack.last() {
-            let lookup = top.lookup(rest);
-            if !matches!(lookup, Value::Null) {
-                return lookup;
+        // The innermost frame that holds the path answers; a `null` there
+        // lets an outer frame's value through, as an empty field does.
+        let mut held = false;
+        for frame in stack.iter().rev() {
+            match frame.find(rest) {
+                Some(Value::Null) => held = true,
+                Some(value) => return Ok(value),
+                None => {}
             }
         }
-        for frame in stack.iter().rev().skip(1) {
-            let lookup = frame.lookup(rest);
-            if !matches!(lookup, Value::Null) {
-                return lookup;
-            }
-        }
-        return Value::Null;
+        return match (held, missing) {
+            (false, MissingKey::Error) => Err(Error::Missing(expr.to_string())),
+            _ => Ok(Value::Null),
+        };
     }
-    Value::Null
+    Ok(Value::Null)
 }
 
 /// Transforms one substituted value before it is written out.
@@ -670,6 +802,7 @@ struct RenderCtx<'a> {
     defaults: &'a FuncMap,
     defines: &'a std::collections::HashMap<String, Vec<Node>>,
     escaper: Option<ValueEscaper<'a>>,
+    missing: MissingKey,
 }
 
 /// Output being assembled, plus the literal text an escaper classifies by.
@@ -691,7 +824,7 @@ fn render_nodes(
                 sink.literal.push_str(t);
             }
             Node::Substitute(pipe) => {
-                let value = apply_pipeline(stack, pipe, ctx.funcs, ctx.defaults)?;
+                let value = apply_pipeline(stack, pipe, ctx)?;
                 let text = value.to_text();
                 match ctx.escaper {
                     Some(escape) => sink.out.push_str(&escape(&sink.literal, &text, pipe.raw)),
@@ -703,7 +836,7 @@ fn render_nodes(
                 then_body,
                 else_body,
             } => {
-                let value = resolve(stack, cond);
+                let value = resolve(stack, cond, ctx.missing)?;
                 if value.truthy() {
                     render_nodes(then_body, stack, ctx, sink)?;
                 } else {
@@ -715,7 +848,7 @@ fn render_nodes(
                 then_body,
                 else_body,
             } => {
-                let value = resolve(stack, path);
+                let value = resolve(stack, path, ctx.missing)?;
                 if value.truthy() {
                     let mut child_stack: Vec<Value> = stack.to_vec();
                     child_stack.push(value);
@@ -731,14 +864,14 @@ fn render_nodes(
                 match arg {
                     Some(expr) => {
                         let mut child_stack: Vec<Value> = stack.to_vec();
-                        child_stack.push(resolve(stack, expr));
+                        child_stack.push(resolve(stack, expr, ctx.missing)?);
                         render_nodes(body, &child_stack, ctx, sink)?;
                     }
                     None => render_nodes(body, stack, ctx, sink)?,
                 }
             }
             Node::Range { path, body } => {
-                let value = resolve(stack, path);
+                let value = resolve(stack, path, ctx.missing)?;
                 if let Value::Seq(items) = value {
                     for item in items {
                         let mut child_stack: Vec<Value> = stack.to_vec();
@@ -761,19 +894,15 @@ fn render_nodes(
     Ok(())
 }
 
-fn apply_pipeline(
-    stack: &[Value],
-    pipe: &Pipeline,
-    funcs: &FuncMap,
-    defaults: &FuncMap,
-) -> Result<Value, Error> {
-    let mut value = resolve_source(stack, &pipe.source, funcs, defaults)?;
+fn apply_pipeline(stack: &[Value], pipe: &Pipeline, ctx: &RenderCtx<'_>) -> Result<Value, Error> {
+    let (funcs, defaults) = (ctx.funcs, ctx.defaults);
+    let mut value = resolve_source(stack, &pipe.source, ctx)?;
     for stage in &pipe.stages {
         let f = lookup_func(stage.func.as_str(), funcs, defaults)?;
         let mut args: Vec<Value> = Vec::with_capacity(1 + stage.args.len());
         args.push(value);
         for a in &stage.args {
-            args.push(resolve_literal_or_field(stack, a));
+            args.push(resolve(stack, a, ctx.missing)?);
         }
         value = f(&args)?;
     }
@@ -786,27 +915,22 @@ fn apply_pipeline(
 /// prefix-first - `{{ len .items }}` - so a head whose first word names a
 /// function is that call over the words after it. `{{ .items | len }}` is
 /// the same call written pipe-first.
-fn resolve_source(
-    stack: &[Value],
-    source: &str,
-    funcs: &FuncMap,
-    defaults: &FuncMap,
-) -> Result<Value, Error> {
+fn resolve_source(stack: &[Value], source: &str, ctx: &RenderCtx<'_>) -> Result<Value, Error> {
     let source = source.trim();
     let Some((head, rest)) = source.split_once(char::is_whitespace) else {
-        return Ok(resolve(stack, source));
+        return resolve(stack, source, ctx.missing);
     };
     let rest = rest.trim();
     if rest.is_empty() || head.starts_with('.') || head.starts_with('"') {
-        return Ok(resolve(stack, source));
+        return resolve(stack, source, ctx.missing);
     }
-    let Ok(f) = lookup_func(head, funcs, defaults) else {
-        return Ok(resolve(stack, source));
+    let Ok(f) = lookup_func(head, ctx.funcs, ctx.defaults) else {
+        return resolve(stack, source, ctx.missing);
     };
-    let args: Vec<Value> = rest
+    let args = rest
         .split_whitespace()
-        .map(|a| resolve_literal_or_field(stack, a))
-        .collect();
+        .map(|a| resolve(stack, a, ctx.missing))
+        .collect::<Result<Vec<Value>, Error>>()?;
     f(&args)
 }
 
@@ -821,10 +945,6 @@ fn lookup_func(
     defaults
         .get(name)
         .ok_or_else(|| Error::Parse(format!("unknown template function {name:?}")))
-}
-
-fn resolve_literal_or_field(stack: &[Value], expr: &str) -> Value {
-    resolve(stack, expr)
 }
 
 #[cfg(test)]

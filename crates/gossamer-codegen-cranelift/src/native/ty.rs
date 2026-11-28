@@ -186,6 +186,8 @@ pub(super) fn cl_type_of(tcx: &TyCtxt, ty: Ty, module: &dyn Module) -> ir::Type 
         // narrow ints as I8/I16/I32 made arithmetic wrap at the
         // declared width (`sum += b` over `[u8]` gave sum mod 256
         // once the JIT tiered up), diverging from the VM.
+        // A 128-bit integer is the one integer wider than the runtime word.
+        TyKind::Int(int) if int.is_wide() => types::I128,
         TyKind::Int(_) => types::I64,
         // Every float is a 64-bit runtime value, matching the VM and the LLVM
         // tier: an aggregate slot holds an f32 as a double word, and the

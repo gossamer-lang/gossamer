@@ -198,7 +198,8 @@ impl<'tcx> FnBuilder<'tcx> {
         let reg = match value {
             Some(value) => {
                 let reg = self.compile_expr(value)?;
-                self.cloned_returned_field_container(value, reg)
+                let reg = self.cloned_returned_field_container(value, reg);
+                self.detach_from_pending_defers(reg)
             }
             None => self.load_unit(),
         };

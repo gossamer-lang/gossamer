@@ -46,7 +46,7 @@ pub(crate) struct StdlibIndex {
     /// `name → [canonical path]` for every item in every module.
     /// Powers fuzzy auto-import suggestions.
     by_member_name: HashMap<String, Vec<String>>,
-    /// All canonical module paths (`std::fmt`, `std::os::exec`, …).
+    /// All canonical module paths (`std::fmt`, `std::os::signal`, …).
     all_paths: Vec<String>,
 }
 
@@ -117,7 +117,7 @@ impl StdlibIndex {
     /// Recognises three spellings:
     /// * the full canonical path (`["std", "fmt"]`),
     /// * the same path with the leading `std` stripped (`["fmt"]`),
-    /// * a leaf-name alias (`["fmt"]`, `["json"]`, `["exec"]`, …).
+    /// * a leaf-name alias (`["fmt"]`, `["json"]`, `["signal"]`, …).
     pub(crate) fn members_of(&self, qualifier: &[&str]) -> Option<Vec<MemberSpec>> {
         if qualifier.is_empty() {
             return None;
@@ -316,8 +316,8 @@ mod tests {
         let idx = idx();
         let members = idx.members_of(&["os"]).expect("os module");
         assert!(
-            members.iter().any(|m| m.name == "exec"),
-            "expected `exec` submodule in os, got {:?}",
+            members.iter().any(|m| m.name == "signal"),
+            "expected `signal` submodule in os, got {:?}",
             members.iter().map(|m| &m.name).collect::<Vec<_>>()
         );
     }

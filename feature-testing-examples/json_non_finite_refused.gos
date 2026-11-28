@@ -1,0 +1,31 @@
+// JSON has no number for NaN or an infinity (RFC 8259 section 6), so
+// `json::encode` answers `Err` for a value holding one, on every tier.
+use std::{encoding::json, errors}
+
+struct Report {
+    mean: f64
+    label: String
+}
+
+struct Series {
+    points: Vec<f64>
+    scale: f32
+}
+
+fn show(result: Result<String, errors::Error>) {
+    match result {
+        Ok(text) => println(f"ok {text}")
+        Err(e) => println(f"refused: {e}")
+    }
+}
+
+fn main() {
+    let zero = 0.0
+    show(json::encode(Report { mean: zero / zero, label: "nan" }))
+    show(json::encode(Report { mean: 2.5, label: "finite" }))
+    show(json::encode_pretty(Series { points: #[1.5, 1.0 / zero], scale: 1.0 }))
+    show(json::encode(Series { points: #[1.0], scale: -1.0 / 0.0 }))
+    show(json::encode(#[1.0, zero / zero]))
+    show(json::encode({ "a": 1.0 / zero }))
+    show(json::encode(0.5))
+}

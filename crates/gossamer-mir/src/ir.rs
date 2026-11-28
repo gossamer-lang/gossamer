@@ -373,6 +373,12 @@ pub enum AssertMessage {
     Overflow,
     /// Integer divide/modulo by zero.
     DivideByZero,
+    /// Signed `MIN / -1` (or `MIN % -1`), whose quotient does not fit the
+    /// type; `rem` for `%`.
+    DivideOverflow {
+        /// Whether the operation is `%` rather than `/`.
+        rem: bool,
+    },
     /// A shift amount outside `0..BITS` of the shifted type; `left` for `<<`.
     ShiftOverflow {
         /// Whether the shift is `<<` rather than `>>`.
@@ -386,7 +392,10 @@ impl AssertMessage {
     pub fn operands(&self) -> impl Iterator<Item = &Operand> {
         let pair = match self {
             Self::BoundsCheck { index, seq } => Some([index, seq]),
-            Self::Overflow | Self::DivideByZero | Self::ShiftOverflow { .. } => None,
+            Self::Overflow
+            | Self::DivideByZero
+            | Self::DivideOverflow { .. }
+            | Self::ShiftOverflow { .. } => None,
         };
         pair.into_iter().flatten()
     }
@@ -395,7 +404,10 @@ impl AssertMessage {
     pub fn operands_mut(&mut self) -> impl Iterator<Item = &mut Operand> {
         let pair = match self {
             Self::BoundsCheck { index, seq } => Some([index, seq]),
-            Self::Overflow | Self::DivideByZero | Self::ShiftOverflow { .. } => None,
+            Self::Overflow
+            | Self::DivideByZero
+            | Self::DivideOverflow { .. }
+            | Self::ShiftOverflow { .. } => None,
         };
         pair.into_iter().flatten()
     }
@@ -428,7 +440,7 @@ impl Place {
 }
 
 /// One step in a place projection.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Projection {
     /// `*place` - dereference.
     Deref,

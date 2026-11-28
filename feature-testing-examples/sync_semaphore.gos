@@ -1,0 +1,33 @@
+// sync::Semaphore caps concurrent holders; a Permit gives its weight back
+// when the last reference to it goes.
+use std::{sync, time}
+use std::sync::Shared
+
+fn main() {
+    let sem = sync::Semaphore::new(2)
+    let active = Shared::new(0)
+    let peak = Shared::new(0)
+    let _ = cohort {
+        for i in 0..6 {
+            spawn(|| {
+                let _permit = sem.acquire()
+                let now = active.update(|n| n + 1)
+                peak.update(|p| p.max(now))
+                time_pass()
+                active.update(|n| n - 1)
+            })
+        }
+    }
+    println(f"peak {peak.get()} size {sem.size()}")
+    {
+        let p = sem.acquire(2)
+        println(f"took {p.weight()}; another: {sem.try_acquire().is_some()}")
+    }
+    println(f"after release: {sem.try_acquire(2).is_some()}")
+}
+
+fn time_pass() {
+    let mut x = 0
+    for i in 0..20_000 { x += i }
+    time::sleep(time::Duration::from_millis(5))
+}

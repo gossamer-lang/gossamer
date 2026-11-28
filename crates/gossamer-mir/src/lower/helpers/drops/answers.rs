@@ -261,6 +261,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                 | "gos_rt_aggr_release_children"
                 | "gos_rt_aggr_zero_guarded"
                 | "gos_rt_option_slot_release"
+                | "gos_rt_vec_free"
         )
     };
 
@@ -296,6 +297,24 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                 }
                 continue;
             }
+            // A field of a value whose release runs a cleanup is given back
+            // at the holder's last use, so the cleanup runs at the cleanup
+            // point that follows rather than when the frame returns.
+            if let [crate::ir::Projection::Field(field)] = p.projection.as_slice()
+                && matches!(*name, "gos_rt_rc_release" | "gos_rt_vec_free")
+                && !lends(p.local)
+                && tcx.is_scope_bound(body.locals[p.local.0 as usize].ty)
+            {
+                if seen.insert((p.local.0, Some(*field))) {
+                    let release = if *name == "gos_rt_rc_release" {
+                        "gos_rt_rc_release"
+                    } else {
+                        "gos_rt_vec_free"
+                    };
+                    candidates.push((p.local, release, None, Some(*field)));
+                }
+                continue;
+            }
             if !p.projection.is_empty() {
                 continue;
             }
@@ -319,6 +338,15 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                 // placement (Option-chain workloads rely on it to keep
                 // RAM flat).
                 "gos_rt_option_slot_release" if !lends(p.local) => "gos_rt_option_slot_release",
+                // A sequence that holds a cleanup gives back its elements at
+                // its last use, so the cleanup runs at the cleanup point that
+                // follows rather than when the frame returns.
+                "gos_rt_vec_free"
+                    if !lends(p.local)
+                        && tcx.is_scope_bound(body.locals[p.local.0 as usize].ty) =>
+                {
+                    "gos_rt_vec_free"
+                }
                 _ => continue,
             };
             if !seen.insert((p.local.0, None)) {
@@ -860,11 +888,14 @@ pub(crate) fn holder_err_kind(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::
     }
     let types = substs.types();
     let ok = *types.first()?;
+    // Every `Ok` payload the holder walk keeps as a copy blob (see
+    // `is_option_slot_holder`), an `Option` among them, makes the binding a
+    // holder whose `Err` arm is paired here.
     let ok_is_aggregate = match tcx.kind_of(ok) {
         TyKind::Adt { def, .. } => def.local < u32::MAX - 16 && !tcx.is_inline_enum_ty(ok),
         TyKind::Tuple(_) | TyKind::Array { .. } => true,
         _ => false,
-    };
+    } || super::has_counted_blob_meta(tcx, ok);
     if !ok_is_aggregate {
         return None;
     }

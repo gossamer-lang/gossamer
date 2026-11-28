@@ -768,11 +768,13 @@ impl<'a> Builder<'a> {
         // the shim never filled: the callback takes a reference to it
         // instead, which is the address the shim passes, and the
         // carrier-reference pass rewrites the body's reads to go through it.
+        // A 128-bit integer element is two words held by value the same way.
         let inputs: Vec<Ty> = inputs
             .iter()
             .map(|&input| {
-                if crate::lower::carrier_ref::is_two_word_carrier(self.tcx, input)
-                    && self.elem_bytes_of(input) > 8
+                if (crate::lower::carrier_ref::is_two_word_carrier(self.tcx, input)
+                    && self.elem_bytes_of(input) > 8)
+                    || self.tcx.is_wide_int(input)
                 {
                     self.tcx.intern(gossamer_types::TyKind::Ref {
                         mutability: gossamer_types::Mutbl::Not,

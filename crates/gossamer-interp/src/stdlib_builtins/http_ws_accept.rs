@@ -86,7 +86,7 @@ fn upgrade_response(token: &str) -> Value {
         ("content_type", Value::String(SmolStr::from(""))),
         ("headers", Value::Array(Arc::new(headers))),
     ];
-    Value::struct_("Response", fields)
+    Value::struct_("http::Response", fields)
 }
 
 pub(crate) fn builtin_ws_accept(args: &[Value]) -> RuntimeResult<Value> {

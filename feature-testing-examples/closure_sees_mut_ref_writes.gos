@@ -1,0 +1,118 @@
+// A `&mut` call on a binding a closure captures writes the binding itself, so
+// a closure the call runs reads what the call wrote so far, and what the
+// closure writes is there when the call goes on. It holds for a `&mut self`
+// receiver, a field of one, an explicit `&mut` argument beside the closure or
+// with the closure reached through a struct, a closure or function value
+// called with one, and a call that lends its own `self` on.
+struct Counter {
+    n: i64
+}
+
+impl Counter {
+    fn bump(&mut self, peek: Fn() -> i64) -> i64 {
+        self.n += 1
+        peek()
+    }
+
+    fn bump_around(&mut self, poke: Fn()) {
+        self.n += 10
+        poke()
+        self.n += 100
+    }
+
+    fn bump_twice(&mut self, peek: Fn() -> i64) -> i64 {
+        let first = self.bump(peek)
+        first * 10 + self.bump(peek)
+    }
+
+    fn record(&mut self, log: Fn(i64)) {
+        for step in 0..3 {
+            self.n += step
+            log(self.n)
+        }
+    }
+}
+
+struct Pair {
+    left: Counter
+    right: Counter
+}
+
+struct Holder {
+    read: Fn() -> i64
+}
+
+fn bump_through(c: &mut Counter, holder: Holder) -> i64 {
+    c.n += 1
+    (holder.read)()
+}
+
+struct Sizer {
+    size: Fn() -> i64
+}
+
+fn add_one(c: &mut Counter, peek: Fn() -> i64) -> i64 {
+    c.n += 1
+    peek()
+}
+
+fn grow(items: &mut Vec<i64>, sizer: Sizer) -> i64 {
+    items.push(7)
+    items.push(8)
+    (sizer.size)()
+}
+
+fn main() {
+    let mut counter = Counter { n: 0 }
+    let peek = || counter.n
+    let seen = counter.bump(peek)
+    println(f"receiver {seen} {counter.n}")
+
+    let mut poked = Counter { n: 0 }
+    let poke = || poked.n += 1
+    poked.bump_around(poke)
+    println(f"closure write kept {poked.n}")
+
+    let mut twice = Counter { n: 0 }
+    let look = || twice.n
+    println(f"lent on {twice.bump_twice(look)} {twice.n}")
+
+    let mut pair = Pair { left: Counter { n: 5 }, right: Counter { n: 50 } }
+    let total = || pair.left.n + pair.right.n
+    let after_left = pair.left.bump(total)
+    let after_right = pair.right.bump(total)
+    println(f"fields {after_left} {after_right}")
+
+    let mut through = Counter { n: 0 }
+    let holder = Holder { read: || through.n }
+    let read = bump_through(&mut through, holder)
+    println(f"argument {read} {through.n}")
+
+    let mut direct = Counter { n: 0 }
+    let look_direct = || direct.n
+    println(f"beside {add_one(&mut direct, look_direct)} {direct.n}")
+
+    let bump = |c: &mut Counter, peek: Fn() -> i64| -> i64 {
+        c.n += 10
+        peek()
+    }
+    let mut lambda = Counter { n: 0 }
+    let look_lambda = || lambda.n
+    println(f"closure callee {bump(&mut lambda, look_lambda)} {lambda.n}")
+
+    let as_value = add_one
+    let mut valued = Counter { n: 5 }
+    let look_valued = || valued.n
+    println(f"function value {as_value(&mut valued, look_valued)} {valued.n}")
+
+    let mut items: Vec<i64> = #[1]
+    let sizer = Sizer { size: || items.len() as i64 }
+    let grown = grow(&mut items, sizer)
+    println(f"vec {grown} {items}")
+
+    let mut logged = Counter { n: 0 }
+    let mut log: Vec<String> = #[]
+    let note = |n: i64| log.push(f"{n}/{logged.n}")
+    logged.record(note)
+    println(f"loop {log.join(" ")}")
+}

@@ -369,7 +369,11 @@ pub(crate) fn record_channel_elem_kind(body: &mut Body, tcx: &mut gossamer_types
 /// of its own first. A local whose uses the walk cannot classify, or whose
 /// other consuming mention is not its last use, is left alone, and so is every
 /// carrier it exchanges values with.
-pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+pub(crate) fn own_carrier_payloads(
+    body: &mut Body,
+    tcx: &gossamer_types::TyCtxt,
+    user_fn_names: &std::collections::HashSet<String>,
+) {
     use gossamer_types::TyKind;
 
     // Entry points that read a carrier's discriminant and nothing else.
@@ -1079,7 +1083,7 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
                         && !answers_borrowed_element(name)
                         && !returns_borrowed_pointer(name)
                         && (!holds_table(dest)
-                            || answers_owned_table_carrier(callee)
+                            || answers_owned_table_carrier(callee, user_fn_names)
                             || passes_table_through(name))
                     {
                         // The answer holds the argument's table, so the two

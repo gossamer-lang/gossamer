@@ -12,7 +12,9 @@ use std::collections::BTreeMap;
 
 use thiserror::Error;
 
-pub use gossamer_runtime::yaml_node::{max_depth, max_size, set_max_depth, set_max_size};
+pub use gossamer_runtime::yaml_node::{
+    DuplicateKeys, max_depth, max_size, set_max_depth, set_max_size,
+};
 
 fn check_depth(node: &gossamer_runtime::yaml_node::Node, cap: usize) -> Result<(), Error> {
     if node.depth() > cap {
@@ -234,7 +236,17 @@ fn to_serde(value: &Value) -> serde_norway::Value {
 /// Parses `yaml_text` as a single YAML document and renders it as JSON text,
 /// each mapping's members by key.
 pub fn to_json_text(yaml_text: &str) -> Result<String, String> {
-    let value = gossamer_runtime::yaml_node::decode_json(yaml_text, max_depth(), max_size())?;
+    to_json_text_with(yaml_text, DuplicateKeys::Error)
+}
+
+/// [`to_json_text`], reading a key a mapping repeats as `duplicates` says.
+pub fn to_json_text_with(yaml_text: &str, duplicates: DuplicateKeys) -> Result<String, String> {
+    let value = gossamer_runtime::yaml_node::decode_json_with(
+        yaml_text,
+        max_depth(),
+        max_size(),
+        duplicates,
+    )?;
     serde_json::to_string(&value).map_err(|e| e.to_string())
 }
 
@@ -242,7 +254,20 @@ pub fn to_json_text(yaml_text: &str) -> Result<String, String> {
 /// [`crate::json::parse`] answers for the text [`to_json_text`] renders, without
 /// rendering that text.
 pub fn parse_json(yaml_text: &str) -> Result<crate::json::Value, String> {
-    let value = gossamer_runtime::yaml_node::decode_json(yaml_text, max_depth(), max_size())?;
+    parse_json_with(yaml_text, DuplicateKeys::Error)
+}
+
+/// [`parse_json`], reading a key a mapping repeats as `duplicates` says.
+pub fn parse_json_with(
+    yaml_text: &str,
+    duplicates: DuplicateKeys,
+) -> Result<crate::json::Value, String> {
+    let value = gossamer_runtime::yaml_node::decode_json_with(
+        yaml_text,
+        max_depth(),
+        max_size(),
+        duplicates,
+    )?;
     Ok(json_from_serde(value))
 }
 

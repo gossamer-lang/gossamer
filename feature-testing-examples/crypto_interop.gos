@@ -1,0 +1,61 @@
+// SHA-3, HKDF, RSA signatures and OAEP encryption, and X.509 certificate and
+// signing-request generation answer the same on every tier. Generated keys and OAEP
+// ciphertexts are random, so they are checked by what they carry and what opens them.
+use std::crypto::{kdf, rsa, sha3_256, sha3_512, x509}
+use std::encoding::hex
+
+const RSA_KEY: String = "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCJhixYImDP8Nh6\nzRUWsj5wpWwm5xiMBzwe+zI/5gGHFkJL9Slav2V58njLZbdAiCl66pzfjKsHjzM9\nUITQjLGughDnaK6nsUCH3sJewySTkysyxCBkStUE08c+QWcDfUtJW20lJpKPdWSa\n/uLQc74A7aWzsgeDXWgyGfOiQNwWgONlAHipP/n+P+Yv1O0P1JY8fTQH+JbGhpfp\nv/Uv/ajmxbzpRlLlSoO18J27ew4ZLDl9Fsi1kfCoNffQu++0EmEocx16ppTsafg0\n1FW0XgMkJCx3KCoUKXncfEmJHnLVdcOmO045SKPjXhPDRievXuoworMpXZ/764gp\nFZKUk/NzAgMBAAECggEAF7YKBEIdJg0VDgs5BRpDWMG0xXpXyaDftUnDLrA1+DgW\nwyjoceyJDv8G467MazRuznIQDR0gSePfRkWROLHhWsCzMGrkniYaBbMbGSKVNlqL\n+qtFGHWsh7IJ6sp0++2I4wN/7IVbhJ+Nconaym0CR/+xb6uUzwn2UpkV4BZFvB1J\nHwEO4xledzmWDnnHOEh6TsdmrGs+gIZlAAmY/weJfakIVGxTYIPHMHpJhS4vCQ+f\n2w7jAkFh0N9HAw71qGEzck1Tn/3msZejI9k9RnhnHDGmaISpL0vSzAjZNc/0g8zy\n6MKiVwChKyrRHrPUMht09KWe6DU24Y4wpejAIKwaGQKBgQDAOwEQQxXKIzVqlvhE\nJacBKSP7BTR4jl6yqDsuaQDMSTs3zDP3/0EN76FxwI01yE+AXlj9GK4VAHHBoPmO\nlm2TtIV0XYtjZe5iZNtfJP5zXjByNiXXnMZvtSG5ya1JgMrus0+hUdvMhq0yUY2K\nTVLBV1PtX//AseTuCygrcS7myQKBgQC3JUf9BJ04fEJKBlDyrk4xgjAJEFDv+P5d\n436dAiFQin+Q6xP32cm2kIwjh8DbW4eM3nj3HsdVKhHPhnPfMwi67n2Mt/stL9bW\nePoJVkbGNo6iftXa+vMG5P3NhtgLsOlYkD3yq27gXG5EEJXUORUM8iAfeUaDEttt\nONhGg/uaWwKBgFdLNCtvW3jEzmAOGMXRl2pWhWlbrr1EYcqdzOpBcsRSSRsIl1z6\nRE+Qz265syaGRVwU/DJLP9p3rjDw6gMPWsllg+kZBdBonH2AMYKeaRJ45mUnI74r\nCo314k/dPt0PKJiHQxUN+FODoSklkbIJdRgpkQpNuvWFk2FqHZ7EsjjJAoGAYHhh\n0BQTIMLLRCTJlNtd0tRJqyyOBam5iwkfE2Mg20To5xP8o6xzhRfkyX5jhuhSoVA6\nlaj/xItxcEfZVzORoK2pMmtjAi1V1AlLY4mvpA7u2QdIbJ2NUA9k5VLnEFlywLTR\n/LZyo/nsFyxJT811mikb5JhEHRzcuk6cFaDF8ksCgYBO1Irod6Y7U2lvX+jxvkDG\n6chnVhCI/UwzZHADu3i/OO2po0vD9rhvMkMNWfwBRTG/URJNzz0PA83Ttn6V2N1W\nTsLgNc89CTSbCXlZ1EutSfCRRQ7Ub/sBwmRWN7u3yGl3G4xdeMOLtELv3zSXBcxI\nFFrxzZfeDTW7095brPmPoA==\n-----END PRIVATE KEY-----\n"
+
+const RSA_PUBLIC: String = "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAiYYsWCJgz/DYes0VFrI+\ncKVsJucYjAc8HvsyP+YBhxZCS/UpWr9lefJ4y2W3QIgpeuqc34yrB48zPVCE0Iyx\nroIQ52iup7FAh97CXsMkk5MrMsQgZErVBNPHPkFnA31LSVttJSaSj3Vkmv7i0HO+\nAO2ls7IHg11oMhnzokDcFoDjZQB4qT/5/j/mL9TtD9SWPH00B/iWxoaX6b/1L/2o\n5sW86UZS5UqDtfCdu3sOGSw5fRbItZHwqDX30LvvtBJhKHMdeqaU7Gn4NNRVtF4D\nJCQsdygqFCl53HxJiR5y1XXDpjtOOUij414Tw0Ynr17qMKKzKV2f++uIKRWSlJPz\ncwIDAQAB\n-----END PUBLIC KEY-----\n"
+
+fn main() {
+    println(f"sha3-256(abc): {sha3_256::hex("abc".bytes())}")
+    println(f"sha3-512(''): {sha3_512::hex("".bytes()).substring(0, 32)}")
+    println(f"sha3 digest length: {sha3_256::digest("x".bytes()).len()} {sha3_512::digest("x".bytes()).len()}")
+
+    let mut salt: Vec<u8> = #[]
+    for b in 0..13 {
+        salt.push(b as% u8)
+    }
+    let mut info: Vec<u8> = #[]
+    for b in 240..250 {
+        info.push(b as% u8)
+    }
+    let okm = kdf::hkdf_sha256(#[11u8; 22].to_vec(), salt, info, 42).unwrap()
+    println(f"hkdf-sha256: {hex::encode(okm).substring(0, 32)} ({okm.len()} bytes)")
+    println(f"hkdf-sha512 length: {kdf::hkdf_sha512("k".bytes(), #[], #[], 64).unwrap().len()}")
+    println(f"hkdf too long refused: {kdf::hkdf_sha256("k".bytes(), #[], #[], 9000).is_err()}")
+
+    let message = "pay 10 to bob".bytes()
+    let derived = rsa::public_key_pem(RSA_KEY).unwrap()
+    println(f"public key derived: {derived == RSA_PUBLIC}")
+    let rs256 = rsa::sign_pkcs1_sha256(RSA_KEY, message).unwrap()
+    println(f"rs256: {rs256.len()} bytes, deterministic: {rs256 == rsa::sign_pkcs1_sha256(RSA_KEY, message).unwrap()}")
+    println(f"rs256 verifies: {rsa::verify_pkcs1_sha256(RSA_PUBLIC, message, rs256).is_ok()}")
+    println(f"rs256 tampered: {rsa::verify_pkcs1_sha256(RSA_PUBLIC, "pay 99 to bob".bytes(), rs256).is_err()}")
+    let ps256 = rsa::sign_pss_sha256(RSA_KEY, message).unwrap()
+    println(f"ps256 verifies: {rsa::verify_pss_sha256(derived, message, ps256).is_ok()}")
+    println(f"ps256 is not rs256: {rsa::verify_pkcs1_sha256(RSA_PUBLIC, message, ps256).is_err()}")
+    println(f"not an rsa key: {rsa::sign_pss_sha256("-----BEGIN X-----\n-----END X-----\n", message).is_err()}")
+    let sealed = rsa::encrypt_oaep_sha256(derived, "a data key".bytes()).unwrap()
+    let opened = rsa::decrypt_oaep_sha256(RSA_KEY, sealed).unwrap()
+    let resealed = rsa::encrypt_oaep_sha256(derived, "a data key".bytes()).unwrap()
+    println(f"oaep: {sealed.len()} bytes, opens to {String::from_utf8(opened).unwrap()}, fresh each time: {sealed != resealed}")
+    let mut bent = sealed
+    bent[0] = bent[0] ^ 1
+    println(f"oaep tampered: {rsa::decrypt_oaep_sha256(RSA_KEY, bent).is_err()}")
+    println(f"oaep too long: {rsa::encrypt_oaep_sha256(derived, #[0u8; 300]).is_err()}")
+
+    let ca_cert, ca_key = x509::self_signed("Fixture CA", #[], is_ca: true).unwrap()
+    let leaf_cert, _leaf_key = x509::issue(ca_cert, ca_key, "leaf", #["localhost", "example.test"], days: 30).unwrap()
+    let leaf = x509::parse_pem(leaf_cert).unwrap()
+    println(f"leaf: {leaf.subject} issued by {leaf.issuer} for {leaf.san_dns}")
+    let validity = (leaf.not_after_unix - leaf.not_before_unix) / 86400
+    println(f"leaf valid for {validity} days")
+    let request, _request_key = x509::csr("svc", #["svc.test"]).unwrap()
+    println(f"csr: {request.starts_with("-----BEGIN CERTIFICATE REQUEST-----")}")
+    let signed = x509::parse_pem(x509::sign_csr(request, ca_cert, ca_key, client: true).unwrap()).unwrap()
+    println(f"signed request: {signed.subject} for {signed.san_dns}")
+    println(f"bad request refused: {x509::sign_csr("nope", ca_cert, ca_key).is_err()}")
+    println(f"zero days refused: {x509::self_signed("x", #[], days: 0).is_err()}")
+}

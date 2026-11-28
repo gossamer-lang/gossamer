@@ -66,9 +66,6 @@ pub(crate) fn release_program_storage() {
     {
         run_static_drops();
         super::args::release_program_args();
-        // Images are decoded only off wasm32, which has no image module.
-        #[cfg(not(target_arch = "wasm32"))]
-        super::image::release_program_images();
         super::rc::release_program_pins();
         super::string::trim_heap_string_registry();
         super::cohort::trim_idle_registries();

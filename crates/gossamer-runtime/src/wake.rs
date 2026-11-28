@@ -94,6 +94,21 @@ impl ThreadSignal {
         *raised = false;
     }
 
+    /// [`Self::wait`] that also ends once `deadline` passes, answering
+    /// whether the signal was raised.
+    pub fn wait_until(&self, deadline: crate::platform::Instant) -> bool {
+        let mut raised = self.raised.lock();
+        while !*raised {
+            let now = crate::platform::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let _ = self.cv.wait_for(&mut raised, deadline - now);
+        }
+        *raised = false;
+        true
+    }
+
     fn raise(&self) {
         *self.raised.lock() = true;
         self.cv.notify_one();

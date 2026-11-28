@@ -36,6 +36,9 @@ pub struct ParamEffects {
     /// The function may keep a share of the parameter, or of a value reached
     /// through it, inside a value it builds, returns, or stores.
     pub retains: bool,
+    /// The parameter is a `&mut`: the function writes the caller's value in
+    /// place.
+    pub lends: bool,
 }
 
 impl ParamEffects {
@@ -43,6 +46,7 @@ impl ParamEffects {
         resizes: true,
         stores_into: true,
         retains: true,
+        lends: true,
     };
 
     fn join(&mut self, other: Self) -> bool {
@@ -50,6 +54,7 @@ impl ParamEffects {
         self.resizes |= other.resizes;
         self.stores_into |= other.stores_into;
         self.retains |= other.retains;
+        self.lends |= other.lends;
         *self != before
     }
 
@@ -438,7 +443,8 @@ pub(crate) enum StdCall {
 /// each answers from its arguments alone and stores none of them.
 pub(crate) const STATELESS_STD_MODULES: &[&str] = &[
     "adler32", "ascii85", "base32", "base64", "binary", "bits", "blake3", "crc32", "crc32c", "fnv",
-    "hex", "hmac", "math", "sha256", "sha512", "strconv", "strings", "subtle", "unicode", "utf8",
+    "hex", "hmac", "math", "rsa", "sha256", "sha3_256", "sha3_512", "sha384", "sha512", "strconv",
+    "strings", "subtle", "unicode", "utf8",
 ];
 
 /// Classifies a call whose callee path has no user definition.
@@ -656,6 +662,13 @@ fn scan_fn(ctx: &ScanCtx<'_>, f: &HirFn) -> (FnEffects, Vec<Edge>) {
         edges: Vec::new(),
     };
     for (i, p) in f.params.iter().enumerate() {
+        scan.effects.params[i].lends = matches!(
+            ctx.tcx.kind_of(p.ty),
+            gossamer_types::TyKind::Ref {
+                mutability: gossamer_types::Mutbl::Mut,
+                ..
+            }
+        );
         let mut names = Vec::new();
         pat_binding_names(&p.pattern, &mut names);
         for name in names {

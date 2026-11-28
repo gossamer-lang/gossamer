@@ -381,6 +381,82 @@ pub(super) fn lower_rvalue_into(
             let src_ty = builder.func.dfg.value_type(src_v);
             let dst_ty = cl_type_of(tcx, *target, module);
             let converted = match (src_ty, dst_ty) {
+                // A 128-bit integer narrows to the word, which a narrower
+                // declared target then masks as any word does.
+                (types::I128, types::I64) => {
+                    let word = builder.ins().ireduce(types::I64, src_v);
+                    let narrow = match tcx.kind_of(*target) {
+                        TyKind::Int(IntTy::I8 | IntTy::U8) => Some(types::I8),
+                        TyKind::Int(IntTy::I16 | IntTy::U16) => Some(types::I16),
+                        TyKind::Int(IntTy::I32 | IntTy::U32) => Some(types::I32),
+                        _ => None,
+                    };
+                    match narrow {
+                        Some(n) => {
+                            let reduced = builder.ins().ireduce(n, word);
+                            if matches!(
+                                tcx.kind_of(*target),
+                                TyKind::Int(IntTy::U8 | IntTy::U16 | IntTy::U32)
+                            ) {
+                                builder.ins().uextend(types::I64, reduced)
+                            } else {
+                                builder.ins().sextend(types::I64, reduced)
+                            }
+                        }
+                        None => word,
+                    }
+                }
+                // A word widens to 128 bits by its own signedness; every
+                // narrower unsigned value, `bool`, and `char` is stored
+                // zero-extended.
+                (s, types::I128) if s.is_int() && s != types::I128 => {
+                    if operand_widens_unsigned(tcx, body, operand) {
+                        builder.ins().uextend(types::I128, src_v)
+                    } else {
+                        builder.ins().sextend(types::I128, src_v)
+                    }
+                }
+                // Cranelift converts between floats and 128-bit integers on
+                // no target, so the runtime does, by the language's rule.
+                (types::I128, d) if d.is_float() => {
+                    let to_f32 = matches!(tcx.kind_of(*target), TyKind::Float(FloatTy::F32));
+                    let source_unsigned = operand_is_wide_unsigned(tcx, body, operand);
+                    let (low, high) = builder.ins().isplit(src_v);
+                    let flags = builder.ins().iconst(
+                        types::I64,
+                        i64::from(source_unsigned) | (i64::from(to_f32) << 1),
+                    );
+                    let wide = super::lowering_calls::emit_rt_call_by_name(
+                        module,
+                        builder,
+                        intrinsics,
+                        "gos_rt_wide_to_float",
+                        &[low, high, flags],
+                    )?
+                    .ok_or_else(|| anyhow!("gos_rt_wide_to_float answers no value"))?;
+                    if d == types::F64 {
+                        wide
+                    } else {
+                        builder.ins().fdemote(d, wide)
+                    }
+                }
+                (s, types::I128) if s.is_float() => {
+                    let wide_value = if s == types::F64 {
+                        src_v
+                    } else {
+                        builder.ins().fpromote(types::F64, src_v)
+                    };
+                    let unsigned = matches!(tcx.kind_of(*target), TyKind::Int(IntTy::U128));
+                    let flag = builder.ins().iconst(types::I64, i64::from(unsigned));
+                    super::lowering_calls::emit_rt_call_by_name(
+                        module,
+                        builder,
+                        intrinsics,
+                        "gos_rt_float_to_wide",
+                        &[wide_value, flag],
+                    )?
+                    .ok_or_else(|| anyhow!("gos_rt_float_to_wide answers no value"))?
+                }
                 // Same cranelift type. Under the i64 runtime model a
                 // narrow declared target still masks: the cast is the
                 // language's single truncation point (VM parity:
@@ -619,6 +695,19 @@ pub(super) fn lower_rvalue_into(
                             .collect()
                     }
                 }
+                // A struct literal built under the tuple kind takes its
+                // widths from the fields its destination type declares,
+                // which a constant operand cannot name.
+                gossamer_mir::AggregateKind::Tuple
+                    if aggregate_field_tys(tcx, dest_ty)
+                        .is_some_and(|f| f.len() == operands.len()) =>
+                {
+                    aggregate_field_tys(tcx, dest_ty)
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|t| type_slot_count(tcx, *t).max(1))
+                        .collect()
+                }
                 gossamer_mir::AggregateKind::Tuple => operands
                     .iter()
                     .map(|op| match op {
@@ -714,6 +803,13 @@ pub(super) fn lower_rvalue_into(
             // aggregates so each prior nested struct's full slot
             // span shifts subsequent fields past its layout.
             let mut running_dst_off: u32 = 0;
+            let field_tys = match kind {
+                gossamer_mir::AggregateKind::Adt { def, .. } => {
+                    tcx.struct_field_tys(*def).map(<[Ty]>::to_vec)
+                }
+                gossamer_mir::AggregateKind::Tuple => aggregate_field_tys(tcx, dest_ty),
+                gossamer_mir::AggregateKind::Array => None,
+            };
             for (i, operand) in operands.iter().enumerate() {
                 // A `Copy(local)` operand whose source local is a
                 // pointer-to-aggregate (has `local_slots` metadata)
@@ -738,6 +834,27 @@ pub(super) fn lower_rvalue_into(
                 if !matches!(kind, gossamer_mir::AggregateKind::Array) {
                     let width = operand_slot_widths.get(i).copied().unwrap_or(1).max(1);
                     running_dst_off = running_dst_off.saturating_add(width * 8);
+                }
+                // A 128-bit field is its two words, a constant included.
+                if packed.is_none()
+                    && field_tys
+                        .as_ref()
+                        .and_then(|f| f.get(i))
+                        .is_some_and(|t| tcx.is_wide_int(*t))
+                {
+                    let value = lower_operand(
+                        module,
+                        builder,
+                        locals,
+                        body,
+                        tcx,
+                        operand,
+                        Some(types::I128),
+                        intrinsics,
+                    )?;
+                    let value = coerce_arg_to(builder, value, types::I128)?;
+                    store_i128_words(builder, value, base, dst_off as i32);
+                    continue;
                 }
                 if let Some(copy_slots) = operand_aggregate_slots {
                     let src = lower_operand(
@@ -1142,13 +1259,24 @@ pub(super) fn lower_rvalue_into(
                 let leaf_ty = resolve_place_ty(tcx, body, place);
                 let addr =
                     lower_place_address(module, builder, locals, body, tcx, place, intrinsics)?;
-                if matches!(
-                    tcx.kind_of(leaf_ty),
-                    gossamer_types::TyKind::String
-                        | gossamer_types::TyKind::Slice(_)
-                        | gossamer_types::TyKind::Vec(_)
-                        | gossamer_types::TyKind::HashMap { .. }
-                ) {
+                // A `&mut String` names the slot a callee rebinds, as it does
+                // for a bare local: the text is replaced whole, never edited
+                // where it lies. A read reference and the handle-shaped
+                // collections name the value itself.
+                let mut_string =
+                    *mutable && matches!(tcx.kind_of(leaf_ty), gossamer_types::TyKind::String);
+                // A runtime handle (a channel end, an atomic, a mutex, a
+                // file) is referred to by the handle itself, as a collection
+                // is.
+                if !mut_string
+                    && (matches!(
+                        tcx.kind_of(leaf_ty),
+                        gossamer_types::TyKind::String
+                            | gossamer_types::TyKind::Slice(_)
+                            | gossamer_types::TyKind::Vec(_)
+                            | gossamer_types::TyKind::HashMap { .. }
+                    ) || tcx.is_managed_handle(leaf_ty))
+                {
                     builder.ins().load(
                         module.target_config().pointer_type(),
                         MemFlagsData::new(),
@@ -1254,6 +1382,32 @@ pub(super) fn lower_operand(
     })
 }
 
+/// The integer constant `value` at type `ty`. Cranelift takes an immediate of
+/// at most 64 bits, so a 128-bit constant is assembled from its two halves.
+pub(super) fn int_const(builder: &mut FunctionBuilder<'_>, ty: ir::Type, value: i128) -> ir::Value {
+    if ty == types::I128 {
+        let bits = value.cast_unsigned();
+        // The halves are the value's low and high 64 bits, by construction.
+        let low = builder
+            .ins()
+            .iconst(types::I64, (bits as u64).cast_signed());
+        let high = builder
+            .ins()
+            .iconst(types::I64, ((bits >> 64) as u64).cast_signed());
+        return builder.ins().iconcat(low, high);
+    }
+    builder.ins().iconst(ty, i64_truncate(value))
+}
+
+/// The field types of the struct or tuple `ty` names, in declaration order.
+fn aggregate_field_tys(tcx: &TyCtxt, ty: Option<Ty>) -> Option<Vec<Ty>> {
+    match tcx.kind_of(ty?) {
+        TyKind::Tuple(elems) => Some(elems.clone()),
+        TyKind::Adt { def, substs } => tcx.adt_field_tys(*def, substs).map(<[Ty]>::to_vec),
+        _ => None,
+    }
+}
+
 pub(super) fn lower_const(
     module: &mut dyn Module,
     builder: &mut FunctionBuilder<'_>,
@@ -1263,16 +1417,23 @@ pub(super) fn lower_const(
 ) -> Result<ir::Value> {
     Ok(match value {
         ConstValue::Int(n) => {
-            let ty = hint.filter(|t| t.is_int()).unwrap_or(types::I64);
-            builder.ins().iconst(ty, i64_truncate(*n))
+            // A constant outside both the `i64` and the `u64` range is a
+            // 128-bit value; every narrower one is a word.
+            let natural = if i64::try_from(*n).is_err() && u64::try_from(*n).is_err() {
+                types::I128
+            } else {
+                types::I64
+            };
+            let ty = hint.filter(|t| t.is_int()).unwrap_or(natural);
+            int_const(builder, ty, *n)
         }
         ConstValue::Bool(b) => {
             let ty = hint.filter(|t| t.is_int()).unwrap_or(types::I8);
-            builder.ins().iconst(ty, i64::from(*b))
+            int_const(builder, ty, i128::from(*b))
         }
         ConstValue::Char(c) => {
             let ty = hint.filter(|t| t.is_int()).unwrap_or(types::I32);
-            builder.ins().iconst(ty, i64::from(u32::from(*c)))
+            int_const(builder, ty, i128::from(u32::from(*c)))
         }
         ConstValue::Unit => builder.ins().iconst(types::I64, 0),
         ConstValue::Str(text) => {
@@ -1328,6 +1489,97 @@ fn arithmetic_int_ty(tcx: &TyCtxt, body: &Body, lhs: &Operand, rhs: &Operand) ->
         }
     };
     pick(lhs).or_else(|| pick(rhs))
+}
+
+/// Whether the 128-bit `value` fits 64 bits: as an `i64` when signed, as a
+/// `u64` otherwise.
+fn wide_fits_word(
+    builder: &mut FunctionBuilder<'_>,
+    value: ir::Value,
+    unsigned: bool,
+) -> ir::Value {
+    let (low, high) = builder.ins().isplit(value);
+    let expected_high = if unsigned {
+        builder.ins().iconst(types::I64, 0)
+    } else {
+        builder.ins().sshr_imm_s(low, 63)
+    };
+    builder.ins().icmp(IntCC::Equal, high, expected_high)
+}
+
+/// A 128-bit checked `*`, `/`, or `%`. When both operands fit 64 bits the
+/// operation runs at 64 bits (a product of two such values always fits 128
+/// bits); otherwise a runtime helper computes it. The MIR has already ruled
+/// out a zero divisor and a signed `MIN / -1`.
+fn lower_wide_mul_divrem(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    intrinsics: &mut IntrinsicContext,
+    op: BinOp,
+    a: ir::Value,
+    b: ir::Value,
+    unsigned: bool,
+) -> Result<ir::Value> {
+    let fits_a = wide_fits_word(builder, a, unsigned);
+    let fits_b = wide_fits_word(builder, b, unsigned);
+    let mut fast = builder.ins().band(fits_a, fits_b);
+    let (a_low, a_high) = builder.ins().isplit(a);
+    let (b_low, b_high) = builder.ins().isplit(b);
+    if !unsigned && op != BinOp::Mul {
+        // `i64::MIN / -1` overflows 64 bits though its quotient fits 128.
+        let minus_one = builder.ins().icmp_imm_s(IntCC::Equal, b_low, -1);
+        let fine = builder.ins().bxor_imm_s(minus_one, 1);
+        fast = builder.ins().band(fast, fine);
+    }
+    let fast_block = builder.create_block();
+    let slow_block = builder.create_block();
+    let join = builder.create_block();
+    builder.append_block_param(join, types::I128);
+    builder.ins().brif(fast, fast_block, &[], slow_block, &[]);
+    builder.switch_to_block(fast_block);
+    builder.seal_block(fast_block);
+    let narrow = match (op, unsigned) {
+        (BinOp::Mul, _) => builder.ins().imul(a, b),
+        (BinOp::Div, false) => {
+            let q = builder.ins().sdiv(a_low, b_low);
+            builder.ins().sextend(types::I128, q)
+        }
+        (BinOp::Div, true) => {
+            let q = builder.ins().udiv(a_low, b_low);
+            builder.ins().uextend(types::I128, q)
+        }
+        (_, false) => {
+            let r = builder.ins().srem(a_low, b_low);
+            builder.ins().sextend(types::I128, r)
+        }
+        (_, true) => {
+            let r = builder.ins().urem(a_low, b_low);
+            builder.ins().uextend(types::I128, r)
+        }
+    };
+    builder.ins().jump(join, &[ir::BlockArg::Value(narrow)]);
+    builder.switch_to_block(slow_block);
+    builder.seal_block(slow_block);
+    let (helper, selector) = match (op, unsigned) {
+        (BinOp::Mul, _) => ("gos_rt_wide_mul_checked", i64::from(unsigned)),
+        (BinOp::Div, false) => ("gos_rt_wide_divrem", 0),
+        (BinOp::Div, true) => ("gos_rt_wide_divrem", 1),
+        (_, false) => ("gos_rt_wide_divrem", 2),
+        (_, true) => ("gos_rt_wide_divrem", 3),
+    };
+    let selector = builder.ins().iconst(types::I64, selector);
+    let wide = super::lowering_calls::emit_rt_call_by_name(
+        module,
+        builder,
+        intrinsics,
+        helper,
+        &[a_low, a_high, b_low, b_high, selector],
+    )?
+    .ok_or_else(|| anyhow!("{helper} answers no value"))?;
+    builder.ins().jump(join, &[ir::BlockArg::Value(wide)]);
+    builder.switch_to_block(join);
+    builder.seal_block(join);
+    Ok(builder.block_params(join)[0])
 }
 
 pub(super) fn lower_binop(
@@ -1422,6 +1674,13 @@ pub(super) fn lower_binop(
             _ => unreachable!(),
         });
     }
+    // Cranelift has no 128-bit overflow-checked multiply or division, so
+    // those go through a fits-64 fast path and a runtime helper.
+    if a_ty == types::I128 && matches!(op, BinOp::Mul | BinOp::Div | BinOp::Rem) {
+        let wide_unsigned =
+            matches!(arithmetic_ty, Some(IntTy::U128)) || (arithmetic_ty.is_none() && unsigned);
+        return lower_wide_mul_divrem(module, builder, intrinsics, op, a, b, wide_unsigned);
+    }
     if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul) {
         let arithmetic_ty = arithmetic_ty.unwrap_or(IntTy::I64);
         let overflow_unsigned = matches!(
@@ -1432,9 +1691,8 @@ pub(super) fn lower_binop(
             IntTy::I8 | IntTy::U8 => types::I8,
             IntTy::I16 | IntTy::U16 => types::I16,
             IntTy::I32 | IntTy::U32 => types::I32,
-            IntTy::I64 | IntTy::U64 | IntTy::I128 | IntTy::U128 | IntTy::Isize | IntTy::Usize => {
-                types::I64
-            }
+            IntTy::I64 | IntTy::U64 | IntTy::Isize | IntTy::Usize => types::I64,
+            IntTy::I128 | IntTy::U128 => types::I128,
         };
         let checked_a = if a_ty == checked_ty {
             a
@@ -1545,6 +1803,34 @@ fn int_cmp_cc(op: BinOp, unsigned: bool) -> ir::condcodes::IntCC {
 
 /// Whether `operand` names a `u64` / `usize` place, whose bits convert to a
 /// float as an unsigned value.
+/// Whether a word `operand` widens to 128 bits without its sign: an unsigned
+/// integer, `bool`, or `char`.
+fn operand_widens_unsigned(tcx: &TyCtxt, body: &Body, operand: &Operand) -> bool {
+    let Operand::Copy(place) = operand else {
+        return false;
+    };
+    let mut ty = resolve_place_ty(tcx, body, place);
+    while let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
+        ty = *inner;
+    }
+    match tcx.kind_of(ty) {
+        TyKind::Int(int) => int_ty_is_unsigned(*int),
+        TyKind::Bool | TyKind::Char => true,
+        _ => false,
+    }
+}
+
+/// Whether `operand` is a `u128`.
+fn operand_is_wide_unsigned(tcx: &TyCtxt, body: &Body, operand: &Operand) -> bool {
+    let Operand::Copy(place) = operand else {
+        return false;
+    };
+    matches!(
+        tcx.kind_of(resolve_place_ty(tcx, body, place)),
+        TyKind::Int(IntTy::U128)
+    )
+}
+
 fn operand_is_unsigned_word(tcx: &TyCtxt, body: &Body, operand: &Operand) -> bool {
     let Operand::Copy(place) = operand else {
         return false;

@@ -1,0 +1,27 @@
+// `netip::Prefix` after Go's `netip.Prefix`: the address is kept as written,
+// `masked()` answers the canonical prefix, IPv4 and IPv6 never mix, and
+// addresses iterate lazily, so even an IPv6 /64 can be walked.
+use std::net::netip::Prefix
+
+fn main() {
+    let p = Prefix::parse("10.0.0.1/8").unwrap()
+    println(f"{p} addr {p.addr()} bits {p.bits()} v4 {p.is_v4()}")
+    println(f"masked {p.masked()} first {p.first()} last {p.last()}")
+    println(f"contains 10.200.0.1 {p.contains("10.200.0.1")}, 11.0.0.1 {p.contains("11.0.0.1")}, mapped {p.contains("::ffff:10.0.0.1")}, junk {p.contains("nope")}")
+    let small = Prefix::parse("192.168.1.252/30").unwrap()
+    let all = small.addresses().collect::<Vec<String>>()
+    println(f"addresses {all}")
+    let v6 = Prefix::parse("2001:db8::1/64").unwrap()
+    println(f"{v6.masked()} last {v6.last()} v4 {v6.is_v4()}")
+    let first_three = v6.masked().addresses().take(3).collect::<Vec<String>>()
+    println(f"first three of a /64: {first_three}")
+    println(f"overlaps {p.overlaps(Prefix::parse("10.1.0.0/16").unwrap())} {p.overlaps(Prefix::parse("11.0.0.0/8").unwrap())} {p.overlaps(v6)}")
+    let host = Prefix::parse("1.2.3.4/32").unwrap()
+    println(f"host {host.first()} {host.last()} {host.addresses().count()}")
+    for bad in #["10.0.0.0/33", "::/129", "10.0.0.0/08", "10.0.0.0", "10.0/8"] {
+        match Prefix::parse(bad) {
+            Ok(q) => println(f"{bad} accepted as {q}")
+            Err(e) => println(f"{bad}: {e}")
+        }
+    }
+}

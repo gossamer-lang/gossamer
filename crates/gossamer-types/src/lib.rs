@@ -24,6 +24,7 @@ mod context;
 pub mod data_first;
 mod day_durations;
 mod definite_assignment;
+mod drop_uses;
 mod error;
 mod exhaustiveness;
 mod float_equality;
@@ -94,6 +95,7 @@ pub use closure_cycles::{CLOSURE_SELF_CYCLE_LINT, ClosureSelfCycle, find_closure
 pub use context::{FlatEnumLayout, PackedLayout, PlainLayout, TyCtxt, UNION_TYPE_NAME};
 pub use day_durations::{DAY_DURATION_LINT, DayDuration, find_day_durations};
 pub use definite_assignment::{UnassignedReadDiagnostic, check_definite_assignment};
+pub use drop_uses::check_drop_uses;
 pub use error::{
     ForeignError, ForeignLibrary, IntegerCastFix, NotDisplayableClass, TypeDiagnostic, TypeError,
 };

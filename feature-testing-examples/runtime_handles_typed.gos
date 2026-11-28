@@ -1,19 +1,13 @@
-// The runtime handles of `context`, `metrics`, `trace`, `math::rand`, and
-// `sync::Map` carry types of their own, so each one crosses a function
-// boundary with its methods intact and answers its declared types: a
-// `next_u64` draw is unsigned, a span ended in a helper exports its name.
+// The runtime handles of `context`, `metrics`, `math::rand`, and `sync::Map`
+// carry types of their own, so each one crosses a function boundary with its
+// methods intact and answers its declared types: a `next_u64` draw is
+// unsigned.
 
 use std::context
 use std::math::rand
 use std::metrics
 use std::strings
 use std::sync
-use std::trace
-
-fn tag(span: trace::Span, user: String) -> trace::EndedSpan {
-    span.set_attribute("user", user)
-    trace::Span::end(span)
-}
 
 fn draw(r: rand::Rng) -> u64 {
     r.next_u64()
@@ -31,11 +25,6 @@ fn record(c: metrics::Counter, times: i64) -> i64 {
 }
 
 fn main() {
-    let tracer = trace::Tracer::new()
-    let ended = tag(tracer.start_span("checkout"), "alice")
-    let json = ended.to_otlp_json()
-    println("{} {}", strings::contains(json, "checkout"), strings::contains(json, "alice"))
-
     let r = rand::Rng::new(424_242)
     let first = draw(r)
     println("{} {}", first, first > 9_223_372_036_854_775_807)

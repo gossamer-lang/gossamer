@@ -24,22 +24,39 @@ pub(crate) fn program_reaches_through_synthetic_imports(
     let mut synthetic: HashMap<String, HashSet<String>> = HashMap::new();
     let mut written: HashMap<String, HashSet<String>> = HashMap::new();
     for use_decl in &source.uses {
-        let name = use_decl.alias.as_ref().map_or_else(
-            || match &use_decl.target {
-                UseTarget::Module(path) => path.segments.last().map(|s| s.name.clone()),
-                UseTarget::Project { .. } => None,
-            },
-            |alias| Some(alias.name.clone()),
-        );
-        let (Some(name), None) = (name, &use_decl.list) else {
-            continue;
+        let last = match &use_decl.target {
+            UseTarget::Module(path) => path.segments.last().map(|s| s.name.clone()),
+            UseTarget::Project { .. } => None,
+        };
+        // A grouped import binds each entry's name, and `self` in it the
+        // module the group is written under.
+        let names: Vec<String> = match &use_decl.list {
+            None => use_decl
+                .alias
+                .as_ref()
+                .map(|alias| alias.name.clone())
+                .or(last)
+                .into_iter()
+                .collect(),
+            Some(entries) => entries
+                .iter()
+                .filter_map(|entry| match &entry.alias {
+                    Some(alias) => Some(alias.name.clone()),
+                    None if entry.name.name == "self" && entry.prefix.is_empty() => last.clone(),
+                    None if entry.name.name == "self" => {
+                        entry.prefix.last().map(|segment| segment.name.clone())
+                    }
+                    None => Some(entry.name.name.clone()),
+                })
+                .collect(),
         };
         let scope = use_decl.module.join("::");
-        if use_decl.synthetic {
-            synthetic.entry(scope).or_default().insert(name);
+        let bound = if use_decl.synthetic {
+            &mut synthetic
         } else {
-            written.entry(scope).or_default().insert(name);
-        }
+            &mut written
+        };
+        bound.entry(scope).or_default().extend(names);
     }
     if synthetic.is_empty() {
         return Vec::new();

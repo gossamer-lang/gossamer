@@ -7,13 +7,13 @@
 // `Stream::method` qualified key.
 
 fn stream_of(fd: i64) -> Value {
-    Value::struct_("Stream", vec![("fd", Value::Int(fd))])
+    Value::struct_("io::Stream", vec![("fd", Value::Int(fd))])
 }
 
 fn stream_fd(value: &Value) -> i64 {
     match value {
         Value::MutCell(cell) => stream_fd(&cell.lock()),
-        Value::Struct(inner) if inner.name == "Stream" => {
+        Value::Struct(inner) if inner.name == "io::Stream" => {
             for (f_name, f_val) in &inner.fields {
                 if (*f_name) == "fd" {
                     if let Value::Int(n) = f_val {
@@ -485,9 +485,21 @@ fn builtin_fmt_prec(args: &[Value]) -> RuntimeResult<Value> {
         ));
     }
     let prec = prec.min(64) as usize;
+    // An integer keeps its exact digits, with `prec` zeros after the point.
+    let integer_digits = match &value {
+        Value::Int(n) => Some(n.to_string()),
+        Value::Uint(n) => Some(n.to_string()),
+        other => other.wide_int().map(|wide| wide.to_string()),
+    };
+    if let Some(mut digits) = integer_digits {
+        if prec > 0 {
+            digits.push('.');
+            digits.extend(std::iter::repeat_n('0', prec));
+        }
+        return Ok(Value::String(digits.into()));
+    }
     let f = match value {
         Value::Float(f) => f,
-        Value::Int(n) => n as f64,
         // Precision bounds how much of a value is shown, so on text it
         // takes the first `prec` scalars - the unit a string's length is
         // counted in everywhere else in the language.
@@ -506,6 +518,16 @@ fn builtin_fmt_prec(args: &[Value]) -> RuntimeResult<Value> {
 
 /// `__fmt_radix(value, base)` - renders an integer in `base` (2..=36).
 fn builtin_fmt_radix(args: &[Value]) -> RuntimeResult<Value> {
+    // A 128-bit value renders all of its bits; the compiler reads a signed
+    // one as the `u128` of the same bits first, as it does every narrower
+    // signed type.
+    if let Some(Value::Wide(_) | Value::WideInline(..) | Value::Uint(_)) = args.first()
+        && let Some(bits) = args.first().and_then(Value::as_u128)
+    {
+        let base = args.get(1).and_then(value_to_int).unwrap_or(10);
+        let radix = u32::try_from(base).ok().filter(|r| (2..=36).contains(r)).unwrap_or(10);
+        return Ok(Value::String(radix_digits(bits, radix).into()));
+    }
     let value = args.first().and_then(value_to_int).unwrap_or(0);
     let base = args.get(1).and_then(value_to_int).unwrap_or(10);
     let radix = u32::try_from(base).unwrap_or(10);
@@ -527,6 +549,21 @@ fn builtin_fmt_radix(args: &[Value]) -> RuntimeResult<Value> {
         digits.iter().rev().collect()
     };
     Ok(Value::String(out.into()))
+}
+
+/// The digits of `value` in `radix`.
+fn radix_digits(mut value: u128, radix: u32) -> String {
+    if value == 0 {
+        return "0".to_string();
+    }
+    let r = u128::from(radix);
+    let mut digits = Vec::new();
+    while value > 0 {
+        let d = u32::try_from(value % r).unwrap_or(0);
+        digits.push(std::char::from_digit(d, radix).unwrap_or('0'));
+        value /= r;
+    }
+    digits.iter().rev().collect()
 }
 
 /// `__fmt_upper(s)` - uppercases the rendered string (for `{:X}`).
@@ -630,7 +667,7 @@ fn builtin_assert_eq(args: &[Value]) -> RuntimeResult<Value> {
 fn builtin_http_response_text(args: &[Value]) -> RuntimeResult<Value> {
     // Method call: response.text() - receiver is a Response struct.
     if let Some(Value::Struct(inner)) = args.first() {
-        if inner.name == "Response" {
+        if inner.name == "http::Response" {
             let body = inner
                 .fields
                 .iter()
@@ -681,7 +718,7 @@ fn builtin_http_response_stream(args: &[Value]) -> RuntimeResult<Value> {
         ("content_type", Value::String(SmolStr::from(content_type))),
         ("__stream_handle", handle),
     ];
-    Ok(Value::struct_("Response", fields))
+    Ok(Value::struct_("http::Response", fields))
 }
 
 /// `resp.with_header(name, value) -> Response` - chainable header
@@ -757,7 +794,7 @@ fn response_struct(status: i64, body: String, content_type: &str) -> Value {
             Value::String(SmolStr::from(content_type.to_string())),
         ),
     ];
-    Value::struct_("Response", Arc::unwrap_or_clone(Arc::new(fields)))
+    Value::struct_("http::Response", Arc::unwrap_or_clone(Arc::new(fields)))
 }
 
 pub(crate) fn value_to_int(value: &Value) -> Option<i64> {
@@ -1044,7 +1081,122 @@ fn native_http_serve_tls(
         Ok(c) => c,
         Err(e) => return Ok(err_variant(format!("http::serve_tls: {e}"))),
     };
+    serve_tls_with(dispatch, &addr, &tls_config, &handler, "http::serve_tls")
+}
 
+/// `http::__serve_tls_live(addr, config_id, handler)`, the lowering of
+/// `http::serve_tls_config(addr, config, handler)`: serves TLS with the live
+/// configuration `config_id` names, read for each accepted connection.
+#[cfg(not(target_arch = "wasm32"))]
+fn native_http_serve_tls_live(
+    dispatch: &mut dyn NativeDispatch,
+    args: &[Value],
+) -> RuntimeResult<Value> {
+    if args.len() < 3 {
+        return Err(RuntimeError::Arity {
+            expected: 3,
+            found: args.len(),
+        });
+    }
+    let addr = match &args[0] {
+        Value::String(s) => s.as_str().to_string(),
+        other => {
+            return Err(RuntimeError::Type(format!(
+                "expected address string, got {other}"
+            )));
+        }
+    };
+    let Value::Int(id) = &args[1] else {
+        return Err(RuntimeError::Type("expected a tls::ServerConfig id".to_string()));
+    };
+    let Some(tls_config) = gossamer_std::tls::ServerConfig::live(*id) else {
+        return Ok(err_variant(
+            "http::serve_tls_config: the configuration was released",
+        ));
+    };
+    serve_tls_with(dispatch, &addr, &tls_config, &args[2], "http::serve_tls_config")
+}
+
+/// The string argument at `index`, or the empty string.
+#[cfg(not(target_arch = "wasm32"))]
+fn tls_text(args: &[Value], index: usize) -> String {
+    args.get(index).and_then(as_str).unwrap_or("").to_string()
+}
+
+/// The integer argument at `index`, or 0.
+#[cfg(not(target_arch = "wasm32"))]
+fn tls_int(args: &[Value], index: usize) -> i64 {
+    match args.get(index) {
+        Some(Value::Int(n)) => *n,
+        Some(Value::Bool(b)) => i64::from(*b),
+        _ => 0,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn tls_unit(result: Result<(), String>) -> RuntimeResult<Value> {
+    Ok(match result {
+        Ok(()) => ok_variant(Value::Unit),
+        Err(e) => err_variant(format!("tls::ServerConfig: {e}")),
+    })
+}
+
+/// `__gos_tls_server_config_new_raw(cert, key, has_ca, ca, ca_optional)`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn builtin_tls_server_config_new_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let ca = tls_text(args, 3);
+    let ca = (tls_int(args, 2) != 0).then_some(ca.as_str());
+    Ok(
+        match gossamer_runtime::tls_server::create(
+            &tls_text(args, 0),
+            &tls_text(args, 1),
+            ca,
+            tls_int(args, 4) != 0,
+        ) {
+            Ok(id) => ok_variant(Value::Int(id)),
+            Err(e) => err_variant(format!("tls::ServerConfig::new: {e}")),
+        },
+    )
+}
+
+/// `__gos_tls_server_config_add_sni_raw(id, host, cert, key)`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn builtin_tls_server_config_add_sni_raw(args: &[Value]) -> RuntimeResult<Value> {
+    tls_unit(gossamer_runtime::tls_server::add_sni(
+        tls_int(args, 0),
+        &tls_text(args, 1),
+        &tls_text(args, 2),
+        &tls_text(args, 3),
+    ))
+}
+
+/// `__gos_tls_server_config_reload_raw(id, cert, key)`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn builtin_tls_server_config_reload_raw(args: &[Value]) -> RuntimeResult<Value> {
+    tls_unit(gossamer_runtime::tls_server::reload(
+        tls_int(args, 0),
+        &tls_text(args, 1),
+        &tls_text(args, 2),
+    ))
+}
+
+/// `__gos_tls_server_config_release_raw(id)`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn builtin_tls_server_config_release_raw(args: &[Value]) -> RuntimeResult<Value> {
+    gossamer_runtime::tls_server::release(tls_int(args, 0));
+    Ok(ok_variant(Value::Unit))
+}
+
+/// Runs the TLS server loop on `addr` with `tls_config`, dispatching each
+/// request to `handler`; `label` names the caller in errors.
+#[cfg(not(target_arch = "wasm32"))]
+fn serve_tls_with(
+    dispatch: &mut dyn NativeDispatch,
+    addr: &str,
+    tls_config: &gossamer_std::tls::ServerConfig,
+    handler: &Value,
+    label: &str,
+) -> RuntimeResult<Value> {
     let mut config = http_std::server::Config::default();
     let override_max = HTTP_MAX_REQUESTS_OVERRIDE.load(Ordering::SeqCst);
     if override_max > 0 {
@@ -1057,10 +1209,10 @@ fn native_http_serve_tls(
     let shutdown = Arc::clone(&config.shutdown);
     install_http_shutdown_handler(shutdown);
 
-    let (target, leading) = crate::value::SpawnTarget::for_handler(&handler);
+    let (target, leading) = crate::value::SpawnTarget::for_handler(handler);
     let result = http_std::server::bind_and_run_tls_dispatch(
-        &addr,
-        &tls_config,
+        addr,
+        tls_config,
         &config,
         |request, sink| {
             let method = request.method.as_str().to_string();
@@ -1081,7 +1233,7 @@ fn native_http_serve_tls(
 
     match result {
         Ok(()) => Ok(Value::variant("Ok", vec![Value::Unit])),
-        Err(err) => Ok(err_variant(format!("http::serve_tls: {err}"))),
+        Err(err) => Ok(err_variant(format!("{label}: {err}"))),
     }
 }
 
@@ -1215,156 +1367,6 @@ fn native_http2_bind_and_run_h2c(
     Ok(Value::variant("Ok", vec![Value::Unit]))
 }
 
-/// `http_h3::serve(addr, cert_path, key_path, handler) ->
-/// Result<(), Error>`.
-///
-/// Boots a QUIC + HTTP/3 server through the shared
-/// [`gossamer_std::http_h3`] adapter. The engine drives its handler
-/// closure on a private tokio runtime thread, so - exactly like the
-/// h2 builtin - each request is marshalled over an mpsc channel back
-/// to the interpreter thread, where the not-`Send` `NativeDispatch`
-/// invokes the user handler.
-#[allow(
-    clippy::too_many_lines,
-    clippy::items_after_statements,
-    clippy::needless_continue
-)]
-#[cfg(not(target_arch = "wasm32"))]
-fn native_http3_serve(dispatch: &mut dyn NativeDispatch, args: &[Value]) -> RuntimeResult<Value> {
-    if args.len() < 4 {
-        return Err(RuntimeError::Arity {
-            expected: 4,
-            found: args.len(),
-        });
-    }
-    let str_arg = |v: &Value, what: &str| -> RuntimeResult<String> {
-        match v {
-            Value::String(s) => Ok(s.as_str().to_string()),
-            other => Err(RuntimeError::Type(format!(
-                "expected {what} string, got {other}"
-            ))),
-        }
-    };
-    let addr = str_arg(&args[0], "address")?;
-    let cert_path = str_arg(&args[1], "cert path")?;
-    let key_path = str_arg(&args[2], "key path")?;
-    let handler = args[3].clone();
-
-    let (target, leading) = crate::value::SpawnTarget::for_handler(&handler);
-
-    use std::sync::mpsc;
-    let (req_tx, req_rx) = mpsc::channel::<(http_std::Request, mpsc::Sender<http_std::Response>)>();
-
-    let shutdown = Arc::new(AtomicBool::new(false));
-    install_http_shutdown_handler(Arc::clone(&shutdown));
-    let max_requests = HTTP_MAX_REQUESTS_OVERRIDE.load(Ordering::SeqCst);
-
-    let shutdown_for_server = Arc::clone(&shutdown);
-    let req_tx_for_server = req_tx.clone();
-    let bind_addr = addr.clone();
-    let (boot_tx, boot_rx) = mpsc::channel::<Result<(), String>>();
-    std::thread::Builder::new()
-        .name("gossamer-http3-accept".to_string())
-        .spawn(move || {
-            let handler_fn = move |req: http_std::Request| -> http_std::Response {
-                if shutdown_for_server.load(Ordering::Acquire) {
-                    return http_std::Response {
-                        status: http_std::StatusCode(503),
-                        headers: http_std::Headers::new(),
-                        body: b"shutting down".to_vec(),
-                        raw_header_pairs: Vec::new(),
-                        body_stream: None,
-                    };
-                }
-                let (resp_tx, resp_rx) = mpsc::channel();
-                if req_tx_for_server.send((req, resp_tx)).is_err() {
-                    return http_std::Response {
-                        status: http_std::StatusCode(500),
-                        headers: http_std::Headers::new(),
-                        body: b"dispatch channel closed".to_vec(),
-                        raw_header_pairs: Vec::new(),
-                        body_stream: None,
-                    };
-                }
-                match resp_rx.recv_timeout(Duration::from_secs(30)) {
-                    Ok(r) => r,
-                    Err(_) => http_std::Response {
-                        status: http_std::StatusCode(504),
-                        headers: http_std::Headers::new(),
-                        body: b"handler timeout".to_vec(),
-                        raw_header_pairs: Vec::new(),
-                        body_stream: None,
-                    },
-                }
-            };
-            // `gossamer_std::http_h3::serve` validates the address,
-            // reads the keypair, and binds before its accept loop
-            // runs - so a synchronous `Err` is a startup failure the
-            // caller must see. Forward the bind outcome over `boot`
-            // and, on success, block here driving the endpoint.
-            match gossamer_std::http_h3::serve(&bind_addr, &cert_path, &key_path, handler_fn) {
-                Ok(()) => {
-                    let _ = boot_tx.send(Ok(()));
-                }
-                Err(e) => {
-                    let _ = boot_tx.send(Err(e.to_string()));
-                }
-            }
-        })
-        .map_err(|e| RuntimeError::Panic(format!("http_h3::serve spawn: {e}")))?;
-    drop(req_tx);
-
-    let mut served: u64 = 0;
-    loop {
-        // A startup failure (bad address, unreadable cert/key, bind
-        // error) arrives on `boot` before any request - surface it as
-        // the caller's `Err`, matching the native tier.
-        if let Ok(Err(msg)) = boot_rx.try_recv() {
-            return Ok(err_variant(format!("http_h3::serve: {msg}")));
-        }
-        if shutdown.load(Ordering::Acquire) {
-            break;
-        }
-        match req_rx.recv_timeout(Duration::from_millis(50)) {
-            Ok((req, resp_tx)) => {
-                let method = req.method.as_str().to_string();
-                let path = req.path.clone();
-                let (context, context_id) = crate::stdlib_builtins::context::request_context(Some(req.context.clone()));
-                let mut args = leading.clone();
-                args.push(request_to_value_with_context(&req, context));
-                dispatch.spawn_with_outcome(
-                    target.clone(),
-                    args,
-                    Box::new(move |outcome| {
-                        let _ =
-                            resp_tx.send(handler_outcome_to_response(outcome, &method, &path));
-                        crate::stdlib_builtins::context::cancel_request_context(context_id);
-                    }),
-                );
-                served = served.saturating_add(1);
-                if max_requests > 0 && served >= max_requests {
-                    shutdown.store(true, Ordering::Release);
-                    break;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // The server thread ended before any request - the only
-                // pre-shutdown exit is a startup failure (bad address,
-                // unreadable cert/key, bind error). Its outcome is now
-                // definitively on `boot`; surface an `Err` so the caller
-                // sees the same failure value the native tier returns.
-                if let Ok(Err(msg)) = boot_rx.recv() {
-                    return Ok(err_variant(format!("http_h3::serve: {msg}")));
-                }
-                break;
-            }
-        }
-    }
-
-    Ok(Value::variant("Ok", vec![Value::Unit]))
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 /// [`request_to_value`] with the request-scoped context a handler reads
 /// off `request.context`.
@@ -1381,7 +1383,7 @@ pub(crate) fn request_to_value_with_context(
         .map(|(name, value)| (*name, value.clone()))
         .collect();
     fields.push(("context", context));
-    Value::struct_("Request", fields)
+    Value::struct_("http::Request", fields)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1438,7 +1440,7 @@ pub(crate) fn request_to_value(request: &http_std::Request) -> Value {
             Value::String(SmolStr::from(request.peer_addr.as_str())),
         ),
     ];
-    Value::struct_("Request", Arc::unwrap_or_clone(Arc::new(fields)))
+    Value::struct_("http::Request", Arc::unwrap_or_clone(Arc::new(fields)))
 }
 
 #[cfg(not(target_arch = "wasm32"))]

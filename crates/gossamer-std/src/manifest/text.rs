@@ -263,6 +263,21 @@ pub const STRINGS: StdModule = StdModule {
     summary: "String operations.",
     items: &[
         StdItem {
+            name: "shell_split",
+            kind: StdItemKind::Function,
+            doc: "`shell_split(text) -> Result<Vec<String>, errors::Error>`: splits `text` into words as a POSIX shell does (Python's `shlex.split`): single and double quotes and backslashes; an unclosed quote is an error.",
+        },
+        StdItem {
+            name: "shell_quote",
+            kind: StdItemKind::Function,
+            doc: "`shell_quote(word) -> String`: `word` quoted so a POSIX shell reads it back as one word (Python's `shlex.quote`).",
+        },
+        StdItem {
+            name: "shell_join",
+            kind: StdItemKind::Function,
+            doc: "`shell_join(words) -> String`: the words quoted and joined with spaces, a command line a shell splits back into `words`.",
+        },
+        StdItem {
             name: "split",
             kind: StdItemKind::Function,
             doc: "Splits a string by a delimiter.",
@@ -487,6 +502,16 @@ pub const STRINGS: StdModule = StdModule {
             name: "to_i64",
             kind: StdItemKind::Function,
             doc: "Strict full-string parse to Option<i64>.",
+        },
+        StdItem {
+            name: "to_i128",
+            kind: StdItemKind::Function,
+            doc: "Strict full-string parse to Option<i128>.",
+        },
+        StdItem {
+            name: "to_u128",
+            kind: StdItemKind::Function,
+            doc: "Strict full-string parse to Option<u128>.",
         },
         StdItem {
             name: "to_f64",
@@ -804,7 +829,7 @@ pub const UTF16: StdModule = StdModule {
 
 pub const HTML: StdModule = StdModule {
     path: "std::html",
-    summary: "HTML text escaping and unescaping.",
+    summary: "HTML escaping, and parsing into a document tree, CSS selection, and tokens.",
     items: &[
         StdItem {
             name: "escape",

@@ -164,6 +164,72 @@ pub(crate) fn install_crypto_breadth(globals: &mut Vec<(&'static str, Value)>) {
         let q: &'static str = Box::leak(format!("crypto::kdf::{short}").into_boxed_str());
         globals.push((q, crate::builtins::builtin_pub(q, call)));
     }
+    // SHA-3, HKDF, RSA, and X.509 generation (`gossamer_runtime::crypto_interop`).
+    for (short, call) in [
+        ("digest", builtin_interop_sha3_256_digest as BuiltinFnPub),
+        ("hex", builtin_interop_sha3_256_hex),
+    ] {
+        let q: &'static str = Box::leak(format!("crypto::sha3_256::{short}").into_boxed_str());
+        globals.push((q, crate::builtins::builtin_pub(q, call)));
+    }
+    for (short, call) in [
+        ("digest", builtin_interop_sha3_512_digest as BuiltinFnPub),
+        ("hex", builtin_interop_sha3_512_hex),
+    ] {
+        let q: &'static str = Box::leak(format!("crypto::sha3_512::{short}").into_boxed_str());
+        globals.push((q, crate::builtins::builtin_pub(q, call)));
+    }
+    for (short, call) in [
+        (
+            "hkdf_sha256",
+            builtin_interop_kdf_hkdf_sha256 as BuiltinFnPub,
+        ),
+        ("hkdf_sha512", builtin_interop_kdf_hkdf_sha512),
+    ] {
+        let q: &'static str = Box::leak(format!("crypto::kdf::{short}").into_boxed_str());
+        globals.push((q, crate::builtins::builtin_pub(q, call)));
+    }
+    for (short, call) in [
+        (
+            "sign_pkcs1_sha256",
+            builtin_interop_rsa_sign_pkcs1_sha256 as BuiltinFnPub,
+        ),
+        ("sign_pss_sha256", builtin_interop_rsa_sign_pss_sha256),
+        (
+            "encrypt_oaep_sha256",
+            builtin_interop_rsa_encrypt_oaep_sha256,
+        ),
+        (
+            "decrypt_oaep_sha256",
+            builtin_interop_rsa_decrypt_oaep_sha256,
+        ),
+        (
+            "verify_pkcs1_sha256",
+            builtin_interop_rsa_verify_pkcs1_sha256,
+        ),
+        ("verify_pss_sha256", builtin_interop_rsa_verify_pss_sha256),
+        ("public_key_pem", builtin_interop_rsa_public_key_pem),
+    ] {
+        let q: &'static str = Box::leak(format!("crypto::rsa::{short}").into_boxed_str());
+        globals.push((q, crate::builtins::builtin_pub(q, call)));
+    }
+    for (name, call) in [
+        (
+            "__gos_x509_self_signed_raw",
+            builtin_interop_x509_self_signed as BuiltinFnPub,
+        ),
+        ("__gos_x509_issue_raw", builtin_interop_x509_issue),
+        ("__gos_x509_extensions_raw", builtin_interop_x509_extensions),
+    ] {
+        globals.push((name, crate::builtins::builtin_pub(name, call)));
+    }
+    for (short, call) in [
+        ("csr", builtin_interop_x509_csr as BuiltinFnPub),
+        ("sign_csr", builtin_interop_x509_sign_csr),
+    ] {
+        let q: &'static str = Box::leak(format!("crypto::x509::{short}").into_boxed_str());
+        globals.push((q, crate::builtins::builtin_pub(q, call)));
+    }
     // password (Argon2id PHC strings; delegates to kdf::argon2id)
     for (short, call) in [
         ("hash", builtin_crypto_password_hash as BuiltinFnPub),
@@ -500,3 +566,302 @@ pub(crate) fn builtin_crypto_x509_parse_pem(args: &[Value]) -> RuntimeResult<Val
 
 // ----------------------------------------------------------------------
 // json builtins (parse / encode / encode_pretty / valid)
+
+/// The `Vec<String>` argument `value` holds, element by element.
+fn interop_strings(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| as_str(item).map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `crypto::sha3_256::digest`.
+pub(crate) fn builtin_interop_sha3_256_digest(args: &[Value]) -> RuntimeResult<Value> {
+    let data = value_to_bytes(args.first().unwrap_or(&Value::Unit));
+    Ok(bytes_to_value_array(
+        &gossamer_runtime::crypto_interop::sha3_256(&data),
+    ))
+}
+
+/// `crypto::sha3_256::hex`.
+pub(crate) fn builtin_interop_sha3_256_hex(args: &[Value]) -> RuntimeResult<Value> {
+    let data = value_to_bytes(args.first().unwrap_or(&Value::Unit));
+    Ok(Value::String(
+        gossamer_runtime::codec::hex::encode(&gossamer_runtime::crypto_interop::sha3_256(&data))
+            .into(),
+    ))
+}
+
+/// `crypto::sha3_512::digest`.
+pub(crate) fn builtin_interop_sha3_512_digest(args: &[Value]) -> RuntimeResult<Value> {
+    let data = value_to_bytes(args.first().unwrap_or(&Value::Unit));
+    Ok(bytes_to_value_array(
+        &gossamer_runtime::crypto_interop::sha3_512(&data),
+    ))
+}
+
+/// `crypto::sha3_512::hex`.
+pub(crate) fn builtin_interop_sha3_512_hex(args: &[Value]) -> RuntimeResult<Value> {
+    let data = value_to_bytes(args.first().unwrap_or(&Value::Unit));
+    Ok(Value::String(
+        gossamer_runtime::codec::hex::encode(&gossamer_runtime::crypto_interop::sha3_512(&data))
+            .into(),
+    ))
+}
+
+/// `crypto::kdf::hkdf_sha256`.
+pub(crate) fn builtin_interop_kdf_hkdf_sha256(args: &[Value]) -> RuntimeResult<Value> {
+    let ikm = value_to_bytes(args.first().unwrap_or(&Value::Unit));
+    let salt = value_to_bytes(args.get(1).unwrap_or(&Value::Unit));
+    let info = value_to_bytes(args.get(2).unwrap_or(&Value::Unit));
+    let length = args.get(3).and_then(value_to_int).unwrap_or(0);
+    Ok(
+        match gossamer_runtime::crypto_interop::hkdf(
+            gossamer_runtime::crypto_interop::HkdfHash::Sha256,
+            &ikm,
+            &salt,
+            &info,
+            length,
+        ) {
+            Ok(bytes) => ok_variant(bytes_to_value_array(&bytes)),
+            Err(e) => err_variant(e),
+        },
+    )
+}
+
+/// `crypto::kdf::hkdf_sha512`.
+pub(crate) fn builtin_interop_kdf_hkdf_sha512(args: &[Value]) -> RuntimeResult<Value> {
+    let ikm = value_to_bytes(args.first().unwrap_or(&Value::Unit));
+    let salt = value_to_bytes(args.get(1).unwrap_or(&Value::Unit));
+    let info = value_to_bytes(args.get(2).unwrap_or(&Value::Unit));
+    let length = args.get(3).and_then(value_to_int).unwrap_or(0);
+    Ok(
+        match gossamer_runtime::crypto_interop::hkdf(
+            gossamer_runtime::crypto_interop::HkdfHash::Sha512,
+            &ikm,
+            &salt,
+            &info,
+            length,
+        ) {
+            Ok(bytes) => ok_variant(bytes_to_value_array(&bytes)),
+            Err(e) => err_variant(e),
+        },
+    )
+}
+
+/// `crypto::rsa::sign_pkcs1_sha256`.
+pub(crate) fn builtin_interop_rsa_sign_pkcs1_sha256(args: &[Value]) -> RuntimeResult<Value> {
+    let secret_pem = args.first().and_then(as_str).unwrap_or("").to_string();
+    let message = value_to_bytes(args.get(1).unwrap_or(&Value::Unit));
+    Ok(
+        match gossamer_runtime::crypto_interop::rsa_sign(
+            gossamer_runtime::crypto_interop::RsaScheme::Pkcs1Sha256,
+            &secret_pem,
+            &message,
+        ) {
+            Ok(bytes) => ok_variant(bytes_to_value_array(&bytes)),
+            Err(e) => err_variant(e),
+        },
+    )
+}
+
+/// `crypto::rsa::sign_pss_sha256`.
+pub(crate) fn builtin_interop_rsa_sign_pss_sha256(args: &[Value]) -> RuntimeResult<Value> {
+    let secret_pem = args.first().and_then(as_str).unwrap_or("").to_string();
+    let message = value_to_bytes(args.get(1).unwrap_or(&Value::Unit));
+    Ok(
+        match gossamer_runtime::crypto_interop::rsa_sign(
+            gossamer_runtime::crypto_interop::RsaScheme::PssSha256,
+            &secret_pem,
+            &message,
+        ) {
+            Ok(bytes) => ok_variant(bytes_to_value_array(&bytes)),
+            Err(e) => err_variant(e),
+        },
+    )
+}
+
+/// `crypto::rsa::encrypt_oaep_sha256`.
+pub(crate) fn builtin_interop_rsa_encrypt_oaep_sha256(args: &[Value]) -> RuntimeResult<Value> {
+    let public_pem = args.first().and_then(as_str).unwrap_or("").to_string();
+    let plaintext = value_to_bytes(args.get(1).unwrap_or(&Value::Unit));
+    Ok(
+        match gossamer_runtime::crypto_interop::rsa_encrypt_oaep_sha256(&public_pem, &plaintext) {
+            Ok(bytes) => ok_variant(bytes_to_value_array(&bytes)),
+            Err(e) => err_variant(e),
+        },
+    )
+}
+
+/// `crypto::rsa::decrypt_oaep_sha256`.
+pub(crate) fn builtin_interop_rsa_decrypt_oaep_sha256(args: &[Value]) -> RuntimeResult<Value> {
+    let secret_pem = args.first().and_then(as_str).unwrap_or("").to_string();
+    let ciphertext = value_to_bytes(args.get(1).unwrap_or(&Value::Unit));
+    Ok(
+        match gossamer_runtime::crypto_interop::rsa_decrypt_oaep_sha256(&secret_pem, &ciphertext) {
+            Ok(bytes) => ok_variant(bytes_to_value_array(&bytes)),
+            Err(e) => err_variant(e),
+        },
+    )
+}
+
+/// `crypto::rsa::verify_pkcs1_sha256`.
+pub(crate) fn builtin_interop_rsa_verify_pkcs1_sha256(args: &[Value]) -> RuntimeResult<Value> {
+    let public_pem = args.first().and_then(as_str).unwrap_or("").to_string();
+    let message = value_to_bytes(args.get(1).unwrap_or(&Value::Unit));
+    let signature = value_to_bytes(args.get(2).unwrap_or(&Value::Unit));
+    Ok(
+        match gossamer_runtime::crypto_interop::rsa_verify(
+            gossamer_runtime::crypto_interop::RsaScheme::Pkcs1Sha256,
+            &public_pem,
+            &message,
+            &signature,
+        ) {
+            Ok(()) => ok_variant(Value::Unit),
+            Err(e) => err_variant(e),
+        },
+    )
+}
+
+/// `crypto::rsa::verify_pss_sha256`.
+pub(crate) fn builtin_interop_rsa_verify_pss_sha256(args: &[Value]) -> RuntimeResult<Value> {
+    let public_pem = args.first().and_then(as_str).unwrap_or("").to_string();
+    let message = value_to_bytes(args.get(1).unwrap_or(&Value::Unit));
+    let signature = value_to_bytes(args.get(2).unwrap_or(&Value::Unit));
+    Ok(
+        match gossamer_runtime::crypto_interop::rsa_verify(
+            gossamer_runtime::crypto_interop::RsaScheme::PssSha256,
+            &public_pem,
+            &message,
+            &signature,
+        ) {
+            Ok(()) => ok_variant(Value::Unit),
+            Err(e) => err_variant(e),
+        },
+    )
+}
+
+/// `crypto::rsa::public_key_pem`.
+pub(crate) fn builtin_interop_rsa_public_key_pem(args: &[Value]) -> RuntimeResult<Value> {
+    let secret_pem = args.first().and_then(as_str).unwrap_or("").to_string();
+    Ok(
+        match gossamer_runtime::crypto_interop::rsa_public_key_pem(&secret_pem) {
+            Ok(text) => ok_variant(Value::String(text.into())),
+            Err(e) => err_variant(e),
+        },
+    )
+}
+
+/// `crypto::x509::self_signed`.
+pub(crate) fn builtin_interop_x509_self_signed(args: &[Value]) -> RuntimeResult<Value> {
+    let common_name = args.first().and_then(as_str).unwrap_or("").to_string();
+    let dns_names = interop_strings(args.get(1));
+    let days = args.get(2).and_then(value_to_int).unwrap_or(0);
+    let is_ca = matches!(args.get(3), Some(Value::Bool(true)));
+    let client = matches!(args.get(4), Some(Value::Bool(true)));
+    let extensions = match gossamer_runtime::crypto_interop::parse_extensions(
+        args.get(5).and_then(as_str).unwrap_or(""),
+    ) {
+        Ok(extensions) => extensions,
+        Err(e) => return Ok(err_variant(e)),
+    };
+    Ok(
+        match gossamer_runtime::crypto_interop::self_signed(
+            &common_name,
+            &dns_names,
+            days,
+            gossamer_runtime::crypto_interop::CertUse { is_ca, client },
+            &extensions,
+        ) {
+            Ok((a, b)) => ok_variant(Value::Tuple(Arc::from(vec![
+                Value::String(a.into()),
+                Value::String(b.into()),
+            ]))),
+            Err(e) => err_variant(e),
+        },
+    )
+}
+
+/// `crypto::x509::issue`.
+pub(crate) fn builtin_interop_x509_issue(args: &[Value]) -> RuntimeResult<Value> {
+    let ca_cert_pem = args.first().and_then(as_str).unwrap_or("").to_string();
+    let ca_key_pem = args.get(1).and_then(as_str).unwrap_or("").to_string();
+    let common_name = args.get(2).and_then(as_str).unwrap_or("").to_string();
+    let dns_names = interop_strings(args.get(3));
+    let days = args.get(4).and_then(value_to_int).unwrap_or(0);
+    let is_ca = matches!(args.get(5), Some(Value::Bool(true)));
+    let client = matches!(args.get(6), Some(Value::Bool(true)));
+    let extensions = match gossamer_runtime::crypto_interop::parse_extensions(
+        args.get(7).and_then(as_str).unwrap_or(""),
+    ) {
+        Ok(extensions) => extensions,
+        Err(e) => return Ok(err_variant(e)),
+    };
+    Ok(
+        match gossamer_runtime::crypto_interop::issue(
+            &ca_cert_pem,
+            &ca_key_pem,
+            &common_name,
+            &dns_names,
+            days,
+            gossamer_runtime::crypto_interop::CertUse { is_ca, client },
+            &extensions,
+        ) {
+            Ok((a, b)) => ok_variant(Value::Tuple(Arc::from(vec![
+                Value::String(a.into()),
+                Value::String(b.into()),
+            ]))),
+            Err(e) => err_variant(e),
+        },
+    )
+}
+
+/// `__gos_x509_extensions_raw(cert_pem)`: the certificate's extensions as JSON.
+pub(crate) fn builtin_interop_x509_extensions(args: &[Value]) -> RuntimeResult<Value> {
+    let cert_pem = args.first().and_then(as_str).unwrap_or("");
+    Ok(
+        match gossamer_runtime::crypto_interop::extensions_json(cert_pem) {
+            Ok(json) => ok_variant(Value::String(json.into())),
+            Err(e) => err_variant(e),
+        },
+    )
+}
+
+/// `crypto::x509::csr`.
+pub(crate) fn builtin_interop_x509_csr(args: &[Value]) -> RuntimeResult<Value> {
+    let common_name = args.first().and_then(as_str).unwrap_or("").to_string();
+    let dns_names = interop_strings(args.get(1));
+    Ok(
+        match gossamer_runtime::crypto_interop::csr(&common_name, &dns_names) {
+            Ok((a, b)) => ok_variant(Value::Tuple(Arc::from(vec![
+                Value::String(a.into()),
+                Value::String(b.into()),
+            ]))),
+            Err(e) => err_variant(e),
+        },
+    )
+}
+
+/// `crypto::x509::sign_csr`.
+pub(crate) fn builtin_interop_x509_sign_csr(args: &[Value]) -> RuntimeResult<Value> {
+    let csr_pem = args.first().and_then(as_str).unwrap_or("").to_string();
+    let ca_cert_pem = args.get(1).and_then(as_str).unwrap_or("").to_string();
+    let ca_key_pem = args.get(2).and_then(as_str).unwrap_or("").to_string();
+    let days = args.get(3).and_then(value_to_int).unwrap_or(0);
+    let client = matches!(args.get(4), Some(Value::Bool(true)));
+    Ok(
+        match gossamer_runtime::crypto_interop::sign_csr(
+            &csr_pem,
+            &ca_cert_pem,
+            &ca_key_pem,
+            days,
+            client,
+        ) {
+            Ok(text) => ok_variant(Value::String(text.into())),
+            Err(e) => err_variant(e),
+        },
+    )
+}

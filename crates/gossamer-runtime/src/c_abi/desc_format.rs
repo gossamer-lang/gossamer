@@ -135,6 +135,7 @@ unsafe fn desc_slot_span_walk(tags: DescStream, cursor: &mut usize) -> usize {
     let tag = tags.byte(*cursor);
     *cursor += 1;
     match tag {
+        gossamer_abi::TUPLE_TAG_I128 | gossamer_abi::TUPLE_TAG_U128 => 2,
         TUPLE_TAG_NESTED => {
             let arity = tags.byte(*cursor) as usize;
             *cursor += 1;
@@ -386,6 +387,34 @@ pub(crate) enum Storage {
     Inline,
     /// The slot holds a word addressing the value.
     ByWord,
+}
+
+/// Writes the 128-bit integer at `slot`: its two slots in place for inline
+/// storage, or the box a carrier's payload word addresses (a null word reads
+/// as zero).
+///
+/// # Safety
+/// `slot` holds the value's two slots, or one word that is null or the
+/// address of them, as `storage` says.
+unsafe fn render_wide_leaf(out: &mut String, slot: *const u8, storage: Storage, unsigned: bool) {
+    let at: *const u8 = if storage == Storage::Inline {
+        slot
+    } else {
+        // SAFETY: by-word storage holds one word, the box's address.
+        let word = unsafe { (slot as *const i64).read_unaligned() };
+        std::ptr::with_exposed_provenance(word as usize)
+    };
+    if at.is_null() {
+        out.push('0');
+        return;
+    }
+    // SAFETY: a 128-bit leaf spans the two slots at `at` (this `unsafe fn`'s contract).
+    let bits = unsafe { crate::c_abi::desc_cmp::read_wide_slots(at) };
+    if unsigned {
+        out.push_str(&bits.to_string());
+    } else {
+        out.push_str(&bits.cast_signed().to_string());
+    }
 }
 
 pub(crate) unsafe fn render_desc_storage(
@@ -684,6 +713,11 @@ pub(crate) unsafe fn render_desc_storage(
                 // SAFETY: `rendered` is the fresh string the formatter answered, owned here.
                 unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
             }
+        }
+        gossamer_abi::TUPLE_TAG_I128 | gossamer_abi::TUPLE_TAG_U128 => {
+            *cursor += 1;
+            // SAFETY: `slot` holds a 128-bit leaf laid out as `storage` says.
+            unsafe { render_wide_leaf(out, slot, storage, tag == gossamer_abi::TUPLE_TAG_U128) };
         }
         _ => {
             *cursor += 1;
@@ -1075,6 +1109,8 @@ unsafe fn sort_tuple_buffer(base: *mut u8, len: usize, stride: usize, n: i64, ta
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_sort_tuple(v: *mut GosVec, n: i64, tags: *const u8) {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() || tags.is_null() || n <= 0 {
             return;
         }

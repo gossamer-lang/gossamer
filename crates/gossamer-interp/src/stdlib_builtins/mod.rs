@@ -144,6 +144,9 @@ pub(crate) fn install(globals: &mut Vec<(&'static str, Value)>) {
     install_sync_barrier(globals);
     #[cfg(not(target_arch = "wasm32"))]
     install_crypto_breadth(globals);
+    #[cfg(not(target_arch = "wasm32"))]
+    crypto_keys::install_crypto_keys(globals);
+    numeric_leaves::install_numeric_leaves(globals);
     install_hash_crc32_adler32(globals);
     install_json_builtins(globals);
     install_time_completeness(globals);
@@ -193,11 +196,9 @@ pub(crate) fn install(globals: &mut Vec<(&'static str, Value)>) {
     install_container_heap(globals);
     install_deque(globals);
     install_url_escape(globals);
-    #[cfg(not(target_arch = "wasm32"))]
-    install_jwt(globals);
-    install_validate(globals);
     install_rwlock(globals);
     install_shared(globals);
+    install_guard(globals);
     install_context(globals);
     install_cohort(globals);
     lifecycle::install_lifecycle(globals);
@@ -206,11 +207,7 @@ pub(crate) fn install(globals: &mut Vec<(&'static str, Value)>) {
     #[cfg(not(target_arch = "wasm32"))]
     http_response_stream::install_http_response_stream(globals);
     #[cfg(not(target_arch = "wasm32"))]
-    net::install_smtp(globals);
-    #[cfg(not(target_arch = "wasm32"))]
     install_metrics(globals);
-    #[cfg(not(target_arch = "wasm32"))]
-    install_trace(globals);
 }
 
 // ----------------------------------------------------------------------
@@ -253,6 +250,8 @@ pub mod crypto_breadth;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod crypto_insecure;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod crypto_keys;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod database_sql;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod database_sql_native;
@@ -266,6 +265,7 @@ pub mod encoding_toml;
 pub mod encoding_xml;
 pub mod encoding_yaml;
 pub mod fs;
+pub mod guard;
 pub mod hash_fnv;
 pub mod html;
 pub mod http_chunked;
@@ -300,8 +300,6 @@ pub mod image;
 pub mod io_streams;
 pub mod iter;
 pub mod json_builtins;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod jwt;
 pub(crate) mod lifecycle;
 pub mod math;
 pub mod math_big;
@@ -314,6 +312,7 @@ pub mod mime;
 pub mod net;
 pub mod net_ip;
 pub mod netip;
+pub mod numeric_leaves;
 pub mod option;
 pub mod os;
 pub mod os_user;
@@ -331,13 +330,10 @@ pub mod sync_barrier;
 pub mod thread;
 pub mod time;
 pub mod time_completeness;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod trace;
 pub mod unicode;
 pub mod url_escape;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod uuid;
-pub mod validate;
 pub(crate) use archive::{install_archive_tar, install_archive_zip};
 pub(crate) use bufio::install_bufio_extras;
 pub use bufio::*;
@@ -378,6 +374,7 @@ pub(crate) use encoding_yaml::install_encoding_yaml;
 pub use encoding_yaml::*;
 pub(crate) use fs::install_fs_extras;
 pub use fs::*;
+pub(crate) use guard::install_guard;
 pub(crate) use hash_fnv::install_hash_fnv;
 pub use hash_fnv::*;
 pub(crate) use html::install_html;
@@ -430,17 +427,11 @@ pub(crate) use http_ws_accept::install_http_ws_accept;
 pub use http_ws_accept::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use image::install_image;
-#[cfg(not(target_arch = "wasm32"))]
-pub use image::*;
 pub(crate) use io_streams::install_io_streams;
 pub(crate) use iter::install_iter;
 pub use iter::*;
 pub(crate) use json_builtins::install_json_builtins;
 pub use json_builtins::*;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use jwt::install_jwt;
-#[cfg(not(target_arch = "wasm32"))]
-pub use jwt::*;
 pub(crate) use math::install_math;
 pub use math::*;
 pub(crate) use math_big::install_math_big;
@@ -494,10 +485,6 @@ pub(crate) use time::install_time_extras;
 pub use time::*;
 pub(crate) use time_completeness::install_time_completeness;
 pub use time_completeness::*;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) use trace::install_trace;
-#[cfg(not(target_arch = "wasm32"))]
-pub use trace::*;
 pub(crate) use unicode::install_unicode;
 pub use unicode::*;
 pub(crate) use url_escape::install_url_escape;
@@ -506,5 +493,3 @@ pub use url_escape::*;
 pub(crate) use uuid::install_uuid;
 #[cfg(not(target_arch = "wasm32"))]
 pub use uuid::*;
-pub(crate) use validate::install_validate;
-pub use validate::*;

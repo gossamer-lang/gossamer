@@ -269,13 +269,44 @@ pub(crate) fn builtin_math_hypot(args: &[Value]) -> RuntimeResult<Value> {
         arg_f64(args, 1),
     )))
 }
+/// The panic every tier raises for a `clamp` whose bounds are out of order.
+pub(crate) fn clamp_bounds_error(lo: &Value, hi: &Value) -> crate::value::RuntimeError {
+    crate::value::RuntimeError::Panic(format!(
+        "clamp: the lower bound {lo} is above the upper bound {hi}"
+    ))
+}
+
 pub(crate) fn builtin_math_clamp(args: &[Value]) -> RuntimeResult<Value> {
     // clamp(v, lo, hi) - bare prelude scalar clamp. Matches the
     // compiled tier: below lo -> lo, above hi -> hi, else v.
+    if let (Some(x), Some(lo), Some(hi)) = (args.first(), args.get(1), args.get(2))
+        && [x, lo, hi].iter().any(|v| v.is_wide())
+        && let Some(bounds) = crate::value::wide::compare_integers(lo, hi)
+    {
+        use crate::value::wide::compare_integers;
+        if bounds.is_gt() {
+            return Err(clamp_bounds_error(lo, hi));
+        }
+        let below = compare_integers(x, lo).is_some_and(std::cmp::Ordering::is_lt);
+        let above = compare_integers(x, hi).is_some_and(std::cmp::Ordering::is_gt);
+        return Ok(if below {
+            lo.clone()
+        } else if above {
+            hi.clone()
+        } else {
+            x.clone()
+        });
+    }
     if let Some(Value::Float(_)) = args.first() {
         let v = arg_f64(args, 0);
         let lo = arg_f64(args, 1);
         let hi = arg_f64(args, 2);
+        if !matches!(
+            lo.partial_cmp(&hi),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        ) {
+            return Err(clamp_bounds_error(&Value::Float(lo), &Value::Float(hi)));
+        }
         let out = if v < lo {
             lo
         } else if v > hi {
@@ -288,6 +319,9 @@ pub(crate) fn builtin_math_clamp(args: &[Value]) -> RuntimeResult<Value> {
     let v = args.first().and_then(value_to_int).unwrap_or(0);
     let lo = args.get(1).and_then(value_to_int).unwrap_or(0);
     let hi = args.get(2).and_then(value_to_int).unwrap_or(0);
+    if lo > hi {
+        return Err(clamp_bounds_error(&Value::Int(lo), &Value::Int(hi)));
+    }
     let out = if v < lo {
         lo
     } else if v > hi {
@@ -313,6 +347,11 @@ pub(crate) fn builtin_math_min(args: &[Value]) -> RuntimeResult<Value> {
     if let (Some(Value::Char(a)), Some(Value::Char(b))) = (args.first(), args.get(1)) {
         return Ok(Value::Char(*a.min(b)));
     }
+    if let (Some(a), Some(b)) = (args.first(), args.get(1))
+        && let Some(order) = crate::value::wide::compare(a, b)
+    {
+        return Ok(if order.is_gt() { b.clone() } else { a.clone() });
+    }
     let x = args.first().and_then(value_to_int).unwrap_or(0);
     let y = args.get(1).and_then(value_to_int).unwrap_or(0);
     Ok(Value::Int(math_std::min_i64(x, y)))
@@ -331,6 +370,11 @@ pub(crate) fn builtin_math_max(args: &[Value]) -> RuntimeResult<Value> {
     }
     if let (Some(Value::Char(a)), Some(Value::Char(b))) = (args.first(), args.get(1)) {
         return Ok(Value::Char(*a.max(b)));
+    }
+    if let (Some(a), Some(b)) = (args.first(), args.get(1))
+        && let Some(order) = crate::value::wide::compare(a, b)
+    {
+        return Ok(if order.is_lt() { b.clone() } else { a.clone() });
     }
     let x = args.first().and_then(value_to_int).unwrap_or(0);
     let y = args.get(1).and_then(value_to_int).unwrap_or(0);

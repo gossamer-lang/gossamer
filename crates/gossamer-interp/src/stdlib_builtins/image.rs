@@ -1,223 +1,135 @@
-//! Interpreter bridge for the opaque `std::image::Image` handle.
+//! Interpreter leaves under the `std::image` wrapper source, over the same
+//! runtime codecs, limit, and resampler compiled code calls.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::sync::LazyLock;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::borrow::Cow;
+use std::sync::Arc;
 
-use gossamer_std::{encoding::base64, image as image_std};
+use gossamer_runtime::image_ops;
 
-use crate::builtins::{BuiltinFnPub, value_to_int};
-use crate::value::{RuntimeError, RuntimeResult, Value};
+use crate::builtins::{BuiltinFnPub, err_variant, ok_variant, value_to_int};
+use crate::value::{RuntimeResult, Value};
 
-use super::as_str;
-
-static IMAGES: LazyLock<parking_lot::ReentrantMutex<RefCell<HashMap<i64, image_std::Image>>>> =
-    LazyLock::new(|| parking_lot::ReentrantMutex::new(RefCell::new(HashMap::new())));
-static NEXT_IMAGE_ID: AtomicI64 = AtomicI64::new(1);
-
-fn with_images<R>(f: impl FnOnce(&RefCell<HashMap<i64, image_std::Image>>) -> R) -> R {
-    let guard = IMAGES.lock();
-    f(&guard)
-}
-
-fn id(value: &Value) -> Option<i64> {
-    value_to_int(value).filter(|id| *id > 0)
+pub(crate) fn install_image(globals: &mut Vec<(&'static str, Value)>) {
+    let entries: &[(&'static str, BuiltinFnPub)] = &[
+        ("__gos_image_decode_raw", image_decode_raw),
+        ("__gos_image_filled_raw", image_filled_raw),
+        ("__gos_image_check_raw", image_check_raw),
+        ("__gos_image_resize_raw", image_resize_raw),
+        ("__gos_image_encode_png_raw", image_encode_png_raw),
+        ("__gos_image_encode_jpeg_raw", image_encode_jpeg_raw),
+        ("__gos_image_set_max_pixels_raw", image_set_max_pixels_raw),
+    ];
+    for (name, call) in entries {
+        globals.push((name, crate::builtins::builtin_pub(name, *call)));
+    }
 }
 
 fn int(args: &[Value], n: usize) -> i64 {
     args.get(n).and_then(value_to_int).unwrap_or(0)
 }
-fn non_negative_u32(args: &[Value], n: usize, label: &str) -> RuntimeResult<u32> {
-    let value = int(args, n);
-    if value < 0 {
-        return Err(RuntimeError::Type(format!("{label} must be non-negative")));
+
+/// The bytes of argument `n`, lent where the value already holds them.
+fn bytes(args: &[Value], n: usize) -> Cow<'_, [u8]> {
+    args.get(n)
+        .and_then(Value::byte_slice)
+        .unwrap_or(Cow::Borrowed(&[]))
+}
+
+fn byte_vec(bytes: Vec<u8>) -> Value {
+    Value::ByteVec(Arc::new(bytes))
+}
+
+fn bytes_answer(answer: Result<Vec<u8>, String>) -> Value {
+    match answer {
+        Ok(bytes) => ok_variant(byte_vec(bytes)),
+        Err(message) => err_variant(message),
     }
-    u32::try_from(value).map_err(|_| RuntimeError::Type(format!("{label} is too large")))
 }
-fn bounded_u8(args: &[Value], n: usize, min: i64, max: i64, label: &str) -> RuntimeResult<u8> {
-    let value = int(args, n);
-    if value < min || value > max {
-        return Err(RuntimeError::Type(format!(
-            "{label} must be between {min} and {max}"
-        )));
+
+/// The pixel bytes of a checked `width` by `height` image, or the error.
+fn pixels<'a>(args: &'a [Value], context: &str) -> Result<(Cow<'a, [u8]>, i64, i64), String> {
+    let (width, height) = (int(args, 1), int(args, 2));
+    let len = image_ops::checked_len(context, width, height)?;
+    let rgba = bytes(args, 0);
+    if rgba.len() != len {
+        return Err(format!(
+            "{context}: a {width}x{height} image holds {len} bytes, not {}",
+            rgba.len()
+        ));
     }
-    u8::try_from(value).map_err(|_| RuntimeError::Type(format!("{label} is too large")))
+    Ok((rgba, width, height))
 }
-fn channel(value: i64, shift: u32) -> u8 {
-    ((value >> shift) & 0xff) as u8
+
+fn image_decode_raw(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(match image_ops::decode(&bytes(args, 0)) {
+        Ok(decoded) => ok_variant(Value::Tuple(Arc::new(vec![
+            Value::Int(i64::from(decoded.width)),
+            Value::Int(i64::from(decoded.height)),
+            byte_vec(decoded.rgba),
+        ]))),
+        Err(message) => err_variant(message),
+    })
 }
-fn rgba(value: i64) -> image_std::Rgba {
-    image_std::Rgba::new(
-        channel(value, 24),
-        channel(value, 16),
-        channel(value, 8),
-        channel(value, 0),
+
+fn image_filled_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let color = [2, 3, 4, 5].map(|n| int(args, n) as u8);
+    Ok(bytes_answer(
+        image_ops::checked_len("Image::filled", int(args, 0), int(args, 1))
+            .map(|len| image_ops::fill(len, color)),
+    ))
+}
+
+fn image_check_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let (width, height, len) = (int(args, 0), int(args, 1), int(args, 2));
+    Ok(
+        match image_ops::checked_len("Image::from_rgba", width, height) {
+            Ok(expected) if usize::try_from(len) == Ok(expected) => ok_variant(Value::Unit),
+            Ok(expected) => err_variant(format!(
+                "Image::from_rgba: a {width}x{height} image holds {expected} bytes, not {len}"
+            )),
+            Err(message) => err_variant(message),
+        },
     )
 }
-fn pack(value: image_std::Rgba) -> i64 {
-    (i64::from(value.r) << 24)
-        | (i64::from(value.g) << 16)
-        | (i64::from(value.b) << 8)
-        | i64::from(value.a)
-}
 
-pub(crate) fn install_image(globals: &mut Vec<(&'static str, Value)>) {
-    let entries: &[(&str, BuiltinFnPub)] = &[
-        ("new", image_new),
-        ("filled", image_filled),
-        ("decode_base64", image_decode_base64),
-        ("width", image_width),
-        ("height", image_height),
-        ("pixel", image_pixel),
-        ("set_pixel", image_set_pixel),
-        ("from_rgba_bytes", image_from_rgba_bytes),
-        ("release", image_release),
-        ("to_rgba_bytes", image_to_rgba_bytes),
-        ("encode_png_base64", image_encode_png),
-        ("encode_jpeg_base64", image_encode_jpeg),
-    ];
-    for (name, call) in entries {
-        let qualified: &'static str = Box::leak(format!("image::{name}").into_boxed_str());
-        globals.push((qualified, crate::builtins::builtin_pub(qualified, *call)));
-    }
-}
-
-fn insert(image: image_std::Image) -> Value {
-    let id = NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed);
-    with_images(|images| {
-        images.borrow_mut().insert(id, image);
+fn image_resize_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let (new_width, new_height) = (int(args, 3), int(args, 4));
+    let answer = pixels(args, "Image::resize").and_then(|(rgba, width, height)| {
+        image_ops::checked_len("Image::resize", new_width, new_height)?;
+        Ok(image_ops::resize_rgba(
+            &rgba,
+            width as usize,
+            height as usize,
+            new_width as usize,
+            new_height as usize,
+        ))
     });
-    Value::Int(id)
+    Ok(bytes_answer(answer))
 }
 
-fn image_release(args: &[Value]) -> RuntimeResult<Value> {
-    Ok(Value::Bool(
-        id(args.first().unwrap_or(&Value::Unit))
-            .is_some_and(|id| with_images(|images| images.borrow_mut().remove(&id).is_some())),
-    ))
-}
-fn image_new(args: &[Value]) -> RuntimeResult<Value> {
-    let width = non_negative_u32(args, 0, "image::new: width")?;
-    let height = non_negative_u32(args, 1, "image::new: height")?;
-    Ok(image_std::Image::new(width, height).map_or(Value::Int(0), insert))
-}
-fn image_filled(args: &[Value]) -> RuntimeResult<Value> {
-    let width = non_negative_u32(args, 0, "image::filled: width")?;
-    let height = non_negative_u32(args, 1, "image::filled: height")?;
-    Ok(image_std::Image::filled(width, height, rgba(int(args, 2))).map_or(Value::Int(0), insert))
-}
-fn image_decode_base64(args: &[Value]) -> RuntimeResult<Value> {
-    let decoded = args
-        .first()
-        .and_then(as_str)
-        .and_then(|text| base64::decode(text).ok());
-    Ok(decoded
-        .and_then(|bytes| image_std::decode(&bytes).ok())
-        .map_or(Value::Int(0), insert))
-}
-fn image_width(args: &[Value]) -> RuntimeResult<Value> {
-    Ok(Value::Int(
-        id(args.first().unwrap_or(&Value::Unit))
-            .and_then(|id| {
-                with_images(|images| {
-                    images
-                        .borrow()
-                        .get(&id)
-                        .map(|image| i64::from(image.width()))
-                })
-            })
-            .unwrap_or(0),
-    ))
-}
-fn image_height(args: &[Value]) -> RuntimeResult<Value> {
-    Ok(Value::Int(
-        id(args.first().unwrap_or(&Value::Unit))
-            .and_then(|id| {
-                with_images(|images| {
-                    images
-                        .borrow()
-                        .get(&id)
-                        .map(|image| i64::from(image.height()))
-                })
-            })
-            .unwrap_or(0),
-    ))
-}
-fn image_pixel(args: &[Value]) -> RuntimeResult<Value> {
-    let x = non_negative_u32(args, 1, "image::pixel: x")?;
-    let y = non_negative_u32(args, 2, "image::pixel: y")?;
-    Ok(Value::Int(
-        id(args.first().unwrap_or(&Value::Unit))
-            .and_then(|id| {
-                with_images(|images| {
-                    images
-                        .borrow()
-                        .get(&id)
-                        .and_then(|image| image.pixel(x, y))
-                        .map(pack)
-                })
-            })
-            .unwrap_or(-1),
-    ))
-}
-fn image_from_rgba_bytes(args: &[Value]) -> RuntimeResult<Value> {
-    let width = non_negative_u32(args, 0, "image::from_rgba_bytes: width")?;
-    let height = non_negative_u32(args, 1, "image::from_rgba_bytes: height")?;
-    let bytes = args.get(2).map(Value::bytes_or_empty).unwrap_or_default();
-    Ok(image_std::Image::from_rgba8(width, height, bytes).map_or(Value::Int(0), insert))
-}
-fn image_to_rgba_bytes(args: &[Value]) -> RuntimeResult<Value> {
-    let bytes = id(args.first().unwrap_or(&Value::Unit))
-        .and_then(|id| {
-            with_images(|images| images.borrow().get(&id).map(image_std::Image::to_rgba8))
-        })
-        .unwrap_or_default();
-    Ok(Value::ByteVec(std::sync::Arc::new(bytes)))
-}
-fn image_set_pixel(args: &[Value]) -> RuntimeResult<Value> {
-    let x = non_negative_u32(args, 1, "image::set_pixel: x")?;
-    let y = non_negative_u32(args, 2, "image::set_pixel: y")?;
-    let changed = id(args.first().unwrap_or(&Value::Unit)).is_some_and(|id| {
-        with_images(|images| {
-            images
-                .borrow_mut()
-                .get_mut(&id)
-                .is_some_and(|image| image.set_pixel(x, y, rgba(int(args, 3))))
-        })
+fn image_encode_png_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let answer = pixels(args, "Image::encode_png").and_then(|(rgba, width, height)| {
+        image_ops::encode_png(&rgba, width as u32, height as u32)
     });
-    Ok(Value::Bool(changed))
+    Ok(bytes_answer(answer))
 }
-fn image_encode_png(args: &[Value]) -> RuntimeResult<Value> {
-    Ok(Value::String(
-        id(args.first().unwrap_or(&Value::Unit))
-            .and_then(|id| {
-                with_images(|images| {
-                    images
-                        .borrow()
-                        .get(&id)
-                        .and_then(|image| image_std::encode_png(image).ok())
-                        .map(|bytes| base64::encode(&bytes))
-                })
-            })
-            .unwrap_or_default()
-            .into(),
-    ))
+
+fn image_encode_jpeg_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let quality = int(args, 3);
+    let Some(quality) = u8::try_from(quality).ok().filter(|q| (1..=100).contains(q)) else {
+        return Ok(err_variant(format!(
+            "Image::encode_jpeg: quality runs from 1 through 100, not {quality}"
+        )));
+    };
+    let answer = pixels(args, "Image::encode_jpeg").and_then(|(rgba, width, height)| {
+        image_ops::encode_jpeg(&rgba, width as u32, height as u32, quality)
+    });
+    Ok(bytes_answer(answer))
 }
-fn image_encode_jpeg(args: &[Value]) -> RuntimeResult<Value> {
-    let quality = bounded_u8(args, 1, 1, 100, "image::encode_jpeg: quality")?;
-    Ok(Value::String(
-        id(args.first().unwrap_or(&Value::Unit))
-            .and_then(|id| {
-                with_images(|images| {
-                    images
-                        .borrow()
-                        .get(&id)
-                        .and_then(|image| image_std::encode_jpeg(image, quality).ok())
-                        .map(|bytes| base64::encode(&bytes))
-                })
-            })
-            .unwrap_or_default()
-            .into(),
-    ))
+
+fn image_set_max_pixels_raw(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(match image_ops::set_max_pixels(int(args, 0)) {
+        Ok(()) => ok_variant(Value::Unit),
+        Err(message) => err_variant(message),
+    })
 }

@@ -1,0 +1,36 @@
+// A channel end read out of a `Vec`, or out of a binding two closures share,
+// takes a share of its own when it is returned, so the channel stays open for
+// every other holder.
+fn first(v: Vec<Receiver<i64>>) -> Receiver<i64> {
+    v[0]
+}
+
+fn shared(rec: (Receiver<i64>, i64)) -> Fn() -> (Receiver<i64>, i64) {
+    let mut cell = rec
+    let get = || cell
+    let set = |next: (Receiver<i64>, i64)| { cell = next }
+    get
+}
+
+fn plain(rec: Receiver<i64>) -> Fn() -> Receiver<i64> {
+    let mut cell = rec
+    let get = || cell
+    let set = |next: Receiver<i64>| { cell = next }
+    get
+}
+
+fn main() {
+    let tx, rx = channel(8)
+    for i in 0..6 {
+        tx.send(i)
+    }
+    let v = #[rx]
+    println(f"{first(v).recv():?}")
+    println(f"{first(v).recv():?}")
+    println(f"{v[0].recv():?}")
+    let g = plain(rx)
+    println(f"{g().recv():?}")
+    println(f"{rx.recv():?}")
+    let g2 = shared((rx, 1))
+    println(f"{g2().0.recv():?}")
+}

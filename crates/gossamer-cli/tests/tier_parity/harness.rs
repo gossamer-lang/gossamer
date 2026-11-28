@@ -252,6 +252,8 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/generic_struct_rendering.gos"),
     // Sequences order lexicographically, element by element.
     spec("feature-testing-examples/vec_ordering.gos"),
+    spec("feature-testing-examples/vec_copy_on_write.gos"),
+    spec("feature-testing-examples/vec_copy_on_write_paths.gos"),
     // A `for` over a lazy adapter chain pulls one element per turn, so each
     // callback runs just before its body and a `break` ends the pulling.
     spec("feature-testing-examples/lazy_for_adapters.gos"),
@@ -1348,15 +1350,11 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/value_order_and_equality.gos"),
     spec("feature-testing-examples/fs_metadata.gos"),
     spec("feature-testing-examples/html_escape.gos"),
-    spec("feature-testing-examples/html_template_render_json.gos"),
-    spec("feature-testing-examples/jwt_roundtrip.gos"),
+    spec("feature-testing-examples/html_template_render.gos"),
     spec("feature-testing-examples/crypto_ecdsa.gos"),
-    spec("feature-testing-examples/validate_errors.gos"),
-    spec("feature-testing-examples/validate_errors_return.gos"),
     spec("feature-testing-examples/sync_rwlock.gos"),
     spec("feature-testing-examples/context_cancel.gos"),
     spec("feature-testing-examples/metrics_observability.gos"),
-    spec("feature-testing-examples/trace_observability.gos"),
     spec("feature-testing-examples/os_signal_subscribe.gos"),
     spec("feature-testing-examples/array_bounds_probe.gos"),
     spec("feature-testing-examples/array_literal_vec_methods.gos"),
@@ -1479,6 +1477,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/error_chain_inspection.gos"),
     spec("feature-testing-examples/error_question_mark_propagation.gos"),
     spec("feature-testing-examples/float_cast_drift.gos"),
+    spec("feature-testing-examples/format_precision_integers.gos"),
     spec("feature-testing-examples/format_precision_padding.gos"),
     spec("feature-testing-examples/format_spec.gos"),
     spec("feature-testing-examples/format_width_pad_parity.gos"),
@@ -1527,6 +1526,84 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/process_run_in.gos"),
     spec("feature-testing-examples/path_split.gos"),
     spec("feature-testing-examples/path_value.gos"),
+    // `os::hostname` reads the host name the same way on every tier.
+    spec("feature-testing-examples/os_hostname.gos"),
+    // `process::exit` runs the calling goroutine's pending defers first.
+    spec("feature-testing-examples/process_exit_runs_defers.gos"),
+    // `runtime::Guard` runs its cleanup once, at the end of the statement
+    // that released its last reference; a binding holding one lives to the
+    // end of its block.
+    spec("feature-testing-examples/runtime_guard.gos"),
+    // A type with `impl Drop` is a shared handle whose `drop` runs once, when
+    // the last reference goes.
+    spec("feature-testing-examples/drop_trait.gos"),
+    // `fs::TempDir` / `fs::TempFile` remove themselves at their last release.
+    spec("feature-testing-examples/fs_temp_paths.gos"),
+    // `sync::Semaphore` caps concurrent holders through drop-type permits.
+    spec("feature-testing-examples/sync_semaphore.gos"),
+    // `time::Ticker` ticks without drift and stops at its last release.
+    spec("feature-testing-examples/time_ticker.gos"),
+    // Shell quoting, statistics, special functions, and `math::Complex`.
+    spec("feature-testing-examples/numeric_helpers.gos"),
+    // The `math::rand` helpers draw from an `Rng`'s own stream.
+    spec("feature-testing-examples/rand_helpers.gos"),
+    // A signed `MIN / -1` panics on every tier.
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/int_div_overflow_panics.gos")
+    },
+    // `json::encode` refuses a NaN or an infinity.
+    spec("feature-testing-examples/json_non_finite_refused.gos"),
+    spec("feature-testing-examples/duplicate_keys.gos"),
+    spec("feature-testing-examples/time_civil_defaults.gos"),
+    spec("feature-testing-examples/sort_stability.gos"),
+    spec("feature-testing-examples/primitive_cmp.gos"),
+    spec("feature-testing-examples/channel_end_reads.gos"),
+    spec("feature-testing-examples/time_layouts.gos"),
+    spec("feature-testing-examples/fs_links_copy_move.gos"),
+    spec("feature-testing-examples/crypto_interop.gos"),
+    spec("feature-testing-examples/net_dns_records.gos"),
+    spec("feature-testing-examples/text_template.gos"),
+    spec("feature-testing-examples/collections_module_paths.gos"),
+    spec("feature-testing-examples/json_decoder.gos"),
+    spec("feature-testing-examples/fs_file_lock_exclusion.gos"),
+    spec("feature-testing-examples/json_encode_nested_maps.gos"),
+    spec("feature-testing-examples/crypto_keys.gos"),
+    spec("feature-testing-examples/crypto_x509_keys.gos"),
+    spec("feature-testing-examples/netip_prefix.gos"),
+    spec("feature-testing-examples/mut_whole_struct_arguments.gos"),
+    spec("feature-testing-examples/math_rational.gos"),
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/ordered_type_min_max.gos")
+    },
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/int128_cast_bounds.gos")
+    },
+    spec("feature-testing-examples/http_request_literal.gos"),
+    spec("feature-testing-examples/program_types_named_like_std_handles.gos"),
+    spec("feature-testing-examples/std_handles_beside_program_types.gos"),
+    spec("feature-testing-examples/net_mail_address.gos"),
+    spec("feature-testing-examples/drop_handle_goroutines.gos"),
+    spec("feature-testing-examples/closure_sees_mut_ref_writes.gos"),
+    // Writes through the fields of an `impl Drop` type edit the field in
+    // place, and the shapes they lower to agree across tiers.
+    spec("feature-testing-examples/drop_field_writes.gos"),
+    spec("feature-testing-examples/image_gif_resize.gos"),
+    spec("feature-testing-examples/wide_integers.gos"),
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/generic_arith_width.gos")
+    },
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/process_exec.gos")
+    },
+    Spec {
+        stdin: "hunter2 \u{00e9}t\u{00e9}\r\nsecond line\n".as_bytes(),
+        ..spec("feature-testing-examples/term_read_password.gos")
+    },
     // Indexing past a String's end names a string in its panic.
     spec("feature-testing-examples/string_index_oob_message.gos"),
     spec("feature-testing-examples/base32_decode.gos"),
@@ -1553,16 +1630,11 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/http2_push.gos"),
     spec("feature-testing-examples/http2_trailers.gos"),
     spec("feature-testing-examples/http_cookie.gos"),
-    spec("feature-testing-examples/http_csrf.gos"),
-    spec("feature-testing-examples/http_csrf_attach.gos"),
-    spec("feature-testing-examples/http_session.gos"),
-    spec("feature-testing-examples/http_session_roundtrip.gos"),
     spec("feature-testing-examples/http_form_urlencoded.gos"),
     spec("feature-testing-examples/httptest_static_server.gos"),
     spec("examples/http_diagnostics_transport.gos"),
     spec("feature-testing-examples/http_router_lookup.gos"),
     spec("feature-testing-examples/http_serve_err_binding.gos"),
-    spec("feature-testing-examples/http3_serve_err_binding.gos"),
     Spec {
         allow_nonzero: true,
         ..spec("feature-testing-examples/integer_overflow_edges.gos")
@@ -1585,7 +1657,6 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/aggr_map_field_value_semantics.gos"),
     spec("feature-testing-examples/aggr_container_field_value_semantics.gos"),
     spec("feature-testing-examples/vec_container_field_elements.gos"),
-    spec("feature-testing-examples/net_smtp_send.gos"),
     Spec {
         // Unix-domain sockets are POSIX-only; on Windows every entry
         // point returns an Err, so the program prints a bind-failure
@@ -2017,7 +2088,7 @@ const SPECS: &[Spec] = &[
         } else {
             None
         },
-        ..spec("feature-testing-examples/exec_pipeline.gos")
+        ..spec("feature-testing-examples/process_pipeline.gos")
     },
     Spec {
         skip_all: if cfg!(windows) {
@@ -2025,7 +2096,7 @@ const SPECS: &[Spec] = &[
         } else {
             None
         },
-        ..spec("feature-testing-examples/exec_wait_timeout.gos")
+        ..spec("feature-testing-examples/process_wait_timeout.gos")
     },
     Spec {
         skip_all: if cfg!(windows) {
@@ -2033,7 +2104,7 @@ const SPECS: &[Spec] = &[
         } else {
             None
         },
-        ..spec("feature-testing-examples/exec_signal_group.gos")
+        ..spec("feature-testing-examples/process_signal_group.gos")
     },
     spec("feature-testing-examples/vec_runtime_repeat.gos"),
     spec("feature-testing-examples/vec_with_capacity.gos"),
@@ -2492,11 +2563,13 @@ const DEDICATED_FEATURE_TESTING_EXAMPLES: &[&str] = &[
     "http_server_object.gos",
     "http_request_context.gos",
     "http_response_stream.gos",
+    "http_response_stream_kinds.gos",
     "http_request_cohort_arena.gos",
     "http_bare_aliases.gos",
     "http_client_cookie_jar.gos",
     "http_client_verbs.gos",
     "http_serve_tls_roundtrip.gos",
+    "http_tls_server_config.gos",
     "http_server_headers.gos",
     "http_middleware_bearer.gos",
     "http_middleware_compose.gos",

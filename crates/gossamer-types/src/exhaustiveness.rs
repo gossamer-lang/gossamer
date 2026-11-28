@@ -549,6 +549,9 @@ impl Checker<'_> {
             TyKind::Adt { def, .. } => self.adt_domain(*def),
             // A domain no finite list of patterns can exhaust: only a
             // catch-all arm covers it.
+            // A pattern holds an `i128`, so no list of them reaches the
+            // `u128` values above `i128::MAX`: only a catch-all covers it.
+            TyKind::Int(crate::ty::IntTy::U128) => Domain::Infinite,
             TyKind::Int(int_ty) => {
                 let (lo, hi) = int_type_bounds(*int_ty);
                 Domain::Ints {
@@ -1351,8 +1354,13 @@ fn parse_int_literal(text: &str) -> Option<i128> {
         Some("0b" | "0B") => (2, &digits[2..]),
         _ => (10, digits.as_str()),
     };
-    let magnitude = i128::from_str_radix(digits, radix).ok()?;
-    Some(if negative { -magnitude } else { magnitude })
+    // `i128::MIN`'s magnitude is past `i128::MAX`, so it is read unsigned.
+    let magnitude = u128::from_str_radix(digits, radix).ok()?;
+    if negative {
+        0i128.checked_sub_unsigned(magnitude)
+    } else {
+        i128::try_from(magnitude).ok()
+    }
 }
 
 /// The least and greatest value of an integer type; `isize` and `usize` are
@@ -1364,7 +1372,9 @@ fn int_type_bounds(ty: crate::ty::IntTy) -> Interval {
         IntTy::I16 | IntTy::U16 => 16,
         IntTy::I32 | IntTy::U32 => 32,
         IntTy::I64 | IntTy::U64 | IntTy::Isize | IntTy::Usize => 64,
-        IntTy::I128 | IntTy::U128 => 127,
+        IntTy::I128 => return (i128::MIN, i128::MAX),
+        // Patterns never reach past `i128::MAX` (see the `u128` domain).
+        IntTy::U128 => return (0, i128::MAX),
     };
     if ty.is_signed() {
         (-(1_i128 << (bits - 1)), (1_i128 << (bits - 1)) - 1)

@@ -1,0 +1,128 @@
+// MX, TXT, SRV, CNAME, and PTR lookups on every tier, against a small DNS
+// server the program runs itself on a loopback UDP socket, named with
+// `server:`.
+use std::net
+
+fn name_bytes(name: String) -> Vec<u8> {
+    let mut out: Vec<u8> = #[]
+    for label in name.split(".") {
+        out.push(label.byte_len() as% u8)
+        out.extend(label.bytes())
+    }
+    out.push(0)
+    out
+}
+
+fn query_name(query: Vec<u8>) -> String {
+    let mut labels: Vec<String> = #[]
+    let mut at = 12
+    while query[at] != 0 {
+        let len = query[at] as i64
+        let mut label = ""
+        for i in 0..len {
+            label.push(query[at + 1 + i] as char)
+        }
+        labels.push(label)
+        at += 1 + len
+    }
+    labels.join(".")
+}
+
+fn u16_bytes(n: i64) -> Vec<u8> {
+    #[(n / 256) as% u8, (n % 256) as% u8]
+}
+
+fn record(kind: i64, data: Vec<u8>) -> Vec<u8> {
+    let mut out: Vec<u8> = #[192, 12]
+    out.extend(u16_bytes(kind))
+    out.extend(#[0, 1, 0, 0, 0, 60])
+    out.extend(u16_bytes(data.len()))
+    out.extend(data)
+    out
+}
+
+fn answers(name: String, kind: i64) -> Option<Vec<Vec<u8>>> {
+    let mut out: Vec<Vec<u8>> = #[]
+    if name == "example.test" && kind == 15 {
+        let mut backup = u16_bytes(20)
+        backup.extend(name_bytes("backup.example.test"))
+        out.push(record(15, backup))
+        let mut primary = u16_bytes(10)
+        primary.extend(name_bytes("mail.example.test"))
+        out.push(record(15, primary))
+    } else if name == "example.test" && kind == 16 {
+        let mut text: Vec<u8> = #[6]
+        text.extend("v=spf1".bytes())
+        text.push(5)
+        text.extend(" -all".bytes())
+        out.push(record(16, text))
+    } else if name == "_svc._tcp.example.test" && kind == 33 {
+        let mut srv = u16_bytes(10)
+        srv.extend(u16_bytes(5))
+        srv.extend(u16_bytes(8443))
+        srv.extend(name_bytes("node.example.test"))
+        out.push(record(33, srv))
+    } else if name == "www.example.test" && kind == 5 {
+        out.push(record(5, name_bytes("example.test")))
+    } else if name == "1.2.0.192.in-addr.arpa" && kind == 12 {
+        out.push(record(12, name_bytes("host.example.test")))
+    } else {
+        return None
+    }
+    Some(out)
+}
+
+fn reply(query: Vec<u8>) -> Vec<u8> {
+    let n = query.len()
+    let kind = (query[n - 4] as i64) * 256 + (query[n - 3] as i64)
+    let found = answers(query_name(query), kind)
+    let mut out: Vec<u8> = #[query[0], query[1], 129]
+    let records = match found {
+        Some(records) => {
+            out.push(128)
+            records
+        }
+        None => {
+            out.push(131)
+            #[]
+        }
+    }
+    out.extend(#[0, 1])
+    out.extend(u16_bytes(records.len()))
+    out.extend(#[0, 0, 0, 0])
+    for i in 12..n {
+        out.push(query[i])
+    }
+    for r in records {
+        out.extend(r)
+    }
+    out
+}
+
+fn serve(socket: net::UdpSocket, count: i64) {
+    for _ in 0..count {
+        let query, from = socket.recv_from(512).unwrap()
+        socket.send_to(reply(query), from).unwrap()
+    }
+}
+
+fn main() {
+    let socket = net::UdpSocket::bind("127.0.0.1:0").unwrap()
+    let server = Some(socket.local_addr().unwrap())
+    let worker = spawn(|| serve(socket, 6))
+    for mx in net::lookup_mx("example.test", server: server).unwrap() {
+        println(f"mx {mx.preference} {mx.host}")
+    }
+    println(f"txt {net::lookup_txt("example.test", server: server).unwrap()}")
+    for srv in net::lookup_srv("_svc._tcp.example.test", server: server).unwrap() {
+        println(f"srv {srv.target}:{srv.port} priority {srv.priority} weight {srv.weight}")
+    }
+    println(f"cname {net::lookup_cname("www.example.test", server: server).unwrap()}")
+    println(f"ptr {net::lookup_addr("192.0.2.1", server: server).unwrap()}")
+    match net::lookup_mx("missing.example.test", server: server) {
+        Ok(records) => println(f"missing answered {records.len()}")
+        Err(e) => println(f"missing: {e}")
+    }
+    println(f"not an address: {net::lookup_addr("nope", server: server).is_err()}")
+    let _ = worker.join()
+}

@@ -391,3 +391,59 @@ fn captures_of_mixed_types_each_keep_their_own() {
     ];
     assert_eq!(tys, expected);
 }
+
+/// The `Debug` text of the function named `name`.
+fn fn_text(program: &gossamer_hir::HirProgram, name: &str) -> String {
+    let item = program
+        .items
+        .iter()
+        .find(|item| matches!(&item.kind, HirItemKind::Fn(f) if f.name.name == name))
+        .unwrap_or_else(|| panic!("no fn {name}"));
+    format!("{:?}", item.kind)
+}
+
+#[test]
+fn a_drop_type_field_is_read_and_written_through_its_own_accessors() {
+    let (program, _tcx) = lower(
+        "struct Sink {\n    seen: Vec<i64>\n    count: i64\n}\n\n\
+         impl Drop for Sink {\n    fn drop(&mut self) {}\n}\n\n\
+         fn count_of(s: Sink) -> i64 { s.count }\n\n\
+         fn record(s: Sink) { let mut t = s\n t.seen.push(1) }\n\n\
+         fn main() {\n    let s = Sink { seen: #[], count: 0 }\n    record(s)\n    println(count_of(s))\n}\n",
+    );
+    let read = fn_text(&program, "count_of");
+    assert!(
+        read.contains("\"__get_1\""),
+        "the read calls its field's getter: {read}"
+    );
+    assert!(
+        !read.contains("\"__get_0\""),
+        "the read touches no other field: {read}"
+    );
+    let write = fn_text(&program, "record");
+    assert!(
+        write.contains("\"__lend_0\""),
+        "the write edits its field in place: {write}"
+    );
+    assert!(
+        !write.contains("\"__get_1\"")
+            && !write.contains("\"__set_1\"")
+            && !write.contains("\"__lend_1\""),
+        "the write touches no other field: {write}"
+    );
+}
+
+#[test]
+fn a_drop_type_write_that_leaves_early_reads_and_replaces_its_field() {
+    let (program, _tcx) = lower(
+        "struct Tally {\n    hits: i64\n}\n\n\
+         impl Drop for Tally {\n    fn drop(&mut self) {}\n}\n\n\
+         fn bump(t: Tally, by: Option<i64>) -> Option<i64> {\n    let mut u = t\n    u.hits += by?\n    Some(u.hits)\n}\n\n\
+         fn main() {\n    let t = Tally { hits: 0 }\n    println(bump(t, Some(2)).unwrap_or(0))\n}\n",
+    );
+    let write = fn_text(&program, "bump");
+    assert!(
+        write.contains("\"__get_0\"") && write.contains("\"__set_0\""),
+        "a `?` inside the write cannot run inside an edit closure: {write}"
+    );
+}

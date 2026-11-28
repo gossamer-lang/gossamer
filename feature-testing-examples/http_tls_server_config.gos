@@ -1,0 +1,130 @@
+// `tls::ServerConfig` on every tier: a server that requires a client
+// certificate (mutual TLS), one that serves a second certificate by SNI name,
+// and a reload that reaches the next handshake without a restart. Each client
+// names the certificate it was served by comparing the peer's certificate
+// with the known ones. The addresses come from the test harness, with fixed
+// ones when the program runs alone.
+use std::{env, http, net, process, time, tls}
+use std::encoding::pem
+
+const CA: String = "-----BEGIN CERTIFICATE-----\nMIIBpDCCAUmgAwIBAgIUHyduEeFdF38I0DxCOXdYOi/Qi2kwCgYIKoZIzj0EAwIw\nHjEcMBoGA1UEAwwTR29zc2FtZXIgRml4dHVyZSBDQTAgFw0yNjExMjYxMDMwMjFa\nGA8yMTI2MTEwMjEwMzAyMVowHjEcMBoGA1UEAwwTR29zc2FtZXIgRml4dHVyZSBD\nQTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABGr+5syS/ELdZodU91XvWp0H11d6\nWbs4jKSMVXiXkbd+oEBYfY8y2hONo9NsYB2H2sln+bHwC1v/6r6/6w+u0vOjYzBh\nMB0GA1UdDgQWBBQMHKXKgVJSNnaV1+tTthpk2mX0GDAfBgNVHSMEGDAWgBQMHKXK\ngVJSNnaV1+tTthpk2mX0GDAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIB\nBjAKBggqhkjOPQQDAgNJADBGAiEAp1mq/UJpjMAMWDhGfWZFnavMiQNKzaB28cZS\n/KfMygICIQCdl0q/Z0TZt9HyyWz1+kRVmPqxryXqX2GpXJOeyWUntg==\n-----END CERTIFICATE-----\n"
+
+const CERT_A: String = "-----BEGIN CERTIFICATE-----\nMIIBwTCCAWigAwIBAgIUMSPLkEbusH5msEE383mgUOPQkJ8wCgYIKoZIzj0EAwIw\nHjEcMBoGA1UEAwwTR29zc2FtZXIgRml4dHVyZSBDQTAgFw0yNjExMjYxMDMwMjFa\nGA8yMTI2MTEwMjEwMzAyMVowFjEUMBIGA1UEAwwLbG9jYWxob3N0IEEwWTATBgcq\nhkjOPQIBBggqhkjOPQMBBwNCAARoXmr800Li9p5AzXgVuRI1XdxO/VCO7XG0p2Kc\n7HSaToXh2E80PL3NXB7DhzL7KvfmARCwECKlPMLW7eh7D8YQo4GJMIGGMAkGA1Ud\nEwQCMAAwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMBMBQGA1Ud\nEQQNMAuCCWxvY2FsaG9zdDAdBgNVHQ4EFgQUrv6Buwc5gwum8z2HxZxww4vPbuYw\nHwYDVR0jBBgwFoAUDBylyoFSUjZ2ldfrU7YaZNpl9BgwCgYIKoZIzj0EAwIDRwAw\nRAIgRS0UJeRFQIK4DBweqMHxHyvQVeumZXJkaYtqcf7/z4UCIHTfnr0wGBxW7Di2\nNmLovy2enj+vqW73OssIh01Fv8JD\n-----END CERTIFICATE-----\n"
+
+const KEY_A: String = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgYplo/+9kfctAM4fF\nw2yuBUZQmvONXujEkmi7Sz9XyYyhRANCAARoXmr800Li9p5AzXgVuRI1XdxO/VCO\n7XG0p2Kc7HSaToXh2E80PL3NXB7DhzL7KvfmARCwECKlPMLW7eh7D8YQ\n-----END PRIVATE KEY-----\n"
+
+const CERT_B: String = "-----BEGIN CERTIFICATE-----\nMIIBwDCCAWWgAwIBAgIUMSPLkEbusH5msEE383mgUOPQkKAwCgYIKoZIzj0EAwIw\nHjEcMBoGA1UEAwwTR29zc2FtZXIgRml4dHVyZSBDQTAgFw0yNjExMjYxMDMwMjFa\nGA8yMTI2MTEwMjEwMzAyMVowEjEQMA4GA1UEAwwHb3RoZXIgQjBZMBMGByqGSM49\nAgEGCCqGSM49AwEHA0IABH+6ixnAWg2B+zjOIOZ/PpLPr5WzldTnoW/Ir0qOv4Hk\nSaffxz92XqvgyHbqziMH/jRazNW9yIoycYFMZPJ6zoSjgYowgYcwCQYDVR0TBAIw\nADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAwwCgYIKwYBBQUHAwEwFQYDVR0RBA4w\nDIIKb3RoZXIudGVzdDAdBgNVHQ4EFgQUVIgTe71UmWAU2BoT009X8UE29GwwHwYD\nVR0jBBgwFoAUDBylyoFSUjZ2ldfrU7YaZNpl9BgwCgYIKoZIzj0EAwIDSQAwRgIh\nAO/5hEgH7gkhFBfi4JV83ByCMZ+dHdkz7bAETqFJ4KUZAiEAo0/VjpHe7oitHBBR\nInXNe9JYEQVhCr+J59dBP19UMtY=\n-----END CERTIFICATE-----\n"
+
+const KEY_B: String = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg4x4FfPjEJ5UkXNiq\nqhKEjuf+maME9/d5YldQAfodOxKhRANCAAR/uosZwFoNgfs4ziDmfz6Sz6+Vs5XU\n56FvyK9Kjr+B5Emn38c/dl6r4Mh26s4jB/40WszVvciKMnGBTGTyes6E\n-----END PRIVATE KEY-----\n"
+
+const CERT_C: String = "-----BEGIN CERTIFICATE-----\nMIIBwTCCAWigAwIBAgIUMSPLkEbusH5msEE383mgUOPQkKEwCgYIKoZIzj0EAwIw\nHjEcMBoGA1UEAwwTR29zc2FtZXIgRml4dHVyZSBDQTAgFw0yNjExMjYxMDMwMjFa\nGA8yMTI2MTEwMjEwMzAyMVowFjEUMBIGA1UEAwwLbG9jYWxob3N0IEMwWTATBgcq\nhkjOPQIBBggqhkjOPQMBBwNCAAScR1B0gWJWjGF3fjcr3Nc+fNrtoAOeNwUhZdMD\nwywcUmQC0hFUiCt+6vsxlnKCuPNvjpXlcoMtiIb/B3Owr+dqo4GJMIGGMAkGA1Ud\nEwQCMAAwDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMBMBQGA1Ud\nEQQNMAuCCWxvY2FsaG9zdDAdBgNVHQ4EFgQUbR1frRiPPoFtPwfzWy5rFxr/i5gw\nHwYDVR0jBBgwFoAUDBylyoFSUjZ2ldfrU7YaZNpl9BgwCgYIKoZIzj0EAwIDRwAw\nRAIgSrq6DbFpkKJsxqozMzn42XiHA5sU5OPEAe1sasRncSYCIBn/WwLcyN/WLTTZ\nD3hElt54JjkvxGmY3lD+A+nXebZ+\n-----END CERTIFICATE-----\n"
+
+const KEY_C: String = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgyMlhkcfws3fryJxv\nEe3Ruc1mOb7+d1B+D0Xs6cli1v6hRANCAAScR1B0gWJWjGF3fjcr3Nc+fNrtoAOe\nNwUhZdMDwywcUmQC0hFUiCt+6vsxlnKCuPNvjpXlcoMtiIb/B3Owr+dq\n-----END PRIVATE KEY-----\n"
+
+const CLIENT_CERT: String = "-----BEGIN CERTIFICATE-----\nMIIBrTCCAVOgAwIBAgIUMSPLkEbusH5msEE383mgUOPQkKIwCgYIKoZIzj0EAwIw\nHjEcMBoGA1UEAwwTR29zc2FtZXIgRml4dHVyZSBDQTAgFw0yNjExMjYxMDMwMjFa\nGA8yMTI2MTEwMjEwMzAyMVowGTEXMBUGA1UEAwwOZml4dHVyZSBjbGllbnQwWTAT\nBgcqhkjOPQIBBggqhkjOPQMBBwNCAATTxMkQ7V3ud1by1rB+QuePv7nZRNSwPDUT\n58o2nm2R/AO54gs4dbmlyMr2xzrXxcCarL4tr3JBdsIfAOnF2SSlo3IwcDAJBgNV\nHRMEAjAAMA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDAjAdBgNV\nHQ4EFgQUY1T3jHpzeCECEoCcNSE5mHOUQ+8wHwYDVR0jBBgwFoAUDBylyoFSUjZ2\nldfrU7YaZNpl9BgwCgYIKoZIzj0EAwIDSAAwRQIgc10DKuVJ2TRLc3hSYMMFkeIT\nwgOfSXvDZmodBoxxIYQCIQC3KGljPX6Xb875jwEgGyrHxsjqnjAE1vNPp8b2ItYq\nVA==\n-----END CERTIFICATE-----\n"
+
+const CLIENT_KEY: String = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgCVTy2BCXFGei1NWy\nKGBG6PAxwKrGPnqDIK6FG6Xz64mhRANCAATTxMkQ7V3ud1by1rB+QuePv7nZRNSw\nPDUT58o2nm2R/AO54gs4dbmlyMr2xzrXxcCarL4tr3JBdsIfAOnF2SSl\n-----END PRIVATE KEY-----\n"
+
+const REQUEST: String = "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+
+struct App { }
+
+impl http::Handler for App {
+    fn serve(&self, _r: http::Request) -> http::Response {
+        http::Response::text(200, "tls config ok")
+    }
+}
+
+fn address(index: i64, fallback: String) -> String {
+    let args = env::args()
+    if args.len() > index { args[index] } else { fallback }
+}
+
+fn await_ready(addr: String) {
+    let mut tries = 0
+    while tries < 400 {
+        if let Ok(s) = net::TcpStream::connect(addr) {
+            let _ = s.close()
+            return
+        }
+        time::sleep(25)
+        tries += 1
+    }
+}
+
+fn der(cert: String) -> Vec<u8> {
+    match pem::decode(cert) {
+        Ok(block) => block.bytes
+        Err(_) => #[]
+    }
+}
+
+fn served(tls: net::TcpStream) -> String {
+    let _ = tls.write(REQUEST.as_bytes())
+    match tls.read(1024) {
+        Ok(b) => {
+            if b.len() == 0 {
+                return "rejected"
+            }
+        }
+        Err(_) => return "rejected"
+    }
+    let peer = tls.peer_certificate()
+    if peer == der(CERT_A) {
+        "A"
+    } else if peer == der(CERT_B) {
+        "B"
+    } else if peer == der(CERT_C) {
+        "C"
+    } else {
+        "unknown"
+    }
+}
+
+fn without_identity(addr: String, host: String) -> String {
+    let stream = match net::TcpStream::connect(addr) {
+        Ok(s) => s
+        Err(_) => return "no connection"
+    }
+    match stream.start_tls_ca(host, CA) {
+        Ok(tls) => served(tls)
+        Err(_) => "rejected"
+    }
+}
+
+fn with_identity(addr: String) -> String {
+    let stream = match net::TcpStream::connect(addr) {
+        Ok(s) => s
+        Err(_) => return "no connection"
+    }
+    match stream.start_tls_identity("localhost", CA, CLIENT_CERT, CLIENT_KEY) {
+        Ok(tls) => served(tls)
+        Err(_) => "rejected"
+    }
+}
+
+fn main() {
+    let strict_addr = address(1, "127.0.0.1:23985")
+    let open_addr = address(2, "127.0.0.1:23972")
+    let strict = tls::ServerConfig::new(CERT_A, KEY_A, client_ca: Some(CA)).unwrap()
+    let open = tls::ServerConfig::new(CERT_A, KEY_A, client_ca: Some(CA), client_auth_optional: true).unwrap()
+    open.add_sni("other.test", CERT_B, KEY_B).unwrap()
+    println(f"bad key refused: {tls::ServerConfig::new(CERT_A, KEY_B).is_err()}")
+    spawn(|| {
+        let _ = http::serve_tls_config(strict_addr, strict, App { })
+    })
+    spawn(|| {
+        let _ = http::serve_tls_config(open_addr, open, App { })
+    })
+    await_ready(strict_addr)
+    await_ready(open_addr)
+    println(f"mtls without a client certificate: {without_identity(strict_addr, "localhost")}")
+    println(f"mtls with a client certificate: {with_identity(strict_addr)}")
+    println(f"optional auth, no certificate: {without_identity(open_addr, "localhost")}")
+    println(f"sni other.test: {without_identity(open_addr, "other.test")}")
+    open.reload(CERT_C, KEY_C).unwrap()
+    println(f"after reload: {without_identity(open_addr, "localhost")}")
+    println(f"sni kept after reload: {without_identity(open_addr, "other.test")}")
+    println(f"bad reload keeps the old certificate: {open.reload(CERT_A, KEY_C).is_err()} {without_identity(open_addr, "localhost")}")
+    process::exit(0)
+}

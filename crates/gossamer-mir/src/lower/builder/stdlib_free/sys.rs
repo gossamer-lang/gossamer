@@ -105,13 +105,13 @@ impl<'a> Builder<'a> {
                 "gos_rt_os_remove_dir_all_result",
                 self.result_unit_error_adt_ty(),
             ),
-            "fs::temp_file" => {
+            "__gos_fs_temp_file_raw" => {
                 let file = self.sync_handle_ty(44);
                 let path = self.tcx.string_ty();
                 let pair = self
                     .tcx
                     .intern(gossamer_types::TyKind::Tuple(vec![file, path]));
-                ("gos_rt_fs_temp_file", self.result_of(pair))
+                ("gos_rt_fs_temp_file_raw", self.result_of(pair))
             }
             _ => return None,
         })
@@ -137,9 +137,18 @@ impl<'a> Builder<'a> {
             // 0.10.0 - os/fs copy + canonicalize, crypto::subtle.
             "fs::copy" => ("gos_rt_fs_copy", self.result_i64_error_adt_ty()),
             "fs::canonicalize" => ("gos_rt_fs_canonicalize", self.result_string_error_adt_ty()),
+            "fs::read_link" => ("gos_rt_fs_read_link", self.result_string_error_adt_ty()),
+            "fs::copy_dir" => ("gos_rt_fs_copy_dir", self.result_i64_error_adt_ty()),
+            "fs::symlink" => ("gos_rt_fs_symlink", self.result_unit_error_adt_ty()),
+            "fs::hard_link" => ("gos_rt_fs_hard_link", self.result_unit_error_adt_ty()),
+            "fs::move" => ("gos_rt_fs_move", self.result_unit_error_adt_ty()),
             // `os::arch()` / `os::family()` - target introspection.
             "os::arch" => ("gos_rt_os_arch", self.tcx.string_ty()),
             "os::family" => ("gos_rt_os_family", self.tcx.string_ty()),
+            "os::hostname" => {
+                let s = self.tcx.string_ty();
+                ("gos_rt_os_hostname", self.result_of(s))
+            }
             // `fs::rename(from, to)` -> Result<(), Error>.
             "fs::rename" => {
                 let unit_ty = self.tcx.unit();
@@ -458,36 +467,31 @@ impl<'a> Builder<'a> {
         _args: &[HirExpr],
     ) -> Option<(&'static str, gossamer_types::Ty)> {
         Some(match joined {
-            // `exec::spawn(prog, args) -> Result<i64, errors::Error>`.
+            // `process::spawn(prog, args) -> Result<i64, errors::Error>`.
             // Non-blocking process launch - returns the child PID
             // so callers (daemon launchers, long-running tools)
             // don't block the calling goroutine. Pin the Ok
             // payload to `i64` and the Err to `errors::Error` so
             // downstream `?` / `match` shapes find the right field
             // layout.
-            "exec::spawn" | "os::exec::spawn" | "process::spawn" => {
-                ("gos_rt_exec_spawn", self.result_i64_error_ty())
-            }
+            "process::spawn" => ("gos_rt_exec_spawn", self.result_i64_error_ty()),
             // `process::run_inherit(prog, args) -> Result<i64, errors::Error>`:
             // the child's exit code, run on this process's own stdio.
             "process::run_inherit" => ("gos_rt_exec_run_inherit", self.result_i64_error_ty()),
-            // `exec::kill(pid) -> bool` - best-effort SIGTERM.
-            "exec::kill" | "os::exec::kill" | "process::kill" => {
-                ("gos_rt_exec_kill", self.tcx.bool_ty())
-            }
-            // `exec::signal(pid, signum) -> bool`.
-            "exec::signal" | "os::exec::signal" | "process::signal" => {
-                ("gos_rt_exec_signal", self.tcx.bool_ty())
-            }
-            // `exec::kill_group(pid) -> bool` - kills the entire
+            // `process::exec(prog, args) -> Result<(), errors::Error>`: answers
+            // only when the program cannot be started.
+            "process::exec" => ("gos_rt_exec_replace", self.result_unit_error_adt_ty()),
+            // `process::kill(pid) -> bool` - best-effort SIGTERM.
+            "process::kill" => ("gos_rt_exec_kill", self.tcx.bool_ty()),
+            // `process::signal(pid, signum) -> bool`.
+            "process::signal" => ("gos_rt_exec_signal", self.tcx.bool_ty()),
+            // `process::kill_group(pid) -> bool` - kills the entire
             // process group on Unix; best-effort on Windows.
-            "exec::kill_group" | "os::exec::kill_group" | "process::kill_group" => {
-                ("gos_rt_exec_kill_group", self.tcx.bool_ty())
-            }
-            // `exec::wait_timeout(pid, ms) -> i64`. Returns the
+            "process::kill_group" => ("gos_rt_exec_kill_group", self.tcx.bool_ty()),
+            // `process::wait_timeout(pid, ms) -> i64`. Returns the
             // child's exit code on success, -1 on timeout, -2 on
             // error (unknown pid, permission denied).
-            "exec::wait_timeout" | "os::exec::wait_timeout" | "process::wait_timeout" => (
+            "process::wait_timeout" => (
                 "gos_rt_exec_wait_timeout",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),
             ),

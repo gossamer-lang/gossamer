@@ -69,6 +69,7 @@ unsafe fn desc_span_walk(tags: *const u8, cursor: &mut usize) -> usize {
     let tag = unsafe { *tags.add(*cursor) };
     *cursor += 1;
     match tag {
+        gossamer_abi::TUPLE_TAG_I128 | gossamer_abi::TUPLE_TAG_U128 => 2,
         gossamer_abi::TUPLE_TAG_NESTED => {
             // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
             // caller), and the read stays inside the entry at `cursor`.
@@ -337,7 +338,9 @@ pub(crate) unsafe fn flat_enum_layout(tags: *const u8, start: usize) -> FlatEnum
 const fn desc_tag_is_flat(tag: u8) -> bool {
     !matches!(
         tag,
-        gossamer_abi::TUPLE_TAG_NESTED
+        gossamer_abi::TUPLE_TAG_I128
+            | gossamer_abi::TUPLE_TAG_U128
+            | gossamer_abi::TUPLE_TAG_NESTED
             | gossamer_abi::DESC_ARRAY
             | gossamer_abi::DESC_OPTION
             | gossamer_abi::DESC_RESULT
@@ -355,6 +358,22 @@ const fn desc_tag_is_flat(tag: u8) -> bool {
 ///
 /// # Safety
 /// `a` and `b` address one slot each, holding a value of the tag's kind.
+/// The 128-bit integer the two slots at `at` hold, low word first, as a
+/// [`gossamer_abi::TUPLE_TAG_I128`] leaf lays them.
+///
+/// # Safety
+/// `at` addresses two readable words.
+pub(crate) unsafe fn read_wide_slots(at: *const u8) -> u128 {
+    // SAFETY: the caller passes two readable words at `at`.
+    let (lo, hi) = unsafe {
+        (
+            at.cast::<u64>().read_unaligned(),
+            at.cast::<u64>().add(1).read_unaligned(),
+        )
+    };
+    (u128::from(hi) << 64) | u128::from(lo)
+}
+
 pub(crate) unsafe fn compare_flat(tag: u8, a: *const u8, b: *const u8) -> i64 {
     // SAFETY: this `unsafe fn`'s caller passes `a` and `b` one word each, of the kind `tag`
     // names.
@@ -366,6 +385,18 @@ pub(crate) unsafe fn compare_flat(tag: u8, a: *const u8, b: *const u8) -> i64 {
 /// # Safety
 /// As for [`compare_flat`].
 pub(crate) unsafe fn compare_flat_in(mode: CmpMode, tag: u8, a: *const u8, b: *const u8) -> i64 {
+    if matches!(
+        tag,
+        gossamer_abi::TUPLE_TAG_I128 | gossamer_abi::TUPLE_TAG_U128
+    ) {
+        // SAFETY: a 128-bit leaf spans two slots at each of `a` and `b` (caller contract).
+        let (wa, wb) = unsafe { (read_wide_slots(a), read_wide_slots(b)) };
+        return ord_code(if tag == gossamer_abi::TUPLE_TAG_I128 {
+            (wa as i128).cmp(&(wb as i128))
+        } else {
+            wa.cmp(&wb)
+        });
+    }
     // SAFETY: this `unsafe fn`'s caller passes `a` addressing one word.
     let wa = unsafe { (a as *const i64).read_unaligned() };
     // SAFETY: this `unsafe fn`'s caller passes `b` addressing one word.
@@ -923,6 +954,14 @@ pub(crate) unsafe fn compare_desc_in(
             // nodes of it.
             unsafe { compare_desc_in(mode, a, b, tags, &mut c, CmpStorage::ByWord, self_desc) }
         }
+        gossamer_abi::TUPLE_TAG_I128 | gossamer_abi::TUPLE_TAG_U128
+            if storage == CmpStorage::ByWord =>
+        {
+            *cursor += 1;
+            // SAFETY: in by-word storage each value is one word, null or the
+            // address of a 128-bit value's box.
+            unsafe { compare_boxed_wide(mode, tag, a, b) }
+        }
         _ => {
             *cursor += 1;
             // SAFETY: this `unsafe fn`'s caller passes `a` and `b` values laid out as the entry
@@ -930,6 +969,23 @@ pub(crate) unsafe fn compare_desc_in(
             unsafe { compare_flat_in(mode, tag, a, b) }
         }
     }
+}
+
+/// Compares two boxed 128-bit values whose words `a` and `b` address their
+/// boxes; a null word reads as zero.
+///
+/// # Safety
+/// `a` and `b` each address one word that is null or the address of a
+/// 128-bit value's two slots.
+unsafe fn compare_boxed_wide(mode: CmpMode, tag: u8, a: *const u8, b: *const u8) -> i64 {
+    static ZERO: [i64; 2] = [0, 0];
+    // SAFETY: each is one word addressing its box (this `unsafe fn`'s contract).
+    let (pa, pb) = unsafe { (word_ptr::<u8>(a), word_ptr::<u8>(b)) };
+    let zero = ZERO.as_ptr().cast::<u8>();
+    let pa = if pa.is_null() { zero } else { pa };
+    let pb = if pb.is_null() { zero } else { pb };
+    // SAFETY: each address holds a 128-bit value's two slots.
+    unsafe { compare_flat_in(mode, tag, pa, pb) }
 }
 
 /// The addresses a multi-slot value's own slots start at.
@@ -1213,7 +1269,14 @@ pub(crate) unsafe fn plan_cmp<'a>(tags: *const u8) -> CmpPlan<'a> {
     if tag == DESC_TAG_INT {
         return CmpPlan::IntWord;
     }
-    if desc_tag_is_flat(tag) {
+    // A 128-bit leaf spans two slots, so it orders alone but never inside the
+    // one-slot-per-tag fast walks.
+    if desc_tag_is_flat(tag)
+        || matches!(
+            tag,
+            gossamer_abi::TUPLE_TAG_I128 | gossamer_abi::TUPLE_TAG_U128
+        )
+    {
         return CmpPlan::Flat(tag);
     }
     if tag == gossamer_abi::TUPLE_TAG_NESTED {

@@ -1,18 +1,34 @@
 // `std::image`: a filled image reads back its fill, a written pixel reads
-// back what was written, writes outside the image are refused, and a PNG
-// round trip through base64 keeps every pixel.
+// back what was written, a read outside the image is `None`, sizes that are
+// not positive or that pass the pixel limit are refused, and a PNG round trip
+// keeps every pixel. An image is a value: a copy keeps its own pixels.
 
 use std::image
+use std::image::{Image, Rgba}
 
 fn main() {
-    let img = image::filled(4, 3, 0x11223344)
-    println("size: {}x{}", image::width(img), image::height(img))
-    println("fill: {:08x}", image::pixel(img, 3, 2))
-    println("set: {}", image::set_pixel(img, 1, 1, 0xff0000ff))
-    println("read: {:08x}", image::pixel(img, 1, 1))
-    println("outside: {}", image::set_pixel(img, 4, 0, 0))
-    let back = image::decode_base64(image::encode_png_base64(img))
-    println("decoded: {}x{}", image::width(back), image::height(back))
-    println("same pixel: {}", image::pixel(back, 1, 1) == image::pixel(img, 1, 1))
-    println("same fill: {}", image::pixel(back, 0, 0) == image::pixel(img, 0, 0))
+    let mut img = Image::filled(4, 3, Rgba { r: 0x11, g: 0x22, b: 0x33, a: 0x44 }).unwrap()
+    println(f"size: {img.width()}x{img.height()}, bytes: {img.pixels().len()}")
+    println(f"fill: {img.pixel(3, 2):?}")
+    let before = img
+    img.set_pixel(1, 1, Rgba { r: 255, g: 0, b: 0, a: 255 })
+    println(f"read: {img.pixel(1, 1):?}, the copy keeps: {before.pixel(1, 1):?}")
+    println(f"outside: {img.pixel(4, 0):?} {img.pixel(-1, 0):?}")
+    let back = image::decode(img.encode_png().unwrap()).unwrap()
+    println(f"decoded: {back.width()}x{back.height()}, same pixels: {back.pixels() == img.pixels()}")
+    println(f"from bytes: {Image::from_rgba(1, 1, #[1u8, 2, 3, 4]).unwrap().pixel(0, 0):?}")
+    match Image::from_rgba(2, 2, #[1u8, 2, 3]) {
+        Ok(_) => println("short bytes accepted")
+        Err(e) => println(f"short bytes: {e}")
+    }
+    match Image::new(0, 5) {
+        Ok(_) => println("empty accepted")
+        Err(e) => println(f"empty: {e}")
+    }
+    image::set_max_pixels(100).unwrap()
+    match Image::new(20, 20) {
+        Ok(_) => println("over the limit accepted")
+        Err(e) => println(f"over the limit: {e}")
+    }
+    println(f"a bad limit: {image::set_max_pixels(0).is_err()}")
 }

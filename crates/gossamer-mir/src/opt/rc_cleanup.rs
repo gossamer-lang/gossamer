@@ -1235,6 +1235,21 @@ impl CalleeParams {
     }
 }
 
+impl CalleeParams {
+    /// Whether `callee` is a user function whose parameter `index` is `&mut`.
+    /// A generic callee is looked up by its definition: the reference around
+    /// a parameter does not depend on the substitution.
+    pub(crate) fn takes_mut(&self, callee: &Operand, index: usize) -> bool {
+        let name = match callee {
+            Operand::Const(ConstValue::Str(name)) => Some(name.as_str()),
+            Operand::FnRef { def, .. } => self.def_to_name.get(&def.local).map(String::as_str),
+            _ => None,
+        };
+        name.and_then(|name| self.mut_params.get(name)?.get(index).copied())
+            .unwrap_or(false)
+    }
+}
+
 /// `true` when a call passing `place` at argument `index` to `callee` could
 /// write the value the place reaches. A user function is handed by-value
 /// arguments as borrows or as clones and can write only through a reference,

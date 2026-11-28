@@ -358,6 +358,8 @@ pub(super) enum ConcatKind {
     /// `gos_rt_print_u64` / `gos_rt_concat_u64` so values
     /// `>= 2^63` print without a leading `-`.
     Uint,
+    /// `i128` (`false`) or `u128` (`true`), handed over as two words.
+    Wide(bool),
     Float,
     /// An `f32` held at double width, rendered with the digits of its
     /// single-precision value; `true` for the `{:?}` spelling.
@@ -652,6 +654,9 @@ fn const_llvm_ty(cv: &ConstValue) -> &'static str {
     match cv {
         ConstValue::Unit => "void",
         ConstValue::Bool(_) => "i1",
+        // A constant outside both the `i64` and the `u64` range is a 128-bit
+        // value; every narrower one is a word.
+        ConstValue::Int(n) if i64::try_from(*n).is_err() && u64::try_from(*n).is_err() => "i128",
         ConstValue::Int(_) => "i64",
         ConstValue::Float(_) => "double",
         ConstValue::Char(_) => "i32",

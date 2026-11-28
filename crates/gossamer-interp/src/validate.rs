@@ -461,9 +461,16 @@ pub(crate) fn validate_chunk(chunk: &FnChunk) -> Result<(), ValidationError> {
                 check_v(op_idx, rhs)?;
                 check_cache(op_idx, cache_idx, arith_cache_count, CacheKind::Arithmetic)?;
             }
-            Op::Neg { dst, operand } | Op::Not { dst, operand } => {
+            Op::Neg { dst, operand }
+            | Op::Not { dst, operand }
+            | Op::WideUnary { dst, operand, .. } => {
                 check_v(op_idx, dst)?;
                 check_v(op_idx, operand)?;
+            }
+            Op::WideArith { dst, lhs, rhs, .. } => {
+                check_v(op_idx, dst)?;
+                check_v(op_idx, lhs)?;
+                check_v(op_idx, rhs)?;
             }
             Op::Eq { dst, lhs, rhs }
             | Op::Ne { dst, lhs, rhs }
@@ -767,6 +774,28 @@ pub(crate) fn validate_chunk(chunk: &FnChunk) -> Result<(), ValidationError> {
             Op::CaptureCellSet { cell, src } => {
                 check_v(op_idx, cell)?;
                 check_v(op_idx, src)?;
+            }
+            Op::CaptureCellIndexSet {
+                cell,
+                home,
+                index,
+                value,
+            } => {
+                check_v(op_idx, cell)?;
+                check_v(op_idx, home)?;
+                check_v(op_idx, index)?;
+                check_v(op_idx, value)?;
+            }
+            Op::CaptureCellFieldSet {
+                cell,
+                home,
+                name_idx,
+                value,
+            } => {
+                check_v(op_idx, cell)?;
+                check_v(op_idx, home)?;
+                check_v(op_idx, value)?;
+                check_pool(op_idx, u32::from(name_idx), consts_len, PoolKind::Consts)?;
             }
             Op::VariantFieldSet { receiver, src, .. } => {
                 check_v(op_idx, receiver)?;
@@ -1166,6 +1195,18 @@ pub(crate) fn validate_chunk(chunk: &FnChunk) -> Result<(), ValidationError> {
                 rhs_i,
             }
             | Op::CheckedMulI64 {
+                dst_i,
+                lhs_i,
+                rhs_i,
+                ..
+            }
+            | Op::CheckedDivI64 {
+                dst_i,
+                lhs_i,
+                rhs_i,
+                ..
+            }
+            | Op::CheckedRemI64 {
                 dst_i,
                 lhs_i,
                 rhs_i,
@@ -1916,6 +1957,8 @@ pub(crate) fn register_effects(
         | Op::RemInt { dst, .. }
         | Op::Neg { dst, .. }
         | Op::Not { dst, .. }
+        | Op::WideArith { dst, .. }
+        | Op::WideUnary { dst, .. }
         | Op::Deref { dst, .. }
         | Op::Move { dst, .. }
         | Op::CloneMapLike { dst, .. }
@@ -2014,6 +2057,8 @@ pub(crate) fn register_effects(
         | Op::CheckedSubI64 { dst_i, .. }
         | Op::MulI64 { dst_i, .. }
         | Op::CheckedMulI64 { dst_i, .. }
+        | Op::CheckedDivI64 { dst_i, .. }
+        | Op::CheckedRemI64 { dst_i, .. }
         | Op::DivI64 { dst_i, .. }
         | Op::RemI64 { dst_i, .. }
         | Op::DivU64 { dst_i, .. }
@@ -2038,6 +2083,7 @@ pub(crate) fn register_effects(
         | Op::Deref { src, .. }
         | Op::Neg { operand: src, .. }
         | Op::Not { operand: src, .. }
+        | Op::WideUnary { operand: src, .. }
         | Op::CastScalar { src, .. }
         | Op::CellNew { src, .. }
         | Op::CellNewMove { src, .. }
@@ -2057,6 +2103,7 @@ pub(crate) fn register_effects(
         | Op::MulInt { lhs, rhs, .. }
         | Op::DivInt { lhs, rhs, .. }
         | Op::RemInt { lhs, rhs, .. }
+        | Op::WideArith { lhs, rhs, .. }
         | Op::Eq { lhs, rhs, .. }
         | Op::Ne { lhs, rhs, .. }
         | Op::Lt { lhs, rhs, .. }
@@ -2133,6 +2180,21 @@ pub(crate) fn register_effects(
         | Op::CaptureCellGet { cell, .. }
         | Op::CaptureCellTake { cell, .. } => effect.v_reads.push(cell),
         Op::CaptureCellSet { cell, src } => effect.v_reads.extend([cell, src]),
+        Op::CaptureCellIndexSet {
+            cell,
+            home,
+            index,
+            value,
+        } => {
+            effect.v_reads.extend([cell, index, value]);
+            effect.v_writes.push(home);
+        }
+        Op::CaptureCellFieldSet {
+            cell, home, value, ..
+        } => {
+            effect.v_reads.extend([cell, value]);
+            effect.v_writes.push(home);
+        }
         Op::IndexGet { base, index, .. }
         | Op::IndexGetChecked { base, index, .. }
         | Op::IndexGetConsume { base, index, .. }
@@ -2357,6 +2419,8 @@ pub(crate) fn register_effects(
         | Op::CheckedSubI64 { lhs_i, rhs_i, .. }
         | Op::MulI64 { lhs_i, rhs_i, .. }
         | Op::CheckedMulI64 { lhs_i, rhs_i, .. }
+        | Op::CheckedDivI64 { lhs_i, rhs_i, .. }
+        | Op::CheckedRemI64 { lhs_i, rhs_i, .. }
         | Op::DivI64 { lhs_i, rhs_i, .. }
         | Op::RemI64 { lhs_i, rhs_i, .. }
         | Op::DivU64 { lhs_i, rhs_i, .. }
@@ -2499,6 +2563,23 @@ pub(crate) fn register_effects(
                 effect.v_reads.extend([*root, *value]);
                 effect.v_reads.extend(place_index_regs(path));
             }
+            WideOp::CapturePlace { dst, cell, .. } => {
+                effect.v_reads.push(*cell);
+                effect.v_writes.push(*dst);
+            }
+            WideOp::PlaceVecPush { root, path, value } => {
+                effect.v_reads.extend([*root, *value]);
+                effect.v_reads.extend(place_index_regs(path));
+            }
+            WideOp::PlaceVecSwap { root, path, a, b } => {
+                effect.v_reads.extend([*root, *a, *b]);
+                effect.v_reads.extend(place_index_regs(path));
+            }
+            WideOp::PlaceVecPop { dst, root, path } => {
+                effect.v_reads.push(*root);
+                effect.v_reads.extend(place_index_regs(path));
+                effect.v_writes.push(*dst);
+            }
             WideOp::PlaceVecResize {
                 root,
                 path,
@@ -2541,7 +2622,12 @@ fn validate_wide_op(
     let f_count = u32::from(chunk.float_count);
     match *wide {
         // Checked above.
-        WideOp::PlaceSet { .. } | WideOp::PlaceVecResize { .. } => {}
+        WideOp::PlaceSet { .. }
+        | WideOp::PlaceVecResize { .. }
+        | WideOp::PlaceVecPush { .. }
+        | WideOp::PlaceVecPop { .. }
+        | WideOp::PlaceVecSwap { .. }
+        | WideOp::CapturePlace { .. } => {}
         WideOp::StrConcatPadI64 {
             dst,
             prefix,
@@ -2578,21 +2664,15 @@ fn validate_wide_op(
             first_f,
         } => {
             check_v(op_idx, dst_v)?;
-            if (u32::from(name_idx) as usize) >= consts_len {
-                return Err(ValidationError::ConstantOutOfBounds {
-                    op_idx,
-                    idx: u32::from(name_idx),
-                    len: consts_len,
-                    pool: PoolKind::Consts,
-                });
-            }
-            if (u32::from(fields_idx) as usize) >= consts_len {
-                return Err(ValidationError::ConstantOutOfBounds {
-                    op_idx,
-                    idx: u32::from(fields_idx),
-                    len: consts_len,
-                    pool: PoolKind::Consts,
-                });
+            for idx in [name_idx, fields_idx] {
+                if usize::from(idx) >= consts_len {
+                    return Err(ValidationError::ConstantOutOfBounds {
+                        op_idx,
+                        idx: u32::from(idx),
+                        len: consts_len,
+                        pool: PoolKind::Consts,
+                    });
+                }
             }
             let n = u32::from(stride).saturating_mul(u32::from(elem_count));
             if n > 0 {
@@ -2634,8 +2714,9 @@ fn validate_wide_op(
     Ok(())
 }
 
-/// Validates a [`WideOp::PlaceSet`] or [`WideOp::PlaceVecResize`], answering
-/// whether `wide` was one.
+/// Validates a wide op that names a place (a [`WideOp::PlaceSet`], one of the
+/// place Vec ops, or a [`WideOp::CapturePlace`]), answering whether `wide`
+/// was one.
 fn validate_place_wide_op(
     op_idx: usize,
     wide: &WideOp,
@@ -2650,6 +2731,10 @@ fn validate_place_wide_op(
             len,
             fill,
         } => (vec![*root, *len, *fill], path),
+        WideOp::PlaceVecPush { root, path, value } => (vec![*root, *value], path),
+        WideOp::PlaceVecPop { dst, root, path } => (vec![*dst, *root], path),
+        WideOp::PlaceVecSwap { root, path, a, b } => (vec![*root, *a, *b], path),
+        WideOp::CapturePlace { dst, cell, .. } => (vec![*dst, *cell], &[]),
         _ => return Ok(false),
     };
     for reg in regs.into_iter().chain(place_index_regs(path)) {
@@ -2708,6 +2793,9 @@ mod tests {
             closure_protos: Vec::new(),
             select_arms: Vec::new(),
             unwind_table: Vec::new(),
+            cell_variant: std::sync::OnceLock::new(),
+            cell_params: false,
+            passes_capture_cells: false,
         }
     }
 

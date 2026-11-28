@@ -70,6 +70,44 @@ pub(crate) fn command(source: String) -> Result<()> {
     crate::cmd::on_main_thread(|| run_source_on_vm(&source, "<command>", &[], None))
 }
 
+/// Runs the loaded program's `main` inside the root cohort, ending the
+/// process at once when `main` called `process::exit`.
+fn run_main(
+    vm: &mut gossamer_interp::Vm,
+) -> gossamer_interp::RuntimeResult<gossamer_interp::Value> {
+    // `main` runs inside the root cohort, so every `spawn` has a cohort
+    // to belong to: no goroutine outlives the program, and a child's
+    // failure that nothing reads is reported instead of vanishing.
+    gossamer_interp::open_root_cohort();
+    // A fault raised inside a JIT-compiled body exits through the runtime,
+    // which reports the host's frames through this window.
+    let r = vm.with_active_trace(|| {
+        let r = vm.call("main", Vec::new());
+        // Cleanups `main`'s last releases queued run as it ends, or as an
+        // exit leaves it.
+        if r.is_ok()
+            || r.as_ref()
+                .err()
+                .and_then(gossamer_interp::exit_status)
+                .is_some()
+        {
+            gossamer_interp::run_pending_cleanups(vm);
+        }
+        r
+    });
+    profile_rss_stage("execution_complete");
+    // `process::exit` has unwound `main`, running its deferred expressions;
+    // the program ends now, without waiting on goroutines still running.
+    if let Some(code) = r.as_ref().err().and_then(gossamer_interp::exit_status) {
+        gossamer_interp::flush_runtime_stdout();
+        vm.with_active_trace(gossamer_interp::run_exit_hooks);
+        gossamer_interp::flush_runtime_stdout();
+        gossamer_runtime::c_abi::rc::report_live_at_exit();
+        std::process::exit(code);
+    }
+    r
+}
+
 fn run_source_on_vm(
     user_source: &str,
     file_label: &str,
@@ -141,14 +179,7 @@ fn run_source_on_vm(
     // allocator next reuses them.
     gossamer_runtime::collect_process_allocator(true);
     profile_rss_stage("frontend_released");
-    // `main` runs inside the root cohort, so every `spawn` has a cohort
-    // to belong to: no goroutine outlives the program, and a child's
-    // failure that nothing reads is reported instead of vanishing.
-    gossamer_interp::open_root_cohort();
-    // A fault raised inside a JIT-compiled body exits through the runtime,
-    // which reports the host's frames through this window.
-    let r = vm.with_active_trace(|| vm.call("main", Vec::new()));
-    profile_rss_stage("execution_complete");
+    let r = run_main(&mut vm);
     // The call stack a fault reports is read before an exit hook runs on it.
     let fault_trace = r
         .as_ref()

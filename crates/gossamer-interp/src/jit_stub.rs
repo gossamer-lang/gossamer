@@ -52,6 +52,12 @@ pub enum JitKind {
     /// `Option` / `Result` as its two words through a carrier thunk; payload
     /// names what each arm's payload word holds.
     Carrier(CarrierShape),
+    /// `i128` / `u128` as its two words, low then high, through a carrier
+    /// thunk.
+    Wide {
+        /// Whether the value is a `u128`.
+        unsigned: bool,
+    },
     /// All-scalar user struct as a pointer to its flat field-slot block;
     /// payload is the VM struct-shape-table index.
     StructPtr(u32),

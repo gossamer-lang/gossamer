@@ -64,10 +64,18 @@ fn json_to_serde_norway(v: &serde_json::Value) -> serde_norway::Value {
 /// YAML is parsed and re-projected onto the JSON value tree so the
 /// dynamic document path reuses the fully-supported `json::Value`
 /// runtime type (`json::get` / `as_str` / …) on every tier - the VM's
-/// `yaml::parse` routes through the same yaml->json projection. Err
-/// payload is a c-string, matching `gos_rt_json_parse`.
+/// `yaml::parse` routes through the same yaml->json projection. The Err
+/// payload is an `errors::Error`, as `gos_rt_json_parse`'s is.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_yaml_parse(s: *const c_char) -> i128 {
+    // SAFETY: the caller's contract is this one's.
+    unsafe { gos_rt_yaml_parse_with(s, 0) }
+}
+
+/// `yaml::parse(text, duplicate_keys: ..)`: [`gos_rt_yaml_parse`], reading
+/// a key a mapping repeats as the `json::DuplicateKeys` policy index says.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_yaml_parse_with(s: *const c_char, duplicates: i64) -> i128 {
     ffi_entry!({
         let text = if s.is_null() {
             ""
@@ -75,19 +83,17 @@ pub unsafe extern "C" fn gos_rt_yaml_parse(s: *const c_char) -> i128 {
             // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
-        match crate::yaml_node::decode_json(
+        match crate::yaml_node::decode_json_with(
             text,
             crate::yaml_node::max_depth(),
             crate::yaml_node::max_size(),
+            crate::yaml_node::DuplicateKeys::from_index(duplicates),
         ) {
             Ok(json_val) => {
                 let ptr = crate::c_abi::json::GosJson::into_raw(json_val);
                 gos_rt_result_new(0, ptr as i64)
             }
-            Err(e) => {
-                let cs = alloc_cstring(format!("yaml::parse: {e}").as_bytes());
-                gos_rt_result_new(1, cs as i64)
-            }
+            Err(e) => yaml_result_err(&format!("yaml::parse: {e}")),
         }
     })
 }

@@ -1,0 +1,32 @@
+// A prelude collection named through its module (`collections::Map::new()`
+// after `use std::collections`) is the prelude type: its entries read back
+// the values stored under each key on every tier.
+use std::collections
+
+struct Item { name: String, n: i64 }
+
+fn main() {
+    let mut m: collections::Map<i64, Item> = collections::Map::new()
+    let mut k = 0
+    while k < 3 {
+        m.insert(k, Item { name: f"n{k}", n: k })
+        k += 1
+    }
+    let mut key = 0
+    while key < 3 {
+        match m.get(key) {
+            Some(it) => println(f"{key} {it.name} {it.n}")
+            None => println(f"{key} none")
+        }
+        key += 1
+    }
+    let mut s: collections::Set<String> = collections::Set::new()
+    s.insert("b")
+    s.insert("a")
+    s.insert("b")
+    println(s.len())
+    let mut q: collections::Deque<i64> = collections::Deque::new()
+    q.push_back(1)
+    q.push_front(0)
+    println(q)
+}

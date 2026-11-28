@@ -1,0 +1,54 @@
+// A key an object (or a YAML mapping) repeats is an error naming it unless
+// `duplicate_keys:` says which value stands, on every tier.
+use std::encoding::{json, yaml}
+
+struct User {
+    name: String
+    admin: bool
+}
+
+struct A {
+    a: i64
+}
+
+fn main() {
+    let text = "{\"name\":\"eve\",\"admin\":false,\"admin\":true}"
+    match json::decode::<User>(text) {
+        Ok(u) => println(f"default admin={u.admin}")
+        Err(e) => println(f"default refused: {e}")
+    }
+    let first = json::decode::<User>(text, duplicate_keys: json::DuplicateKeys::UseFirst)
+    println(f"first admin={first.unwrap().admin}")
+    let last = json::decode::<User>(text, duplicate_keys: json::DuplicateKeys::UseLast)
+    println(f"last admin={last.unwrap().admin}")
+    match json::parse(text) {
+        Ok(v) => println(f"parsed {v}")
+        Err(e) => println(f"parse refused: {e}")
+    }
+    println(f"{json::parse(text, duplicate_keys: json::DuplicateKeys::UseFirst).unwrap()}")
+    println(f"{json::parse(text, duplicate_keys: json::DuplicateKeys::UseLast).unwrap()}")
+    let m = json::decode::<Map<String, i64>>("{\"a\":1,\"a\":2}", duplicate_keys: json::DuplicateKeys::UseFirst)
+    println(f"map first {m.unwrap()}")
+    match json::decode::<Map<String, i64>>("{\"a\":1,\"a\":2}") {
+        Ok(m) => println(f"map {m}")
+        Err(e) => println(f"map refused: {e}")
+    }
+    let nested = "{\"outer\":{\"k\":1,\"k\":2}}"
+    match json::parse(nested) {
+        Ok(v) => println(f"nested {v}")
+        Err(e) => println(f"nested refused: {e}")
+    }
+    match yaml::parse("a: 1\na: 2\n") {
+        Ok(v) => println(f"yaml {v}")
+        Err(e) => println(f"yaml refused: {e}")
+    }
+    println(f"{yaml::parse("a: 1\na: 2\n", duplicate_keys: yaml::DuplicateKeys::UseFirst).unwrap()}")
+    match yaml::decode::<A>("a: 1\na: 2\n") {
+        Ok(v) => println(f"yaml decoded {v.a}")
+        Err(e) => println(f"yaml decode refused: {e}")
+    }
+    let y = yaml::decode::<A>("a: 1\na: 2\n", duplicate_keys: json::DuplicateKeys::UseLast)
+    println(f"yaml last {y.unwrap().a}")
+    let policy = json::DuplicateKeys::UseFirst
+    println(f"{json::parse("{\"x\":1,\"x\":2}", policy).unwrap()}")
+}

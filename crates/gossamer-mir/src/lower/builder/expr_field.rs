@@ -107,21 +107,15 @@ impl<'a> Builder<'a> {
                 variant_enum_name = Some(enum_name);
             }
         }
-        // `http::Response { … }` - the type is an opaque runtime handle
-        // on the compiled tiers (a `GosHttpResponse` ptr), so the
-        // generic aggregate lowering can't apply (it would emit an
-        // undefined `__struct` call). Lower to the runtime constructor
-        // + setter chain instead. "Response" is always present in
-        // `self.structs` via `stdlib_struct_shapes`, so the stdlib
-        // route applies unless the USER declared a `Response` struct
-        // (visible as a non-sentinel entry in `struct_defs`).
-        let user_defined_response = struct_name == "Response"
-            && self
-                .struct_defs
-                .iter()
-                .any(|(def, name)| name == "Response" && def.local < u32::MAX - 16);
-        if variant_idx.is_none() && struct_name == "Response" && !user_defined_response {
+        // `http::Response { .. }` and `http::Request { .. }` are opaque
+        // runtime handles on the compiled tiers, built by their runtime
+        // constructors. Their literals carry the module-qualified name, which
+        // no program type shares.
+        if variant_idx.is_none() && struct_name == "http::Response" {
             return self.lower_http_response_literal(pairs, span);
+        }
+        if variant_idx.is_none() && struct_name == "http::Request" {
+            return self.lower_http_request_literal(pairs, span);
         }
         if variant_idx.is_none()
             && struct_name == "Reverse"
@@ -470,22 +464,7 @@ impl<'a> Builder<'a> {
             // through a `let`. Without this the `.headers` / `.body` field
             // projection falls through to a positional struct read against a
             // handle the codegen treats as an opaque pointer.
-            let rk = self
-                .local_runtime_kind
-                .get(&place.local)
-                .copied()
-                .or_else(|| {
-                    let lty = self.locals[place.local.0 as usize].ty;
-                    let inner = match self.tcx.kind_of(lty) {
-                        gossamer_types::TyKind::Ref { inner, .. } => *inner,
-                        _ => lty,
-                    };
-                    self.struct_name_of(inner).and_then(|s| match s.as_str() {
-                        "Response" => Some("http::Response"),
-                        "Request" => Some("http::Request"),
-                        _ => None,
-                    })
-                });
+            let rk = self.http_runtime_kind(place.local);
             if let Some(rk) = rk {
                 let helper: Option<(&'static str, Ty)> = match (rk, name.name.as_str()) {
                     ("http::Response", "status") => Some((
@@ -791,7 +770,8 @@ impl<'a> Builder<'a> {
         let runtime_kind = self
             .receiver_local_from_path(receiver)
             .and_then(|l| self.local_runtime_kind.get(&l).copied())
-            .or_else(|| self.local_runtime_kind.get(&receiver_local).copied());
+            .or_else(|| self.local_runtime_kind.get(&receiver_local).copied())
+            .or_else(|| self.http_runtime_kind(receiver_local));
         if let Some(rk) = runtime_kind {
             let helper: Option<(&'static str, Ty)> = match (rk, name.name.as_str()) {
                 ("http::Response", "status") => Some((
@@ -1193,6 +1173,95 @@ impl<'a> Builder<'a> {
         }
 
         Some(resp)
+    }
+
+    /// The runtime-handle kind of `local`: its construction-site tag, else
+    /// the `http::Response` / `http::Request` its type names. The tag is gone
+    /// for a handle a function returned or a parameter brought in.
+    pub(crate) fn http_runtime_kind(&self, local: Local) -> Option<&'static str> {
+        self.local_runtime_kind.get(&local).copied().or_else(|| {
+            let lty = self.locals[local.0 as usize].ty;
+            let inner = match self.tcx.kind_of(lty) {
+                gossamer_types::TyKind::Ref { inner, .. } => *inner,
+                _ => lty,
+            };
+            // A standard handle's type is a sentinel definition the checker
+            // names, so its name comes from there when no struct declares it.
+            let name = self
+                .struct_name_of(inner)
+                .or_else(|| match self.tcx.kind_of(inner) {
+                    gossamer_types::TyKind::Adt { def, .. } => {
+                        self.tcx.def_name(*def).map(str::to_string)
+                    }
+                    _ => None,
+                })?;
+            match name.as_str() {
+                "http::Response" => Some("http::Response"),
+                "http::Request" => Some("http::Request"),
+                "Response" if self.is_std_http_handle("Response") => Some("http::Response"),
+                "Request" if self.is_std_http_handle("Request") => Some("http::Request"),
+                _ => None,
+            }
+        })
+    }
+
+    /// `http::Request { method, path, query, headers, body, raw_body,
+    /// peer_addr }` through `gos_rt_http_request_new`. A field the literal
+    /// leaves out is empty; `query_pairs` is read from `query`.
+    pub(crate) fn lower_http_request_literal(
+        &mut self,
+        pairs: &[HirExpr],
+        span: Span,
+    ) -> Option<Local> {
+        use gossamer_types::TyKind;
+        let ptr_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let mut fields: HashMap<String, &HirExpr> = HashMap::new();
+        for chunk in pairs.chunks_exact(2) {
+            let HirExprKind::Literal(HirLiteral::String(field)) = &chunk[0].kind else {
+                return None;
+            };
+            fields.insert(field.clone(), &chunk[1]);
+        }
+        let mut args = Vec::new();
+        for name in [
+            "method",
+            "path",
+            "query",
+            "headers",
+            "body",
+            "raw_body",
+            "peer_addr",
+        ] {
+            let operand = match fields.get(name) {
+                Some(expr) => {
+                    let value = self.lower_expr(expr)?;
+                    let value_ty = self.locals[value.0 as usize].ty;
+                    let value = match self.tcx.kind_of(value_ty).clone() {
+                        TyKind::Array { elem, len } => {
+                            self.coerce_array_to_vec(value, elem, len, span)
+                        }
+                        _ => value,
+                    };
+                    Operand::Copy(Place::local(value))
+                }
+                None if matches!(name, "headers" | "raw_body") => {
+                    Operand::Const(ConstValue::Int(0))
+                }
+                None => Operand::Const(ConstValue::Str(String::new())),
+            };
+            args.push(operand);
+        }
+        for (name, expr) in &fields {
+            if !matches!(
+                name.as_str(),
+                "method" | "path" | "query" | "headers" | "body" | "raw_body" | "peer_addr"
+            ) {
+                let _ = self.lower_expr(expr);
+            }
+        }
+        let request = self.emit_rt_call_local("gos_rt_http_request_new", args, ptr_ty, span);
+        self.local_runtime_kind.insert(request, "http::Request");
+        Some(request)
     }
 
     /// Materialises an empty-string constant local.

@@ -44,6 +44,10 @@ impl<'tcx> FnBuilder<'tcx> {
             closure_capture_names: std::collections::HashSet::new(),
             capture_cells: Vec::new(),
             capture_cells_used: false,
+            cell_params: false,
+            passes_capture_cells: false,
+            cell_param_homes: Vec::new(),
+            cell_variants: false,
             escaped_reference_reg_floor: 0,
             collection_locals: std::collections::HashSet::new(),
             lazy_iterator_locals: std::collections::HashSet::new(),
@@ -142,6 +146,9 @@ impl<'tcx> FnBuilder<'tcx> {
             mut_ref_params: self.mut_ref_params,
             i64_params: self.i64_params,
             unwind_table: self.unwind_table,
+            cell_variant: std::sync::OnceLock::new(),
+            cell_params: self.cell_params,
+            passes_capture_cells: self.passes_capture_cells,
         };
         // Release growth-by-doubling slack on every Vec field
         // unconditionally - any code path that produces a chunk

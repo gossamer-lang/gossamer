@@ -236,6 +236,53 @@ pub unsafe extern "C" fn gos_rt_binding_bytes_free(b: *mut GosBytes) {
     });
 }
 
+/// The variant an `Option` argument crosses to a binding as, built from the
+/// compiled carrier (disc `0` = `Some`, with its payload word) and the wire
+/// tag of the payload. A string payload crosses as the pointer the carrier
+/// holds, which the binding copies; the carrier keeps its share.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_binding_option_from_carrier(carrier: i128, tag: i64) -> *mut GosVariant {
+    ffi_entry!({
+        if super::result::result_disc_of(carrier) != 0 {
+            return Box::into_raw(Box::new(GosVariant {
+                tag: 0,
+                payload_len: 0,
+                payload: std::ptr::null_mut(),
+            }));
+        }
+        let field = GosVariantValue {
+            tag: i32::try_from(tag).unwrap_or(0),
+            pad: 0,
+            data: super::result::result_payload_of(carrier) as u64,
+        };
+        let payload = Box::into_raw(Box::new([field])).cast::<GosVariantValue>();
+        Box::into_raw(Box::new(GosVariant {
+            tag: 1,
+            payload_len: 1,
+            payload,
+        }))
+    })
+}
+
+/// Frees an `Option` argument [`gos_rt_binding_option_from_carrier`] built,
+/// once the binding call that read it returns. The payload it points at
+/// stays the carrier's.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_binding_option_free(v: *mut GosVariant) {
+    ffi_entry!({
+        if v.is_null() {
+            return;
+        }
+        // SAFETY: `v` is the variant `gos_rt_binding_option_from_carrier` boxed, handed back
+        // once.
+        let variant = unsafe { Box::from_raw(v) };
+        if !variant.payload.is_null() {
+            // SAFETY: a non-null payload is the one-field array boxed beside the variant.
+            drop(unsafe { Box::from_raw(variant.payload.cast::<[GosVariantValue; 1]>()) });
+        }
+    });
+}
+
 /// Frees a tuple argument [`gos_rt_binding_tuple_from_slots`] built, once
 /// the binding call that read it returns.
 #[unsafe(no_mangle)]

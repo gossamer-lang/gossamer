@@ -1,0 +1,47 @@
+// An ordered type, by `#[derive(PartialOrd, Ord)]` or an `impl Ord`, takes
+// the two-value `min`, `max`, and `clamp` an integer has, with Rust's
+// ties: `min` keeps the receiver and `max` takes the argument when they are
+// equal. A type's own method of the name stays, and `clamp` refuses bounds
+// out of order.
+#[derive(PartialOrd, Ord)]
+struct D { v: i64, tag: String }
+#[derive(PartialOrd, Ord)]
+struct T(i64)
+#[derive(PartialOrd, Ord)]
+enum E { Low, Mid(i64), High }
+struct P { v: i64 }
+impl Ord for P {
+    fn cmp(&self, other: P) -> i64 { self.v.cmp(other.v) }
+}
+#[derive(PartialOrd, Ord)]
+struct G<X> { x: X }
+struct Own { v: i64 }
+impl Ord for Own {
+    fn cmp(&self, other: Own) -> i64 { self.v.cmp(other.v) }
+}
+impl Own {
+    fn max(self, other: Own) -> Own { Own { v: 99 } }
+}
+// A loop over the synthesized methods, so the JIT compiles them too.
+fn highest(xs: Vec<T>) -> i64 {
+    let mut best = T(0)
+    for x in xs {
+        best = best.max(x)
+    }
+    best.0
+}
+
+fn main() {
+    println(highest(#[T(4), T(9), T(2)]))
+    let a = D { v: 1, tag: "a" }
+    let b = D { v: 1, tag: "b" }
+    println(f"{a.max(b).tag} {a.min(b).tag} {D { v: 5, tag: "x" }.clamp(a, b).tag}")
+    let e = D { v: 1, tag: "a" }
+    println(f"tie: min keeps self {a.min(e) == a} max takes other {D { v: 1, tag: "a" }.max(e).tag}")
+    println(f"{T(3).max(T(7)).0} {E::Mid(2).max(E::Low)} {E::High.clamp(E::Low, E::Mid(1))}")
+    println(f"{P { v: 1 }.max(P { v: 2 }).v} {P { v: 5 }.clamp(P { v: 0 }, P { v: 3 }).v} {P { v: 1 } < P { v: 2 }}")
+    println(f"{G { x: 3 }.min(G { x: 2 }).x} {Own { v: 1 }.max(Own { v: 2 }).v} {Own { v: 1 }.min(Own { v: 2 }).v}")
+    let words = #[D { v: 2, tag: "q" }, D { v: 1, tag: "r" }]
+    println(f"{words.max().unwrap().tag} {words.min().unwrap().tag}")
+    println(T(1).clamp(T(5), T(2)).0)
+}

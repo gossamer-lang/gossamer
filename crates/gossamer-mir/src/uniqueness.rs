@@ -1153,7 +1153,7 @@ fn is_goroutine_publish(name: &str) -> bool {
 }
 
 /// The runtime helpers whose answer is a value no argument or global holds.
-fn runtime_answers_fresh(name: &str) -> bool {
+pub(crate) fn runtime_answers_fresh(name: &str) -> bool {
     matches!(
         name,
         "gos_rt_vec_with_capacity"

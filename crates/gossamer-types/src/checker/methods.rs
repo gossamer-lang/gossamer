@@ -570,6 +570,110 @@ impl TypeChecker<'_> {
         ty
     }
 
+    /// A method whose answer its name fixes, whatever the receiver: `None`
+    /// for any other call.
+    fn check_name_typed_method(
+        &mut self,
+        method: &str,
+        receiver_ty: Ty,
+        args: &[Expr],
+        receiver_span: Span,
+    ) -> Option<Ty> {
+        // `wg.wait_ctx(ctx)` answers whether the group completed. A sync
+        // handle's receiver stays an inference variable by design, so the
+        // name carries the return type; no other receiver declares it.
+        if method == "wait_ctx" && args.len() == 1 {
+            for arg in args {
+                self.check_expr(arg);
+            }
+            return Some(self.tcx.bool_ty());
+        }
+        // `x.into()` converts to an inferred target `B` via `B::from`, and
+        // `x.try_into()` to `Result<B, E>` via `B::try_from`. The target is
+        // fixed by the use site (a `let B` / `let Result<B, E>`, a parameter,
+        // a return), so type it as a fresh variable here and let unification
+        // bind it; lowering reads the resolved type and routes accordingly.
+        if matches!(method, "into" | "try_into") && args.is_empty() {
+            return Some(self.check_conversion_method(method, receiver_ty, receiver_span));
+        }
+        None
+    }
+
+    /// `t.render(data)` on a `text::template::Template` or
+    /// `html::template::Template`: `data` is any value with a JSON form,
+    /// encoded where the call is written (HIR `template_render`). `None` for
+    /// any other call.
+    fn check_template_render(
+        &mut self,
+        method: &str,
+        receiver_ty: Ty,
+        args: &[Expr],
+    ) -> Option<Ty> {
+        let ("render", [data]) = (method, args) else {
+            return None;
+        };
+        let resolved = self.infer.resolve(self.tcx, receiver_ty);
+        let resolved = self.peel_refs(resolved);
+        let Some(TyKind::Adt { def, .. }) = self.tcx.kind(resolved).cloned() else {
+            return None;
+        };
+        if !matches!(
+            self.tcx.def_name(def),
+            Some("__gos_text_template_Template" | "__gos_html_template_Template")
+        ) {
+            return None;
+        }
+        let data_ty = self.check_expr(data);
+        Some(self.check_template_data(data, data_ty))
+    }
+
+    /// The answer of a template render over `data`, already typed `data_ty`:
+    /// any value `json::encode` takes, refused over a type parameter as
+    /// `json::encode` refuses it.
+    pub(super) fn check_template_data(&mut self, data: &Expr, data_ty: Ty) -> Ty {
+        self.reject_serde_over_type_parameter(
+            &["json"],
+            "encode",
+            std::slice::from_ref(data),
+            &[data_ty],
+        );
+        self.reject_native_address(data_ty, "outside this process", data.span);
+        let s = self.tcx.string_ty();
+        let e = self.tcx.dyn_error_ty();
+        self.result_adt_ty(s, e)
+    }
+
+    /// `it.join(sep)` renders each element an iterator yields, as a
+    /// sequence's `join` does; lowering collects the iterator first. `None`
+    /// for any other call.
+    fn check_iterator_join(
+        &mut self,
+        method: &str,
+        receiver_ty: Ty,
+        args: &[Expr],
+        call_span: Span,
+    ) -> Option<Ty> {
+        let resolved_receiver = self.infer.resolve(self.tcx, receiver_ty);
+        let (true, [separator], Some(TyKind::Iterator(elem))) = (
+            method == "join",
+            args,
+            self.tcx.kind(resolved_receiver).cloned(),
+        ) else {
+            return None;
+        };
+        let sep_ty = self.check_expr(separator);
+        let string = self.tcx.string_ty();
+        let sep_peeled = self.peel_refs(sep_ty);
+        self.unify(string, sep_peeled, separator.span);
+        let elem_resolved = self.infer.resolve(self.tcx, elem);
+        let elem_peeled = self.peel_refs(elem_resolved);
+        if let Some((ty, class)) = self.not_displayable(elem_peeled) {
+            self.emit(TypeError::ValueNotDisplayable { ty, class }, call_span);
+            return Some(self.tcx.error_ty());
+        }
+        Some(string)
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "receiver dispatch is intentionally kept in source order"
@@ -595,6 +699,12 @@ impl TypeChecker<'_> {
         self.note_receiver_owner(call_id, receiver_ty, method);
         if method == "par_chunks_mut" {
             self.check_chunk_receiver(receiver, receiver_ty, args);
+        }
+        if let Some(ty) = self.check_iterator_join(method, receiver_ty, args, call_span) {
+            return ty;
+        }
+        if let Some(ty) = self.check_template_render(method, receiver_ty, args) {
+            return ty;
         }
         if let Some(ty) = self
             .check_simd_method(method, receiver_ty, args, generics, call_span)
@@ -627,22 +737,8 @@ impl TypeChecker<'_> {
         {
             return ty;
         }
-        // `wg.wait_ctx(ctx)` answers whether the group completed. A sync
-        // handle's receiver stays an inference variable by design, so the
-        // name carries the return type; no other receiver declares it.
-        if method == "wait_ctx" && args.len() == 1 {
-            for arg in args {
-                self.check_expr(arg);
-            }
-            return self.tcx.bool_ty();
-        }
-        // `x.into()` converts to an inferred target `B` via `B::from`, and
-        // `x.try_into()` to `Result<B, E>` via `B::try_from`. The target is
-        // fixed by the use site (a `let B` / `let Result<B, E>`, a parameter,
-        // a return), so type it as a fresh variable here and let unification
-        // bind it; lowering reads the resolved type and routes accordingly.
-        if matches!(method, "into" | "try_into") && args.is_empty() {
-            return self.check_conversion_method(method, receiver_ty, receiver.span);
+        if let Some(ty) = self.check_name_typed_method(method, receiver_ty, args, receiver.span) {
+            return ty;
         }
         if let Some(ty) =
             self.check_container_family_method(method, receiver_ty, args, receiver.span)
@@ -693,11 +789,6 @@ impl TypeChecker<'_> {
         }
         if self.reject_unknown_slot_collection_method(resolved, method, arg_count, name_span) {
             return self.tcx.error_ty();
-        }
-        if let Some(ty) =
-            self.validate_handle_method_ret(method, args, &arg_tys, resolved, receiver.span)
-        {
-            return ty;
         }
         let explicit = self.turbofish_types(generics);
         let method_substs =
@@ -1006,7 +1097,10 @@ impl TypeChecker<'_> {
             "http::Client",
             "http::ClientBuilder",
             "http::Request",
+            "http::Response",
             "http::ResponseStream",
+            "http::Router",
+            "http::Server",
         ];
         let Some(TyKind::Adt { def, .. }) = self.tcx.kind(resolved) else {
             return false;
@@ -3629,6 +3723,14 @@ impl TypeChecker<'_> {
                 let i = self.tcx.int_ty(IntTy::I64);
                 self.option_adt_ty(i)
             }
+            "to_i128" => {
+                let i = self.tcx.int_ty(IntTy::I128);
+                self.option_adt_ty(i)
+            }
+            "to_u128" => {
+                let u = self.tcx.int_ty(IntTy::U128);
+                self.option_adt_ty(u)
+            }
             "to_f64" => {
                 let f = self.tcx.float_ty(FloatTy::F64);
                 self.option_adt_ty(f)
@@ -3720,6 +3822,8 @@ impl TypeChecker<'_> {
         match payload.map(|ty| self.tcx.kind_of(ty)) {
             Some(TyKind::Float(_)) => "to_f64",
             Some(TyKind::Bool) => "to_bool",
+            Some(TyKind::Int(IntTy::I128)) => "to_i128",
+            Some(TyKind::Int(IntTy::U128)) => "to_u128",
             _ => "to_i64",
         }
         .to_string()
@@ -4545,18 +4649,100 @@ impl TypeChecker<'_> {
                 let i = self.tcx.int_ty(IntTy::I64);
                 self.tcx.intern(TyKind::Tuple(vec![i; 9]))
             }
+            "__gos_fs_disk_space_raw" => {
+                let i = self.tcx.int_ty(IntTy::I64);
+                self.tcx.intern(TyKind::Tuple(vec![i; 3]))
+            }
+            "__gos_image_decode_raw" => {
+                let i = self.tcx.int_ty(IntTy::I64);
+                let u8_ty = self.tcx.int_ty(IntTy::U8);
+                let bytes = self.tcx.intern(TyKind::Vec(u8_ty));
+                self.tcx.intern(TyKind::Tuple(vec![i, i, bytes]))
+            }
+            "__gos_image_filled_raw"
+            | "__gos_image_resize_raw"
+            | "__gos_image_encode_png_raw"
+            | "__gos_image_encode_jpeg_raw" => {
+                let u8_ty = self.tcx.int_ty(IntTy::U8);
+                self.tcx.intern(TyKind::Vec(u8_ty))
+            }
+            "__gos_image_check_raw"
+            | "__gos_image_set_max_pixels_raw"
+            | "__gos_template_release_raw" => self.tcx.unit(),
+            "__gos_template_new_raw" => self.tcx.int_ty(IntTy::I64),
+            "__gos_template_render_raw" | "__gos_template_render_source_raw" => {
+                self.tcx.string_ty()
+            }
+            "__gos_mail_address_raw" | "__gos_mail_address_list_raw" => self.tcx.string_ty(),
+            "__gos_fs_chown_raw"
+            | "__gos_tls_server_config_add_sni_raw"
+            | "__gos_tls_server_config_reload_raw"
+            | "__gos_tls_server_config_release_raw" => self.tcx.unit(),
+            "__gos_tls_server_config_new_raw" => self.tcx.int_ty(IntTy::I64),
+            "__gos_net_dns_raw" => {
+                let s = self.tcx.string_ty();
+                self.tcx.intern(TyKind::Vec(s))
+            }
             "__gos_time_resolve_raw" => {
                 let i = self.tcx.int_ty(IntTy::I64);
                 self.tcx.intern(TyKind::Tuple(vec![i; 3]))
             }
+            "__gos_fs_temp_file_raw" => {
+                let file = self.stdlib_handle_ty(44, "fs::File");
+                let path = self.tcx.string_ty();
+                self.tcx.intern(TyKind::Tuple(vec![file, path]))
+            }
+            "__gos_time_strptime_raw" => {
+                let i = self.tcx.int_ty(IntTy::I64);
+                let s = self.tcx.string_ty();
+                self.tcx.intern(TyKind::Tuple(vec![i, s]))
+            }
             "__gos_time_format_in_raw"
+            | "__gos_time_strftime_raw"
             | "__gos_time_format_rfc3339_raw"
             | "__gos_fs_temp_dir_raw" => self.tcx.string_ty(),
             "__gos_time_add_date_raw" | "__gos_fd_wait_raw" => self.tcx.int_ty(IntTy::I64),
-            _ => return None,
+            _ => self.key_and_number_raw_ok(name)?,
         };
         let err = self.tcx.dyn_error_ty();
         Some(self.result_adt_ty(ok, err))
+    }
+
+    /// The `Ok` type of a key agreement, key encapsulation, certificate,
+    /// IP prefix, or rational raw leaf.
+    fn key_and_number_raw_ok(&mut self, name: &str) -> Option<Ty> {
+        Some(match name {
+            "__gos_ecdh_keypair_raw"
+            | "__gos_mlkem_keypair_raw"
+            | "__gos_mlkem_encapsulate_raw" => {
+                let u8_ty = self.tcx.int_ty(IntTy::U8);
+                let bytes = self.tcx.intern(TyKind::Vec(u8_ty));
+                self.tcx.intern(TyKind::Tuple(vec![bytes, bytes]))
+            }
+            "__gos_netip_prefix_raw" => {
+                let s = self.tcx.string_ty();
+                let i = self.tcx.int_ty(IntTy::I64);
+                self.tcx.intern(TyKind::Tuple(vec![s, i]))
+            }
+            "__gos_rational_from_f64_raw" => {
+                let s = self.tcx.string_ty();
+                self.tcx.intern(TyKind::Tuple(vec![s, s]))
+            }
+            "__gos_netip_prefix_op_raw" | "__gos_rational_to_f64_raw" => self.tcx.string_ty(),
+            "__gos_netip_prefix_contains_raw" | "__gos_netip_prefix_overlaps_raw" => {
+                self.tcx.bool_ty()
+            }
+            "__gos_x509_self_signed_raw" | "__gos_x509_issue_raw" => {
+                let s = self.tcx.string_ty();
+                self.tcx.intern(TyKind::Tuple(vec![s, s]))
+            }
+            "__gos_x509_extensions_raw" => self.tcx.string_ty(),
+            "__gos_ecdh_agree_raw" | "__gos_mlkem_decapsulate_raw" => {
+                let u8_ty = self.tcx.int_ty(IntTy::U8);
+                self.tcx.intern(TyKind::Vec(u8_ty))
+            }
+            _ => return None,
+        })
     }
 
     pub(super) fn tuple_cert_info_ty(&mut self) -> Ty {

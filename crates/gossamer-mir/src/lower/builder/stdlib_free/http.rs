@@ -234,21 +234,6 @@ impl<'a> Builder<'a> {
             "http::cookie::serialize" | "cookie::serialize" => {
                 ("gos_rt_http_cookie_serialize", self.tcx.string_ty())
             }
-            "http::csrf::issue_token" | "csrf::issue_token" => (
-                "gos_rt_http_csrf_issue_token",
-                self.result_string_error_adt_ty(),
-            ),
-            "http::csrf::verify_token" | "csrf::verify_token" => (
-                "gos_rt_http_csrf_verify_token",
-                self.result_unit_error_adt_ty(),
-            ),
-            "http::session::sign" | "session::sign" => {
-                ("gos_rt_http_session_sign", self.tcx.string_ty())
-            }
-            "http::session::verify" | "session::verify" => (
-                "gos_rt_http_session_verify",
-                self.result_string_error_adt_ty(),
-            ),
             "http::static_files::mime_for_path" | "static_files::mime_for_path" => {
                 ("gos_rt_static_mime_for_path", self.tcx.string_ty())
             }

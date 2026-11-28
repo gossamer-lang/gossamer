@@ -1,0 +1,41 @@
+// Links, a recursive directory copy, a move, ownership, and a filesystem's
+// free space, on every tier.
+use std::fs
+
+fn main() {
+    let root = fs::temp_dir("links").unwrap()
+    let src = f"{root}/src"
+    fs::create_dir_all(f"{src}/nested/deeper").unwrap()
+    fs::write(f"{src}/a.txt", "alpha".bytes()).unwrap()
+    fs::write(f"{src}/nested/b.txt", "bravo!".bytes()).unwrap()
+    fs::write(f"{src}/nested/deeper/c.txt", "charlie".bytes()).unwrap()
+    fs::symlink("a.txt", f"{src}/link_to_a").unwrap()
+    println(f"read_link: {fs::read_link(f"{src}/link_to_a").unwrap()}")
+    println(f"is_symlink: {fs::is_symlink(f"{src}/link_to_a")}")
+    fs::hard_link(f"{src}/a.txt", f"{src}/hard_a.txt").unwrap()
+    println(f"hard link reads: {fs::read_to_string(f"{src}/hard_a.txt").unwrap()}")
+
+    let copy = f"{root}/copy"
+    println(f"copied bytes: {fs::copy_dir(src, copy).unwrap()}")
+    println(f"copy keeps link: {fs::is_symlink(f"{copy}/link_to_a")} {fs::read_to_string(f"{copy}/link_to_a").unwrap()}")
+    println(f"deep: {fs::read_to_string(f"{copy}/nested/deeper/c.txt").unwrap()}")
+    let mut total = 0
+    for name in #["a.txt", "hard_a.txt", "nested/b.txt", "nested/deeper/c.txt"] {
+        total += fs::read_to_string(f"{copy}/{name}").unwrap().len()
+    }
+    println(f"copied text: {total}")
+    println(f"copy over existing refused: {fs::copy_dir(src, copy).is_err()}")
+    println(f"copy into itself refused: {fs::copy_dir(src, f"{src}/inner").is_err()}")
+
+    let moved = f"{root}/moved"
+    fs::move(copy, moved).unwrap()
+    println(f"moved: {fs::exists(copy)} {fs::read_to_string(f"{moved}/nested/b.txt").unwrap()}")
+    println(f"missing move refused: {fs::move(f"{root}/nope", f"{root}/x").is_err()}")
+
+    let space = fs::disk_space(root).unwrap()
+    println(f"space: {space.total > 0} {space.free <= space.total} {space.available <= space.total}")
+    println(f"chown unchanged: {fs::chown(f"{src}/a.txt").is_ok()}")
+    println(f"read_link of a file refused: {fs::read_link(f"{src}/a.txt").is_err()}")
+    fs::remove_dir_all(root).unwrap()
+    println(f"cleaned: {!fs::exists(root)}")
+}

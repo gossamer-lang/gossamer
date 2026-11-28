@@ -1388,10 +1388,6 @@ pub(super) fn runtime_core_method_signature(owner: &str, name: &str, kind: &str)
             Some("fn contains_key(self: sync::Map, key: String) -> bool")
         }
         ("sync::Map", "keys") => Some("fn keys(self: sync::Map) -> Vec<String>"),
-        ("Errors" | "validate::Errors", "new") => Some("fn new() -> validate::Errors"),
-        ("FieldError" | "validate::FieldError", "new") => {
-            Some("fn new(path: String, message: String, code: String) -> validate::FieldError")
-        }
         ("http::Client", "new") => Some("fn new() -> http::Client"),
         ("http::Client", "builder") => Some("fn builder() -> http::ClientBuilder"),
         _ => None,

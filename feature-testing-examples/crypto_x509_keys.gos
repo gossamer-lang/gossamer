@@ -1,0 +1,137 @@
+// `crypto::x509` key containers and certificate extensions: legacy PKCS#1
+// and SEC1 keys import as PKCS#8, a PBES2 key opens with its password while
+// a PBES1 key is refused by name, a certificate's custom extensions read
+// back, and `self_signed` writes checked custom extensions.
+use std::crypto::{ecdsa, rsa, x509}
+use std::crypto::x509::Extension
+use std::encoding::hex
+
+const SEC1_P256: String = """
+-----BEGIN EC PRIVATE KEY-----
+MHcCAQEEIJkOXQWHtYTIEjDK5PIHIlLI3MHXnz408lE4NrXa3UBJoAoGCCqGSM49
+AwEHoUQDQgAEgn3p6ptiYQg4HFs5eJpN+H7dpKmUVIDNSe1leMNgFNHCMSuHzphn
+/SL4shtqGV9JlU79fbQAotJXswKaVKJyzQ==
+-----END EC PRIVATE KEY-----
+"""
+
+const PBES2_KEY: String = """
+-----BEGIN ENCRYPTED PRIVATE KEY-----
+MIHsMFcGCSqGSIb3DQEFDTBKMCkGCSqGSIb3DQEFDDAcBAjClhRFHOssNgICCAAw
+DAYIKoZIhvcNAgkFADAdBglghkgBZQMEASoEEFSkInxegkmj1ydhyJXYEZIEgZAz
+doOQPo5pBBajRxyMov9xb/P+eSrsfWDS3OujpvRfQRhsZnKrkbWeZblDhN6Y97cV
+2rKW9SOLJNn9AFkOyesu7pJDvdicuNLpguKBupb3v5BRMiquOXUhgq7X2MwjIOnY
+lrbtglu7h8YCyZS4GbswXTOuDYLIE5f+iCTf+P3oKxig1d7InWYQ2kW3/g9IxRg=
+-----END ENCRYPTED PRIVATE KEY-----
+"""
+
+const PBES1_KEY: String = """
+-----BEGIN ENCRYPTED PRIVATE KEY-----
+MIGwMBsGCSqGSIb3DQEFAzAOBAgcI/REwyP9JwICCAAEgZBu+V4+LQZy5tY9ilH+
+FxIiiFRtWByaQStP+d9oJE9FoyjkEcjerdIBVtqm1nkFh14OM5djbQYe1ozwwTk/
+h1GxORV25d55xYoTWbke9sKgStLYJPIK+vdSQWbgyJldjpazkoXk2Ctk/nHsKV2M
+jfg5msDvZjNiaMqCuYZsRWrP2bk2Ek556AZFvAIWi3emjLQ=
+-----END ENCRYPTED PRIVATE KEY-----
+"""
+
+const RSA_PKCS1: String = """
+-----BEGIN RSA PRIVATE KEY-----
+MIIEpQIBAAKCAQEAo8WqhcD7KtElOX6kSbctgbj7iXyUp/R9Ii9Vw9EpBDIJWZsl
+L7HEYWCtqS0v/R9aYpFhMJuCHJWccfzI6z3f4gCRjtbBFDT0twyEnEjPWmeXAiU5
+m646twErBhkx2tRAzLxMcGy+fPYwxPFzm1m2LxQHnxm55wEjV3sweUFATmyYeNvp
+5XS4ETOCGJgbFOtb5poXcrYjLS/7NewpBrGyEwt+daKCmtrMrrcq39engkPPGOYq
+cPqO5U0XAHO/GFvyocMObgIzQycznGa/f8ESoLtPsUId3v+/8THdleOd53WfQ1eD
+0F73sYC50GX5PSF4Po3dw03LeFm3m2WkJw4UzQIDAQABAoIBAA+0MVMEi4EST3+5
+H09LP5OYFZScK9QEG2inAdIWURjMJH3hZNozMVnGD7jwcpDSzBO2DYv/6WTMytTa
+ULjP9NMiy1JXUOnbXxjbXC7xQ2LPmpkT0TeWqB4qwEGkMlXhsvn+11STdNueLtR/
+s55ypofSo51ztdILF6S4lRAXe+9ZDp7QkZs2qTWOndE619bpTauGMYQ8e8X98JUM
+K8xeG6KI7QOh/aeprFklAHrJ64Qj6AmA55BYXimS12DX0+2tIRqEkwtTxQxcI8o4
+L/uCxi2x2eaNlOCGRCYX6Bok6SDt4zS/wD1NZlngyUI7SPxu5jLuVexmYwYeZm0H
+U5IYLQkCgYEA1423+rge/fvDW5npP2PKMx3bfYxuVjq1ARsWKHsf1n2cnJ80YGCA
+TjvSGu+DvuhOoSb6HrtN/b88rqHsv19p04iUWTVBrnjOEkyCKBWU1/LvLAbeNlJs
+JOyxj5cJgIdzRJnOKKEH62I29+2LaaOfgJpuA/nmusSGP4HqpiN8C8kCgYEAwoCV
+7dys5YKrrpziABcMDepEKkied7d5hIIsv0XshG6JiD6yHJRjhEV6uVx/hnbOGHMp
+bFEg3CW/jBPjoij9ah6K0kVguJowjNpJbVX09ksXThD3VWwK3ZO1glR67BRzuBOG
+cajFSSOFY/JKjDBxKxFo2MTWbrZlQ6IsLDkMOuUCgYEAxrGpJOCyGNcJVpfCbR9U
+VNgx6kIXtz64eMN6ImiUiYgSZEFQ64Io43S7EP81xzWmvWALcWag1sWAb01tyV5v
+U4FzlePEnspW0oFZ/Q8fvAwAsenGzfYeH89bQYwtQyAYfeT1J3iAr1ZCazm5p/Ae
+6FHyFZI3QHRFd6cPIIRXJRkCgYEAmYRCUja+JHxpo21iF+4Y7pa77J/aq+UdvY+9
+X88B6lkQpn/Nty8MCSeJwOoYIXp+GuAyjrLN+9Szhg1guuodcnfe3C40NCBHN7VH
+BUw2B3unTk+n2D1pqg/e0Jp7VwChgWWv1N//r0WhEAz5+AJ4ICUimw1proK6FJLY
+yKLSW10CgYEAmZ934jouERxoAzY8MVK9T09CsLBNy7rVqq/dPxC7zGyx0JUDWqt/
+uvMACq9zzYpmfCYkRCfHQaEG3s0GCTVy2v8rFv6KDgdYCuy69KFn5OJn94s8d0s0
+7fg8eQqUaQWBcrNgDJ+N9CWdua6zsj47deMfYKoV2knee9ev1grI848=
+-----END RSA PRIVATE KEY-----
+"""
+
+const RSA_PKCS1_PUBLIC: String = """
+-----BEGIN RSA PUBLIC KEY-----
+MIIBCgKCAQEAo8WqhcD7KtElOX6kSbctgbj7iXyUp/R9Ii9Vw9EpBDIJWZslL7HE
+YWCtqS0v/R9aYpFhMJuCHJWccfzI6z3f4gCRjtbBFDT0twyEnEjPWmeXAiU5m646
+twErBhkx2tRAzLxMcGy+fPYwxPFzm1m2LxQHnxm55wEjV3sweUFATmyYeNvp5XS4
+ETOCGJgbFOtb5poXcrYjLS/7NewpBrGyEwt+daKCmtrMrrcq39engkPPGOYqcPqO
+5U0XAHO/GFvyocMObgIzQycznGa/f8ESoLtPsUId3v+/8THdleOd53WfQ1eD0F73
+sYC50GX5PSF4Po3dw03LeFm3m2WkJw4UzQIDAQAB
+-----END RSA PUBLIC KEY-----
+"""
+
+const CERT_WITH_EXT: String = """
+-----BEGIN CERTIFICATE-----
+MIIBljCCATygAwIBAgIUMY9g5hhdNi7elq6arslkS5WKCJ0wCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLZXh0LmV4YW1wbGUwHhcNMjYxMTI3MDM0NTE2WhcNMjYxMjI3
+MDM0NTE2WjAWMRQwEgYDVQQDDAtleHQuZXhhbXBsZTBZMBMGByqGSM49AgEGCCqG
+SM49AwEHA0IABIJ96eqbYmEIOBxbOXiaTfh+3aSplFSAzUntZXjDYBTRwjErh86Y
+Z/0i+LIbahlfSZVO/X20AKLSV7MCmlSics2jaDBmMB0GA1UdDgQWBBQ5vUWaVC0i
+zNBKK+TYuL//uylhBTAfBgNVHSMEGDAWgBQ5vUWaVC0izNBKK+TYuL//uylhBTAP
+BgNVHRMBAf8EBTADAQH/MBMGCisGAQQB1nkCBAMBAf8EAgUAMAoGCCqGSM49BAMC
+A0gAMEUCIHhMuJ+ka9Z6IM5vc+jCxTzKuzWd+0rqwAO9IGeWqQGIAiEAmqOLk3aI
+mMAfnNHFhFMG3h48+dngdqDpAvwhNlzEsCY=
+-----END CERTIFICATE-----
+"""
+
+fn main() {
+    let pkcs8 = x509::private_key_pkcs8(SEC1_P256).unwrap()
+    println(f"sec1 -> {pkcs8.lines()[0]}")
+    let fixed = ecdsa::sign_fixed_pem(pkcs8, "m".bytes()).unwrap()
+    println(f"signs: {fixed.len()} bytes, der {x509::private_key_der(SEC1_P256).unwrap().len() > 0}")
+    let opened = x509::decrypt_private_key(PBES2_KEY, "correct-horse").unwrap()
+    println(f"pbes2 opens: {ecdsa::sign_fixed_pem(opened, "m".bytes()).unwrap() == fixed}")
+    match x509::decrypt_private_key(PBES2_KEY, "wrong") {
+        Ok(_) => println("wrong password opened")
+        Err(e) => println(f"wrong password: {e}")
+    }
+    match x509::decrypt_private_key(PBES1_KEY, "correct-horse") {
+        Ok(_) => println("pbes1 opened")
+        Err(e) => println(f"pbes1: {e}")
+    }
+    match x509::private_key_pkcs8(PBES2_KEY) {
+        Ok(_) => println("encrypted imported")
+        Err(e) => println(f"encrypted: {e}")
+    }
+    let rsa_key = x509::private_key_pkcs8(RSA_PKCS1).unwrap()
+    let rsa_public = x509::public_key_spki(RSA_PKCS1_PUBLIC).unwrap()
+    let signature = rsa::sign_pss_sha256(rsa_key, "m".bytes()).unwrap()
+    println(f"pkcs1 rsa signs and verifies: {rsa::verify_pss_sha256(rsa_public, "m".bytes(), signature).is_ok()}")
+    println(f"certificate key: {x509::public_key_spki(CERT_WITH_EXT).unwrap().lines()[0]} {x509::public_key_der(CERT_WITH_EXT).unwrap().len()} bytes")
+    for ext in x509::extensions(CERT_WITH_EXT).unwrap() {
+        println(f"extension {ext.oid} critical {ext.critical} value {hex::encode(ext.value)}")
+    }
+    let custom = Extension { oid: "1.3.6.1.4.1.99999.1", critical: true, value: #[0x0cu8, 0x02, 0x68, 0x69] }
+    let cert, _ = x509::self_signed("ext.test", #["ext.test"], days: 2, extensions: #[custom]).unwrap()
+    let found = x509::extensions(cert).unwrap().filter(|e| e.oid == "1.3.6.1.4.1.99999.1")
+    println(f"written: {found.len()} critical {found[0].critical} value {hex::encode(found[0].value)}")
+    let twice = Extension { oid: "2.5.29.17", critical: false, value: #[0x30u8, 0x00] }
+    match x509::self_signed("ext.test", #["ext.test"], extensions: #[twice]) {
+        Ok(_) => println("repeated extension accepted")
+        Err(e) => println(f"repeated: {e}")
+    }
+    let not_der = Extension { oid: "1.2.3.4", critical: false, value: #[0x0cu8, 0x05] }
+    match x509::self_signed("ext.test", #["ext.test"], extensions: #[not_der]) {
+        Ok(_) => println("bad value accepted")
+        Err(e) => println(f"bad value: {e}")
+    }
+    let bad_oid = Extension { oid: "1.02.3", critical: false, value: #[0x05u8, 0x00] }
+    match x509::self_signed("ext.test", #["ext.test"], extensions: #[bad_oid]) {
+        Ok(_) => println("bad oid accepted")
+        Err(e) => println(f"bad oid: {e}")
+    }
+}

@@ -45,7 +45,15 @@ pub struct CertKey {
 /// Server-side TLS configuration. Clone cheaply.
 #[derive(Clone)]
 pub struct ServerConfig {
-    inner: Arc<RustlsServerConfig>,
+    inner: ServerConfigSource,
+}
+
+/// Where a [`ServerConfig`] reads its rustls configuration: one fixed for
+/// its lifetime, or a live one a program reloads while the server runs.
+#[derive(Clone)]
+enum ServerConfigSource {
+    Fixed(Arc<RustlsServerConfig>),
+    Live(Arc<gossamer_runtime::tls_server::LiveConfig>),
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -58,15 +66,29 @@ impl ServerConfig {
     /// Borrows the underlying rustls handle. Useful when wiring the
     /// config into a `rustls::ServerConnection` inside the HTTP
     /// server.
+    /// A live configuration reads again for every call, so a server that
+    /// asks per connection sees each reload.
     #[must_use]
     pub fn rustls(&self) -> Arc<RustlsServerConfig> {
-        Arc::clone(&self.inner)
+        match &self.inner {
+            ServerConfigSource::Fixed(config) => Arc::clone(config),
+            ServerConfigSource::Live(live) => live.current(),
+        }
+    }
+
+    /// The live configuration registered under `id` by
+    /// `tls::ServerConfig::new`, or `None` once it is released.
+    #[must_use]
+    pub fn live(id: i64) -> Option<Self> {
+        gossamer_runtime::tls_server::live(id).map(|live| Self {
+            inner: ServerConfigSource::Live(live),
+        })
     }
 
     /// Constructs a `rustls::ServerConnection` ready to be paired with
     /// an underlying TCP stream.
     pub fn new_connection(&self) -> Result<ServerConnection, Error> {
-        ServerConnection::new(Arc::clone(&self.inner)).map_err(|e| wrap_err("new_connection", e))
+        ServerConnection::new(self.rustls()).map_err(|e| wrap_err("new_connection", e))
     }
 }
 
@@ -152,7 +174,7 @@ pub fn server_config(cert: CertKey) -> Result<ServerConfig, Error> {
         .with_single_cert(certs, key)
         .map_err(|e| wrap_err("build server config", e))?;
     Ok(ServerConfig {
-        inner: Arc::new(config),
+        inner: ServerConfigSource::Fixed(Arc::new(config)),
     })
 }
 
@@ -191,7 +213,7 @@ pub fn server_config_with_client_auth(
         .with_single_cert(certs, key)
         .map_err(|e| wrap_err("build server config", e))?;
     Ok(ServerConfig {
-        inner: Arc::new(config),
+        inner: ServerConfigSource::Fixed(Arc::new(config)),
     })
 }
 
@@ -235,7 +257,7 @@ pub fn server_config_with_client_auth_and_crls(
         .with_single_cert(certs, key)
         .map_err(|e| wrap_err("build server config", e))?;
     Ok(ServerConfig {
-        inner: Arc::new(config),
+        inner: ServerConfigSource::Fixed(Arc::new(config)),
     })
 }
 
@@ -244,10 +266,10 @@ pub fn server_config_with_client_auth_and_crls(
 /// [`ServerConfig`] - the input is not mutated.
 #[must_use]
 pub fn server_with_alpn(config: ServerConfig, protocols: &[&[u8]]) -> ServerConfig {
-    let mut inner = (*config.inner).clone();
+    let mut inner = (*config.rustls()).clone();
     inner.alpn_protocols = protocols.iter().map(|p| p.to_vec()).collect();
     ServerConfig {
-        inner: Arc::new(inner),
+        inner: ServerConfigSource::Fixed(Arc::new(inner)),
     }
 }
 

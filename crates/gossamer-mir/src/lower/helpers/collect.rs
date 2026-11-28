@@ -1542,10 +1542,15 @@ pub(crate) fn lower_fn(
             // short-name `Request` both light up.
             let rendered = gossamer_types::printer::render_ty(builder.tcx, param.ty);
             let last_segment = rendered.rsplit("::").next().unwrap_or(&rendered);
-            // A parameter of a type the program declares is never a runtime
-            // handle, whatever the type is called.
+            // A parameter of a type the program declares, by value or by
+            // reference (`&self`), is never a runtime handle, whatever the
+            // type is called.
+            let mut declared = param.ty;
+            while let gossamer_types::TyKind::Ref { inner, .. } = builder.tcx.kind_of(declared) {
+                declared = *inner;
+            }
             let program_type = matches!(
-                builder.tcx.kind_of(param.ty),
+                builder.tcx.kind_of(declared),
                 gossamer_types::TyKind::Adt { def, .. } if def.local < u32::MAX - 64
             );
             let runtime_kind_from_type: Option<&'static str> = match last_segment {
@@ -1612,20 +1617,9 @@ pub(crate) fn lower_fn(
         // gets the receiver type when `param.ty` doesn't already
         // resolve to one.
         if let Some(struct_name) = builder.struct_name_of(param.ty) {
-            // Tag well-known stdlib types via the runtime-kind
-            // map so method dispatch on parameters picks the
-            // right helper. Maps by struct name; any user struct
-            // sharing one of these names overrides this - out
-            // of scope for now.
-            let runtime_kind: Option<&'static str> = match struct_name.as_str() {
-                "Error" => Some("errors::Error"),
-                "Response" => Some("http::Response"),
-                "Request" => Some("http::Request"),
-                "Client" => Some("http::Client"),
-                "Scanner" => Some("bufio::Scanner"),
-                "Pattern" => Some("regex::Pattern"),
-                _ => None,
-            };
+            // Tag well-known stdlib types via the runtime-kind map so method
+            // dispatch on parameters picks the right helper.
+            let runtime_kind = builder.std_type_runtime_kind(param.ty, &struct_name);
             builder.local_struct.insert(local, struct_name);
             if let Some(rk) = runtime_kind {
                 builder.local_runtime_kind.insert(local, rk);

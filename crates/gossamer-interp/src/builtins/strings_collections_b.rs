@@ -643,7 +643,7 @@ fn builtin_clone(args: &[Value]) -> RuntimeResult<Value> {
 /// receiver's allocation.
 fn builtin_downgrade(args: &[Value]) -> RuntimeResult<Value> {
     let receiver = args.first().cloned().unwrap_or(Value::Unit);
-    Ok(Value::Weak(crate::value::WeakValue::downgrade(&receiver)))
+    Ok(Value::Weak(std::sync::Arc::new(crate::value::WeakValue::downgrade(&receiver))))
 }
 
 /// `w.upgrade()` - `Some(value)` while the referent is alive, else `None`.
@@ -853,7 +853,7 @@ fn builtin_json_set(args: &[Value]) -> RuntimeResult<Value> {
     };
     let value = args.get(2).cloned().unwrap_or(Value::Unit);
     if let Value::Json(json) = &receiver {
-        let json_std::Value::Object(entries) = json.as_value() else {
+        let json_std::Value::Object(entries) = &*json.as_value() else {
             return Ok(receiver);
         };
         let mut updated = entries.clone();

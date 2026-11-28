@@ -627,6 +627,7 @@ pub const LANGUAGE_TRAIT_ITEMS: &[(&str, &[&str])] = &[
     ("Ord", &["cmp", "partial_cmp"]),
     ("Clone", &["clone"]),
     ("Default", &["default"]),
+    ("Drop", &["drop"]),
     ("Iterator", ITERATOR_ITEMS),
     ("From", &["from"]),
     ("TryFrom", &["Error", "try_from"]),

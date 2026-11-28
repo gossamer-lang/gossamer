@@ -1299,16 +1299,19 @@ fn assert_release_build_rejects(name: &str, body: &str, code: &str) {
 }
 
 #[test]
-fn release_rejects_i128_with_gt0014() {
-    assert_release_build_rejects(
-        "reject_i128",
-        r#"
+fn release_build_computes_and_prints_128_bit_integers() {
+    assert_release_stdout_eq(
+        "wide_ints",
+        r"
 fn main() {
-    let n: i128 = 1
-    println("{}", n)
+    let n: i128 = -170141183460469231731687303715884105728
+    let u: u128 = 340282366920938463463374607431768211455
+    println(n)
+    println(u / 3)
+    println(n.checked_sub(1))
 }
-"#,
-        "GT0014",
+",
+        "-170141183460469231731687303715884105728\n113427455640312821154458202477256070485\nNone\n",
     );
 }
 

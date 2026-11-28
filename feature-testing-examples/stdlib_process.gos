@@ -1,6 +1,4 @@
-// Locks the canonical `process::run` free-call path across tiers. The
-// other process fixtures only exercise the `exec::` alias; this pins
-// the `process::` spelling advertised in the skill card.
+// Locks the `process::run` free-call path across tiers.
 use std::process
 
 fn main() {

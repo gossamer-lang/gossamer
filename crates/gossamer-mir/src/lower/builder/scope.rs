@@ -434,6 +434,28 @@ impl<'a> Builder<'a> {
                 let value_ty = self.locals[value.local.0 as usize].ty;
                 self.ensure_sent_aggregate_meta(value_ty);
             }
+            // A runtime call answering a counted pair (`accept`'s stream and
+            // peer, `temp_file`'s file and path) hands over a copy blob, so
+            // the payload type carries the copy layout every frame holding
+            // one reads its ownership from: a function that returns the
+            // carrier and the caller that takes it agree it is a holder.
+            if let Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                destination,
+                ..
+            } = &terminator
+                && gossamer_abi::answers_counted_payload(name)
+                && destination.projection.is_empty()
+                && let gossamer_types::TyKind::Adt { def, substs } = self
+                    .tcx
+                    .kind_of(self.locals[destination.local.0 as usize].ty)
+                    .clone()
+                && (def.local == u32::MAX || def.local == u32::MAX - 1)
+                && let Some(payload) = substs.types().first().copied()
+                && matches!(self.tcx.kind_of(payload), gossamer_types::TyKind::Tuple(_))
+            {
+                let _ = self.ensure_aggr_copy_meta(payload);
+            }
             let terminator_span = self.expr_span;
             let block = self.current_block();
             block.terminator = terminator;
@@ -544,7 +566,11 @@ impl<'a> Builder<'a> {
                     .record_lifted_capture_kind(&name.name, word * 8, kind);
             }
             let wide = self.tcx.is_two_word_value(value_ty);
-            next_word += if wide { 2 } else { 1 };
+            next_word += if wide || self.tcx.is_wide_int(value_ty) {
+                2
+            } else {
+                1
+            };
             capture_words.push(word);
             wide_captures[i] = wide;
             if wide {
@@ -737,10 +763,11 @@ impl<'a> Builder<'a> {
                 );
             }
             let sink = self.fresh(unit_ty);
+            let wide_int = self.tcx.is_wide_int(self.locals[value_local.0 as usize].ty);
             self.emit_assign(
                 Place::local(sink),
                 Rvalue::CallIntrinsic {
-                    name: if wide_captures[i] {
+                    name: if wide_captures[i] || wide_int {
                         "gos_store_i128"
                     } else {
                         "gos_store"

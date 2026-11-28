@@ -1520,6 +1520,20 @@ fn carrier_payload_to_value(shape: CarrierShape, at: usize, word: i64) -> Value 
         CarrierNode::F64 => Value::Float(f64::from_bits(word as u64)),
         CarrierNode::Bool => Value::Bool(word & 1 != 0),
         CarrierNode::Char => Value::Char(char::from_u32(word as u32).unwrap_or('\u{fffd}')),
+        CarrierNode::I128 | CarrierNode::U128 => {
+            let bits = if word == 0 {
+                0
+            } else {
+                // SAFETY: a 128-bit payload word addresses its box's two initialised slots.
+                let words = unsafe { std::slice::from_raw_parts(word as *const u64, 2) };
+                u128::from(words[0]) | (u128::from(words[1]) << 64)
+            };
+            if shape.node(at) == CarrierNode::U128 {
+                Value::from_u128(bits)
+            } else {
+                Value::from_i128(bits.cast_signed())
+            }
+        }
         CarrierNode::Str => native_ptr_to_value(JitKind::NativeStr, word),
         CarrierNode::Error => read_native_error(word),
         CarrierNode::Struct => match shape.struct_shape().and_then(native_struct_shape) {
@@ -1590,8 +1604,10 @@ pub(crate) fn release_carrier_words(shape: CarrierShape, at: usize, disc: i64, p
         // SAFETY: an arm whose node is a `String` holds a string body the
         // words own one share of.
         CarrierNode::Str => unsafe { free_native(JitKind::NativeStr, payload) },
-        // SAFETY: a struct arm's word is a copy blob the words hold one share of.
-        CarrierNode::Struct => unsafe { rt::gos_rt_rc_release(payload as *mut u8) },
+        // SAFETY: a struct or 128-bit arm's word is a copy blob the words hold one share of.
+        CarrierNode::Struct | CarrierNode::I128 | CarrierNode::U128 => unsafe {
+            rt::gos_rt_rc_release(payload as *mut u8);
+        },
         CarrierNode::Enum => {
             // As in `carrier_payload_to_value`: the shape is registered.
             let enum_shape = shape
@@ -1649,6 +1665,20 @@ fn build_carrier_payload(
         (CarrierNode::F64, Value::Float(x)) => Some(x.to_bits() as i64),
         (CarrierNode::Bool, Value::Bool(b)) => Some(i64::from(*b)),
         (CarrierNode::Char, Value::Char(c)) => Some(i64::from(u32::from(*c))),
+        (CarrierNode::I128 | CarrierNode::U128, _) => {
+            let bits = if shape.node(at) == CarrierNode::U128 {
+                value.as_u128()?
+            } else {
+                value.as_i128()?.cast_unsigned()
+            };
+            // The low and high halves of the value, by construction.
+            let words = [bits as u64, (bits >> 64) as u64];
+            // SAFETY: `words` holds the value's two slots; the blob copies them
+            // and, holding nothing counted, needs no child layout.
+            let blob =
+                unsafe { rt::gos_rt_rc_alloc_copy(16, std::ptr::null(), words.as_ptr().cast()) };
+            (!blob.is_null()).then_some(blob as i64)
+        }
         (CarrierNode::Str, Value::String(_)) => build_native_str(value),
         (CarrierNode::Struct, Value::Struct(_)) => {
             let child = native_struct_shape(shape.struct_shape()?)?;
@@ -2296,6 +2326,9 @@ pub(crate) enum Dispatch {
 /// The dispatch a payload unwound out of a JIT body answers: the fault a
 /// Gossamer panic names, or a fallback for a fault of the host's own.
 fn unwound_dispatch(payload: &(dyn std::any::Any + Send)) -> Dispatch {
+    if let Some(gossamer_coro::GosExit(code)) = payload.downcast_ref::<gossamer_coro::GosExit>() {
+        return Dispatch::Panic(RuntimeError::Exit(*code));
+    }
     if let Some(fault) = gossamer_runtime::c_abi::panic::take_deferred_fault(payload) {
         return Dispatch::Panic(native_fault_error(fault));
     }
@@ -2308,6 +2341,9 @@ fn unwound_dispatch(payload: &(dyn std::any::Any + Send)) -> Dispatch {
 
 /// The bytecode fault a fault a JIT body raised is.
 fn native_fault_error(fault: gossamer_runtime::c_abi::panic::DeferredFault) -> RuntimeError {
+    if let Some(code) = fault.exit {
+        return RuntimeError::Exit(code);
+    }
     match fault.code.as_str() {
         "GX0005" => RuntimeError::Panic(fault.text),
         "GX0004" => RuntimeError::Arithmetic(fault.text),
@@ -2399,6 +2435,18 @@ macro_rules! call_through {
             // argument has an identical ABI on every target, unlike an `i128`
             // return (which Windows x64 places in a register Rust reads
             // differently). `invoke_prepared_native` decodes the carrier tuple.
+            // A 128-bit answer comes back through the same out-pointer, low
+            // word first.
+            JitKind::Wide { unsigned } => {
+                let mut bits: u128 = 0;
+                let f: extern "C" fn(*mut u128, $($t),*) = unsafe { mem::transmute($ptr) };
+                f(&raw mut bits, $($a),*);
+                Some(if unsigned {
+                    Value::from_u128(bits)
+                } else {
+                    Value::from_i128(bits.cast_signed())
+                })
+            }
             JitKind::ResultEnumPtr(_) | JitKind::Carrier(_) => {
                 // A `u128` slot is 16-byte aligned, matching the thunk's
                 // aligned `i128` store; `disc` is the low word, `payload`
@@ -3912,7 +3960,7 @@ pub(crate) fn prepare(jit: std::sync::Arc<JitFn>) -> Option<Prepared> {
     // `Some` / `None`) arm on the native path; the scalar fast path has
     // no decode step and would hand the caller the raw `[disc, payload]`
     // pair as a tuple.
-    let carrier_return = matches!(jit.returns, JitKind::Carrier(_));
+    let carrier_return = matches!(jit.returns, JitKind::Carrier(_) | JitKind::Wide { .. });
     let has_native = native_return.is_some()
         || result_enum.is_some()
         || carrier_return
@@ -3935,6 +3983,7 @@ pub(crate) fn prepare(jit: std::sync::Arc<JitFn>) -> Option<Prepared> {
                     | JitKind::StructPtr(_)
                     | JitKind::ArrayBlockPtr(..)
                     | JitKind::Carrier(_)
+                    | JitKind::Wide { .. }
                     | JitKind::ScalarRef
             )
         });
@@ -4069,6 +4118,7 @@ pub(crate) fn invoke_prepared(p: &Prepared, args: &[Value], graph_cache: &GraphC
                 | JitKind::ArrayBlockPtr(..)
                 | JitKind::ResultEnumPtr(_)
                 | JitKind::Carrier(_)
+                | JitKind::Wide { .. }
                 | JitKind::TupleReturn(_)
                 | JitKind::ScalarRef,
                 _,
@@ -4180,8 +4230,27 @@ fn invoke_prepared_native(p: &Prepared, args: &[Value], graph_cache: &GraphCache
     let mut built_carriers = BuiltCarriers(Vec::new());
     // The slots a borrowed scalar is lent through, alive for the whole call.
     let mut scalar_slots: Vec<Box<i64>> = Vec::new();
+    // The two words of each 128-bit parameter, low then high, at a stable
+    // address for the whole call.
+    let mut wide_words: Vec<Box<[u64; 2]>> = Vec::new();
     for (i, (kind, value)) in jit.params.iter().zip(args.iter()).enumerate() {
         let slot = match kind {
+            JitKind::Wide { unsigned } => {
+                let bits = if *unsigned {
+                    value.as_u128()
+                } else {
+                    value.as_i128().map(i128::cast_unsigned)
+                };
+                let Some(bits) = bits else {
+                    free_in_flight(&natives, &built_enums, &str_cells);
+                    return Dispatch::Fallback;
+                };
+                // The low and high halves of the value, by construction.
+                let words = Box::new([bits as u64, (bits >> 64) as u64]);
+                let addr = words.as_ptr() as i64;
+                wide_words.push(words);
+                Slot::I(addr)
+            }
             JitKind::ScalarRef => {
                 let bits = match value {
                     Value::Int(n) => *n,

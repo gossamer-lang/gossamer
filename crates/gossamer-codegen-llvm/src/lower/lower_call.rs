@@ -687,7 +687,7 @@ impl<'a> Lowerer<'a> {
         // the helper segfaulted dereferencing it (`SEGV_MAPERR`
         // at `si_addr=value`). Mirrors the cranelift-side
         // stack-slot dance in `lower_intrinsic_call`.
-        if name == "gos_rt_vec_push" && args.len() == 2 {
+        if matches!(name.as_str(), "gos_rt_vec_push" | "gos_rt_vec_push_owned") && args.len() == 2 {
             self.lower_vec_push_inline(args, destination, target)?;
             return Ok(());
         }
@@ -758,6 +758,13 @@ impl<'a> Lowerer<'a> {
         // (value-identical to the runtime `a.min(b)`/`a.max(b)`), removing a
         // per-call FFI boundary from tight numeric loops and unblocking
         // vectorization. `clamp` and the `f64` variants keep the runtime call.
+        if name == "gos_rt_clamp_i64"
+            && args.len() == 3
+            && self.tcx.is_wide_int(self.body.local_ty(destination.local))
+        {
+            self.lower_wide_clamp_inline(args, destination, target)?;
+            return Ok(());
+        }
         if (name == "gos_rt_min_i64" || name == "gos_rt_max_i64") && args.len() == 2 {
             self.lower_scalar_minmax_i64_inline(
                 name == "gos_rt_min_i64",
@@ -1096,6 +1103,15 @@ impl<'a> Lowerer<'a> {
             && render_ty(self.tcx, self.body.local_ty(destination.local)) == "i128"
         {
             let chan = self.lower_operand(&args[0])?;
+            // A channel end read out of a tuple or a sequence element travels
+            // as an integer word; the runtime takes it as a pointer.
+            let chan = if render_ty(self.tcx, self.operand_ty(&args[0])) == "ptr" {
+                chan
+            } else {
+                let as_ptr = self.fresh();
+                writeln!(self.out, "  {as_ptr} = inttoptr i64 {chan} to ptr").unwrap();
+                as_ptr
+            };
             let ctx = if ctx_recv {
                 let handle = self.lower_operand(&args[1])?;
                 // A context handle travels as an integer in the body; the
@@ -1506,6 +1522,9 @@ impl<'a> Lowerer<'a> {
 
     fn hashmap_storage_kind(&self, ty: Ty) -> Option<i32> {
         match self.tcx.kind(self.unwrap_ref(ty)) {
+            // A 128-bit value spans two words: it keys by content and is
+            // stored as a copy, which the first insert installs.
+            Some(TyKind::Int(int)) if int.is_wide() => None,
             // Every scalar occupies the same one word, and the runtime keeps
             // it as the bits the slot holds, so a float, a bool, a char, and
             // a narrow integer share the word-storage kind an `i64` names.
@@ -2157,7 +2176,9 @@ impl<'a> Lowerer<'a> {
                     .unwrap();
                 }
                 // A two-word value is held in both of its words.
-                if dest_ty == "i128" && self.tcx.is_two_word_value(dest_ty_mir) {
+                if dest_ty == "i128"
+                    && (self.tcx.is_two_word_value(dest_ty_mir) || self.tcx.is_wide_int(dest_ty_mir))
+                {
                     let wide = self.fresh();
                     writeln!(self.out, "  {wide} = load i128, ptr {addr}").unwrap();
                     self.store_value_to_place(destination, "i128", &wide);
@@ -2246,7 +2267,12 @@ impl<'a> Lowerer<'a> {
                 // The wide store is `gos_store_i128`; this one writes the word
                 // every other slot in the language is.
                 let store_ty = if name == "gos_store_i128" { "i128" } else { "i64" };
-                let val64 = if val_ty == "double" || val_ty == "float" {
+                let val64 = if let (Operand::Const(ConstValue::Int(n)), "i128") = (&args[2], store_ty)
+                {
+                    // A constant stored at 128 bits is that constant, its
+                    // sign included.
+                    n.to_string()
+                } else if val_ty == "double" || val_ty == "float" {
                     let tmp = self.fresh();
                     writeln!(self.out, "  {tmp} = bitcast {val_ty} {val_v} to i64").unwrap();
                     tmp

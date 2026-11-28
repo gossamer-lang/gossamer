@@ -123,6 +123,11 @@ enum Source {
 }
 
 impl Source {
+    /// Whether a decode of it takes a `json::DuplicateKeys` index.
+    const fn reads_duplicates(self) -> bool {
+        matches!(self, Self::Json | Self::Yaml)
+    }
+
     /// The step opening a reader over it.
     const fn open_step(self) -> &'static str {
         match self {
@@ -178,6 +183,11 @@ enum Kind {
     Narrow(&'static str),
     /// `u64` or `usize`, read as a `u64` and cast.
     Unsigned(&'static str),
+    /// `i128` or `u128` (`unsigned`): a number when it fits 64 bits, else a
+    /// string of its digits.
+    Wide {
+        unsigned: bool,
+    },
     F64,
     F32,
     Bool,
@@ -337,6 +347,8 @@ struct Gen<'a> {
 /// The reader's local in a decode function, and the writer's in an encode.
 const READER: &str = "__serde_r";
 const WRITER: &str = "__serde_w";
+/// A decode root's `json::DuplicateKeys` index parameter.
+const DUPLICATES: &str = "__serde_duplicates";
 
 impl Gen<'_> {
     fn stub_body(&mut self, op: Op, f: &HirFn, span: Span) -> Option<HirBody> {
@@ -360,8 +372,18 @@ impl Gen<'_> {
             } else {
                 self.tcx.string_ty()
             };
-            let input = self.local(&param, source_ty, span);
-            let tail = self.call_named(&root, vec![input], ret, span);
+            let mut inputs = vec![self.local(&param, source_ty, span)];
+            if source.reads_duplicates() {
+                // `duplicate_keys`, the stub's second parameter: the
+                // `json::DuplicateKeys` index the call passed.
+                let i64_ty = self.tcx.int_ty(IntTy::I64);
+                let duplicates = match f.params.get(1).and_then(|p| binding_name(&p.pattern)) {
+                    Some(name) => self.local(&name, i64_ty, span),
+                    None => self.int_lit(0, i64_ty, span),
+                };
+                inputs.push(duplicates);
+            }
+            let tail = self.call_named(&root, inputs, ret, span);
             return Some(self.body(Vec::new(), tail, ret, span));
         }
         let i64_ty = self.tcx.int_ty(IntTy::I64);
@@ -406,11 +428,7 @@ impl Gen<'_> {
         let answer = match op {
             Op::ToToml => self.step("wr_finish_toml", vec![w], ret, span),
             Op::ToYaml => self.step("wr_finish_yaml", vec![w], ret, span),
-            _ => {
-                let string_ty = self.tcx.string_ty();
-                let text = self.step("wr_finish", vec![w], string_ty, span);
-                self.ctor("Ok", vec![text], ret, span)
-            }
+            _ => self.step("wr_finish_json", vec![w], ret, span),
         };
         Some(self.body(stmts, answer, ret, span))
     }
@@ -596,8 +614,19 @@ impl Gen<'_> {
         let unit = self.tcx.unit();
         let mut out = Emit::default();
         let source_value = self.local("__serde_source", source_ty, span);
-        let reader = self.step(source.open_step(), vec![source_value], i64_ty, span);
+        let mut open_args = vec![source_value];
+        if source == Source::Yaml {
+            open_args.push(self.local(DUPLICATES, i64_ty, span));
+        }
+        let reader = self.step(source.open_step(), open_args, i64_ty, span);
         out.stmt(self.let_stmt(READER, false, i64_ty, reader, span));
+        if source == Source::Json {
+            let r = self.local(READER, i64_ty, span);
+            let policy = self.local(DUPLICATES, i64_ty, span);
+            let unit = self.tcx.unit();
+            let set = self.step("rd_duplicates", vec![r, policy], unit, span);
+            out.stmt(self.expr_stmt(set, span));
+        }
         let value = self.decode(&mut out, ty, span);
         out.stmt(self.let_stmt("__serde_value", false, ty, value, span));
         let stmts = self.finish(out, span);
@@ -624,7 +653,10 @@ impl Gen<'_> {
             self.block(vec![free], Some(success), ret, span)
         };
         let tail = self.if_else(failed, then, otherwise, ret, span);
-        let params = vec![self.param("__serde_source", source_ty, span)];
+        let mut params = vec![self.param("__serde_source", source_ty, span)];
+        if source.reads_duplicates() {
+            params.push(self.param(DUPLICATES, i64_ty, span));
+        }
         self.function(name, params, ret, stmts, tail, span)
     }
 
@@ -1008,6 +1040,10 @@ impl Gen<'_> {
                 let wide = self.cast(value, u64_ty, span);
                 self.write_step(out, "wr_u64", wide, span);
             }
+            Kind::Wide { unsigned } => {
+                let step = if unsigned { "wr_u128" } else { "wr_i128" };
+                self.write_step(out, step, value, span);
+            }
             // A float keeps its fraction (`1.0`), as `serde_json` writes one
             // and a `json::Value` holds one; the binding wire writes the
             // shortest text its reader takes.
@@ -1234,8 +1270,10 @@ impl Gen<'_> {
         self.struct_lit(&info.path, values, ty, span)
     }
 
-    /// Begins the current object and reads each named field from it, under
-    /// its key, skipped fields as their default.
+    /// Begins the current object and reads its members in document order,
+    /// each into the field its key names, then gives every field the
+    /// document left out its default, `None`, or a recorded failure. Skipped
+    /// fields read as their default.
     #[allow(clippy::too_many_arguments, reason = "one record's parts, spelled out")]
     fn read_named(
         &mut self,
@@ -1253,19 +1291,83 @@ impl Gen<'_> {
                 .and_then(|o| o.key.clone())
                 .unwrap_or_else(|| fields[i].name.clone())
         };
-        let keys: Vec<String> = (0..fields.len())
+        let read: Vec<usize> = (0..fields.len())
             .filter(|&i| !options.get(i).is_some_and(|o| o.skip))
-            .map(key_of)
             .collect();
+        let keys: Vec<String> = read.iter().map(|&i| key_of(i)).collect();
         self.begin_struct(out, &keys, span);
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let bool_ty = self.tcx.bool_ty();
+        let unit = self.tcx.unit();
+        // One slot and one presence flag per field the document may give.
+        let mut slots: Vec<(String, String)> = Vec::with_capacity(read.len());
+        for &i in &read {
+            let slot = self.fresh("f");
+            let has = self.fresh("has");
+            let zero = self.zero_value(field_tys[i], span);
+            out.stmt(self.let_stmt(&slot, true, field_tys[i], zero, span));
+            let no = self.expr(bool_ty, span, HirExprKind::Literal(HirLiteral::Bool(false)));
+            out.stmt(self.let_stmt(&has, true, bool_ty, no, span));
+            slots.push((slot, has));
+        }
+        // `let mut k = -1; while { k = rd_next_field(r); k >= 0 } { match k { .. } rd_leave(r) }`
+        let mut body = Emit::default();
+        let which = self.fresh("k");
+        let none = self.int_lit(-1, i64_ty, span);
+        out.stmt(self.let_stmt(&which, true, i64_ty, none, span));
+        let mut chain = self.unit_lit(span);
+        for (position, &i) in read.iter().enumerate().rev() {
+            let mut found = Emit::default();
+            let value = self.decode(&mut found, field_tys[i], span);
+            let (slot, has) = slots[position].clone();
+            found.stmt(self.assign_local(&slot, field_tys[i], value, span));
+            let yes = self.expr(bool_ty, span, HirExprKind::Literal(HirLiteral::Bool(true)));
+            found.stmt(self.assign_local(&has, bool_ty, yes, span));
+            let found = self.finish(found, span);
+            let then = self.block(found, None, unit, span);
+            let lhs = self.local(&which, i64_ty, span);
+            let rhs = self.int_lit(i64::try_from(position).unwrap_or(0), i64_ty, span);
+            let condition = self.expr(
+                bool_ty,
+                span,
+                HirExprKind::Binary {
+                    op: HirBinaryOp::Eq,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
+            );
+            chain = self.if_else(condition, then, chain, unit, span);
+        }
+        body.stmt(self.expr_stmt(chain, span));
+        body.stmt(self.leave_stmt(span));
+        let body = self.finish(body, span);
+        let r = self.reader(span);
+        let next = self.step("rd_next_field", vec![r], i64_ty, span);
+        let step = self.assign_local(&which, i64_ty, next, span);
+        let lhs = self.local(&which, i64_ty, span);
+        let zero = self.int_lit(0, i64_ty, span);
+        let more = self.expr(
+            bool_ty,
+            span,
+            HirExprKind::Binary {
+                op: HirBinaryOp::Ge,
+                lhs: Box::new(lhs),
+                rhs: Box::new(zero),
+            },
+        );
+        let condition = self.block(vec![step], Some(more), bool_ty, span);
+        out.stmt(self.while_true(condition, body, span));
         let mut values = Vec::new();
-        let mut read_index = 0i64;
+        let mut slot_of = read.iter().zip(slots).collect::<Vec<_>>().into_iter();
         for (index, (field, field_ty)) in fields.iter().zip(field_tys).enumerate() {
             let local = self.fresh("f");
             let field_options = options.get(index).cloned().unwrap_or_default();
             let value = if field_options.skip {
                 self.field_default(field_options.default.as_ref(), *field_ty, info, span)
             } else {
+                let Some((_, (slot, has))) = slot_of.next() else {
+                    continue;
+                };
                 let key = key_of(index);
                 let missing = if positional {
                     format!("missing element `{key}`")
@@ -1276,9 +1378,10 @@ impl Gen<'_> {
                     Some(default) => Absent::Default(default),
                     None => Absent::Fail(missing),
                 };
-                let value = self.read_field(read_index, *field_ty, absent, info, span);
-                read_index += 1;
-                value
+                let present = self.local(&has, bool_ty, span);
+                let given = self.local(&slot, *field_ty, span);
+                let otherwise = self.absent_value(absent, *field_ty, info, span);
+                self.if_else(present, given, otherwise, *field_ty, span)
             };
             out.stmt(self.let_stmt(&local, false, *field_ty, value, span));
             values.push((field.name.clone(), self.local(&local, *field_ty, span)));
@@ -1546,32 +1649,12 @@ impl Gen<'_> {
         out.stmt(self.expr_stmt(step, span));
     }
 
-    /// The value of struct field `index`: decoded when the document has it,
-    /// and otherwise `None` for an `Option`, the default under `#[default]`,
-    /// or a recorded failure.
-    fn read_field(
-        &mut self,
-        index: i64,
-        ty: Ty,
-        absent: Absent,
-        info: &AdtInfo,
-        span: Span,
-    ) -> HirExpr {
+    /// What a field the document leaves out reads as: `None` for an
+    /// `Option`, the default under `#[default]`, or a recorded failure.
+    fn absent_value(&mut self, absent: Absent, ty: Ty, info: &AdtInfo, span: Span) -> HirExpr {
         let i64_ty = self.tcx.int_ty(IntTy::I64);
-        let bool_ty = self.tcx.bool_ty();
         let unit = self.tcx.unit();
-        let r = self.local(READER, i64_ty, span);
-        let at = self.int_lit(index, i64_ty, span);
-        let present = self.step("rd_field", vec![r, at], bool_ty, span);
-        let mut found = Emit::default();
-        let value = self.decode(&mut found, ty, span);
-        let local = self.fresh("v");
-        found.stmt(self.let_stmt(&local, false, ty, value, span));
-        found.stmt(self.leave_stmt(span));
-        let found_stmts = self.finish(found, span);
-        let found_value = self.local(&local, ty, span);
-        let then = self.block(found_stmts, Some(found_value), ty, span);
-        let otherwise = match absent {
+        match absent {
             Absent::Default(default) => self.field_default(Some(&default), ty, info, span),
             Absent::Fail(_) if matches!(self.kind(ty), Some(Kind::Opt(_))) => self.none(ty, span),
             Absent::Fail(message) => {
@@ -1582,8 +1665,7 @@ impl Gen<'_> {
                 let zero = self.zero_value(ty, span);
                 self.block(vec![fail], Some(zero), ty, span)
             }
-        };
-        self.if_else(present, then, otherwise, ty, span)
+        }
     }
 
     /// Appends the steps that read a `ty` at the current value and answers
@@ -1635,6 +1717,19 @@ impl Gen<'_> {
                 self.step("rd_int", vec![r, expected, min, max], i64_ty, span)
             }
             Kind::Json => return self.step("rd_json", vec![r], ty, span),
+            Kind::Wide { unsigned } => {
+                let unsigned = *unsigned;
+                let (step, spelled) = if unsigned {
+                    ("rd_u128", "u128")
+                } else {
+                    ("rd_i128", "i128")
+                };
+                let expected = self.string_lit(spelled, span);
+                let read_ty = self
+                    .tcx
+                    .int_ty(if unsigned { IntTy::U128 } else { IntTy::I128 });
+                self.step(step, vec![r, expected], read_ty, span)
+            }
             Kind::Adt(..)
             | Kind::Seq(_)
             | Kind::Array(..)
@@ -1686,30 +1781,30 @@ impl Gen<'_> {
         self.local(&value, ty, span)
     }
 
-    /// A sequence, element by element.
+    /// A sequence, element by element in document order.
     fn decode_seq(&mut self, out: &mut Emit, ty: Ty, elem: Ty, span: Span) -> HirExpr {
-        let i64_ty = self.tcx.int_ty(IntTy::I64);
-        let count = self.fresh("n");
+        let bool_ty = self.tcx.bool_ty();
+        let unit = self.tcx.unit();
         let r = self.reader(span);
         let expected = self.string_lit("array", span);
-        let begun = self.step("rd_array", vec![r, expected], i64_ty, span);
-        out.stmt(self.let_stmt(&count, false, i64_ty, begun, span));
+        let begun = self.step("rd_array", vec![r, expected], unit, span);
+        out.stmt(self.expr_stmt(begun, span));
         let seq = self.fresh("seq");
-        let capacity = self.local(&count, i64_ty, span);
-        let fresh = self.call_path(&["Vec", "with_capacity"], vec![capacity], ty, span);
+        let fresh = self.call_path(&["Vec", "new"], Vec::new(), ty, span);
         out.stmt(self.let_stmt(&seq, true, ty, fresh, span));
-        let index = self.fresh("i");
-        let zero = self.int_lit(0, i64_ty, span);
-        out.stmt(self.let_stmt(&index, true, i64_ty, zero, span));
         let mut body = Emit::default();
-        let item = self.decode_elem(&mut body, &index, elem, span);
-        let unit = self.tcx.unit();
+        let item = self.decode(&mut body, elem, span);
+        let item_local = self.fresh("x");
+        body.stmt(self.let_stmt(&item_local, false, elem, item, span));
+        body.stmt(self.leave_stmt(span));
         let receiver = self.local(&seq, ty, span);
+        let item = self.local(&item_local, elem, span);
         let push = self.method(receiver, "push", vec![item], unit, span);
         body.stmt(self.expr_stmt(push, span));
-        body.stmt(self.increment(&index, span));
         let body = self.finish(body, span);
-        out.stmt(self.while_below(&index, &count, body, span));
+        let r = self.reader(span);
+        let next = self.step("rd_next_elem", vec![r], bool_ty, span);
+        out.stmt(self.while_true(next, body, span));
         self.local(&seq, ty, span)
     }
 
@@ -1825,32 +1920,23 @@ impl Gen<'_> {
         self.expr(ty, span, HirExprKind::Tuple(items))
     }
 
-    /// A `String`-keyed map, entry by entry in key order.
+    /// A `String`-keyed map, entry by entry in document order.
     fn decode_map(&mut self, out: &mut Emit, ty: Ty, value_ty: Ty, span: Span) -> HirExpr {
-        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let bool_ty = self.tcx.bool_ty();
         let unit = self.tcx.unit();
         let string_ty = self.tcx.string_ty();
-        let count = self.fresh("n");
         let r = self.reader(span);
         let expected = self.string_lit("object", span);
-        let begun = self.step("rd_map", vec![r, expected], i64_ty, span);
-        out.stmt(self.let_stmt(&count, false, i64_ty, begun, span));
+        let begun = self.step("rd_map", vec![r, expected], unit, span);
+        out.stmt(self.expr_stmt(begun, span));
         let map = self.fresh("map");
         let fresh = self.call_path(&["Map", "new"], Vec::new(), ty, span);
         out.stmt(self.let_stmt(&map, true, ty, fresh, span));
-        let index = self.fresh("i");
-        let zero = self.int_lit(0, i64_ty, span);
-        out.stmt(self.let_stmt(&index, true, i64_ty, zero, span));
         let mut body = Emit::default();
         let key = self.fresh("key");
         let r = self.reader(span);
-        let at = self.local(&index, i64_ty, span);
-        let name = self.step("rd_map_key", vec![r, at], string_ty, span);
+        let name = self.step("rd_entry_key", vec![r], string_ty, span);
         body.stmt(self.let_stmt(&key, false, string_ty, name, span));
-        let r = self.reader(span);
-        let at = self.local(&index, i64_ty, span);
-        let enter = self.step("rd_map_value", vec![r, at], unit, span);
-        body.stmt(self.expr_stmt(enter, span));
         let entry = self.decode(&mut body, value_ty, span);
         let entry_local = self.fresh("x");
         body.stmt(self.let_stmt(&entry_local, false, value_ty, entry, span));
@@ -1861,9 +1947,10 @@ impl Gen<'_> {
         let option_ty = self.option_ty(value_ty);
         let insert = self.method(receiver, "insert", vec![name, entry_value], option_ty, span);
         body.stmt(self.expr_stmt(insert, span));
-        body.stmt(self.increment(&index, span));
         let body = self.finish(body, span);
-        out.stmt(self.while_below(&index, &count, body, span));
+        let r = self.reader(span);
+        let next = self.step("rd_next_entry", vec![r], bool_ty, span);
+        out.stmt(self.while_true(next, body, span));
         self.local(&map, ty, span)
     }
 
@@ -1886,15 +1973,18 @@ impl Gen<'_> {
         self.local(READER, i64_ty, span)
     }
 
-    /// A value of `ty` for a read that has already failed: zeros, empties,
-    /// `None`, and for a user type its decode, which reads zeros once failed.
+    /// The zero value of `ty`: zeros, empties, `None`, and for a user type
+    /// its decode from no reader.
     fn zero_value(&mut self, ty: Ty, span: Span) -> HirExpr {
         let i64_ty = self.tcx.int_ty(IntTy::I64);
         match self.kind(ty) {
+            // A user type's zero is what its decoder reads from no reader:
+            // every step then answers its own zero, so the live walk stays
+            // where it stands.
             Some(Kind::Adt(def, adt_ty)) => {
                 let decoder = self.decoder(def, adt_ty);
-                let r = self.local(READER, i64_ty, span);
-                self.call_named(&decoder, vec![r], ty, span)
+                let none = self.int_lit(0, i64_ty, span);
+                self.call_named(&decoder, vec![none], ty, span)
             }
             Some(Kind::Tuple(elems)) => {
                 let items = elems.iter().map(|e| self.zero_value(*e, span)).collect();
@@ -1940,7 +2030,9 @@ impl Gen<'_> {
 
     fn scalar_zero(&mut self, kind: &Kind, ty: Ty, span: Span) -> HirExpr {
         match kind {
-            Kind::I64 | Kind::Narrow(..) | Kind::Unsigned(..) => self.int_lit(0, ty, span),
+            Kind::I64 | Kind::Narrow(..) | Kind::Unsigned(..) | Kind::Wide { .. } => {
+                self.int_lit(0, ty, span)
+            }
             Kind::F64 | Kind::F32 => self.expr(
                 ty,
                 span,
@@ -2007,6 +2099,9 @@ impl Gen<'_> {
         let peeled = self.peel(ty);
         Some(match self.tcx.kind_of(peeled).clone() {
             TyKind::Int(IntTy::I64) => Kind::I64,
+            TyKind::Int(int @ (IntTy::I128 | IntTy::U128)) => Kind::Wide {
+                unsigned: int == IntTy::U128,
+            },
             TyKind::Int(int @ (IntTy::U64 | IntTy::Usize)) => Kind::Unsigned(int_name(int)),
             TyKind::Int(int) => Kind::Narrow(int_name(int)),
             TyKind::Float(FloatTy::F32) => Kind::F32,
@@ -2496,6 +2591,37 @@ impl Gen<'_> {
     }
 
     /// `while index < count { body }`.
+    /// `while condition { body }`, the condition read afresh each time.
+    fn while_true(&mut self, condition: HirExpr, body: Vec<HirStmt>, span: Span) -> HirStmt {
+        let unit = self.tcx.unit();
+        let body = self.block(body, None, unit, span);
+        let looped = self.expr(
+            unit,
+            span,
+            HirExprKind::While {
+                condition: Box::new(condition),
+                body: Box::new(body),
+                label: None,
+            },
+        );
+        self.expr_stmt(looped, span)
+    }
+
+    /// `name = value`.
+    fn assign_local(&mut self, name: &str, ty: Ty, value: HirExpr, span: Span) -> HirStmt {
+        let unit = self.tcx.unit();
+        let place = self.local(name, ty, span);
+        let assign = self.expr(
+            unit,
+            span,
+            HirExprKind::Assign {
+                place: Box::new(place),
+                value: Box::new(value),
+            },
+        );
+        self.expr_stmt(assign, span)
+    }
+
     fn while_below(&mut self, index: &str, count: &str, body: Vec<HirStmt>, span: Span) -> HirStmt {
         let i64_ty = self.tcx.int_ty(IntTy::I64);
         let bool_ty = self.tcx.bool_ty();

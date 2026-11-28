@@ -1,4 +1,4 @@
-use std::image
+use std::image::{Image, Rgba}
 
 static mut ROWS: Vec<i64> = #[1]
 static mut VALUES: Map<String, Vec<String>> = {}
@@ -51,7 +51,7 @@ fn wrap(clone: bool) -> Wrap {
     if clone { return Wrap { values: values.clone() } }
     Wrap { values: values }
 }
-fn image_width(handle: i64) -> i64 { image::width(handle) }
+fn image_width(img: Image) -> i64 { img.width() }
 fn main() {
     check_statics()
     for _ in 0..100 {
@@ -60,12 +60,9 @@ fn main() {
         assert_eq(wrap(true).values, #[42])
         assert_eq(choose(true), #[42])
         assert_eq(choose(false), #[7, 42])
-        let handle = image::filled(16, 16, 0xff00ffff)
-        assert_eq(image_width(handle), 16)
-        assert(image::release(handle))
-        assert_eq(image_width(handle), 0)
-        assert(!image::release(handle))
+        let img = Image::filled(16, 16, Rgba { r: 255, g: 0, b: 255, a: 255 }).unwrap()
+        assert_eq(image_width(img), 16)
+        assert_eq(img.pixels().len(), 1024)
     }
-    assert(!image::release(0))
     println("native owner lifecycles: ok")
 }

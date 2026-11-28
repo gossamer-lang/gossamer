@@ -57,6 +57,47 @@ pub fn augment_source_with_program(source: &str) -> (String, Option<ParsedProgra
     (augmented, program)
 }
 
+/// The stdlib wrapper source a program takes, with what synthesis adds to it.
+struct Wrappers {
+    /// The wrappers followed by their synthesized methods and codecs.
+    text: String,
+    /// The wrappers alone, the text `tree`'s spans index.
+    source: String,
+    /// The wrappers parsed, when there are any.
+    tree: Option<SourceFile>,
+    /// The wrapper types a program type holding one may derive through.
+    admitted: AdmittedTypes,
+}
+
+/// The wrappers' structs render, compare, and order like the program's own,
+/// so they take the same synthesized methods, and a program type holding one
+/// takes them on the same terms. A wrapper that decodes a runtime answer into
+/// its own types takes their serde codecs too.
+fn wrappers_with_their_methods(source: String) -> Wrappers {
+    let tree = if source.is_empty() {
+        None
+    } else {
+        clean_parse_with_tokens(&source).0
+    };
+    let mut text = source.clone();
+    let mut admitted = AdmittedTypes::default();
+    if let Some(tree) = tree.as_ref() {
+        let (derives, found) = synthesize_derive_impls_with(tree, &AdmittedTypes::default());
+        let serde = synthesize_serde_impls(tree);
+        text.push_str(&derives);
+        if !synth_is_empty(&serde) {
+            text.push_str(&serde);
+        }
+        admitted = found;
+    }
+    Wrappers {
+        text,
+        source,
+        tree,
+        admitted,
+    }
+}
+
 fn augment(source: &str) -> Augmented {
     // The `codegen(..)` splice's `comptime fn` backer.
     let validators = synthesize_validators(source);
@@ -81,20 +122,15 @@ fn augment(source: &str) -> Augmented {
     // code compiles + runs on every tier. `rewrite_stdlib_struct_surface`
     // (in parse_with_autoderive) redirects the user's
     // `encoding::pem::*` call / literal / type sites onto these.
-    let mut stdlib_wrappers =
-        synthesize_stdlib_wrappers(source, reading.as_ref().or(parsed.as_ref()));
-    // The wrappers' structs render, compare, and order like the program's
-    // own, so they take the same synthesized methods, and a program type
-    // holding one takes them on the same terms.
-    let mut stdlib_admitted = AdmittedTypes::default();
-    if !stdlib_wrappers.is_empty()
-        && let (Some(wrapper_tree), _) = clean_parse_with_tokens(&stdlib_wrappers)
-    {
-        let (wrapper_derives, admitted) =
-            synthesize_derive_impls_with(&wrapper_tree, &AdmittedTypes::default());
-        stdlib_wrappers.push_str(&wrapper_derives);
-        stdlib_admitted = admitted;
-    }
+    let Wrappers {
+        text: stdlib_wrappers,
+        source: wrapper_source,
+        tree: wrapper_tree,
+        admitted: stdlib_admitted,
+    } = wrappers_with_their_methods(synthesize_stdlib_wrappers(
+        source,
+        reading.as_ref().or(parsed.as_ref()),
+    ));
     let (serde, derives, type_info) = if source_may_need_ast_synthesis(&tokens) {
         // Synthesis reads item names, fields, and types out of the tree and
         // splices the result back as source. A tree built through error
@@ -130,7 +166,9 @@ fn augment(source: &str) -> Augmented {
             rewrite_stdlib_struct_surface(&mut surface);
             synthesize_derive_impls_with(&surface, &stdlib_admitted).0
         };
-        derives.push_str(&synthesize_iterator_adapters(parsed, source));
+        let mut trees = vec![(parsed, source)];
+        trees.extend(wrapper_tree.as_ref().map(|tree| (tree, wrapper_source.as_str())));
+        derives.push_str(&synthesize_iterator_adapters(&trees));
         // Field-reflection functions for `typeInfo::<T>()`, emitted only
         // when the source reflects (keeps non-reflecting programs lean).
         let type_info = if source.contains("typeInfo") {
@@ -141,7 +179,10 @@ fn augment(source: &str) -> Augmented {
         set_aside.restore(&mut tree.items);
         (serde, derives, type_info)
     } else {
-        (String::new(), String::new(), String::new())
+        let derives = wrapper_tree.as_ref().map_or_else(String::new, |tree| {
+            synthesize_iterator_adapters(&[(tree, wrapper_source.as_str())])
+        });
+        (String::new(), derives, String::new())
     };
     if synth_is_empty(&serde)
         && stdlib_wrappers.is_empty()

@@ -1,0 +1,103 @@
+// A std handle keeps its own methods beside a program type of the same name,
+// top-level or in a module: `http::Server`, `http::Router`, `http::Response`,
+// `http::Request`, and `sync::WaitGroup` answer their std surface while the program's
+// `Server`, `Router`, `Response`, `Request`, and `WaitGroup` answer theirs,
+// and a std `http::Request` literal builds the std handle.
+
+use std::errors
+use std::http
+use std::http::router
+use std::sync
+
+struct Server {
+    port: i64
+}
+
+impl Server {
+    fn addr(&self) -> String { f"own:{self.port}" }
+}
+
+struct Router {
+    routes: i64
+}
+
+impl Router {
+    fn get(&self, path: String) -> String { f"own {path} of {self.routes}" }
+}
+
+struct WaitGroup {
+    count: i64
+}
+
+impl WaitGroup {
+    fn add(&mut self, n: i64) { self.count += n }
+}
+
+struct Response {
+    code: i64
+}
+
+impl Response {
+    fn with_header(&self, key: String, value: String) -> String { f"own {self.code} {key}={value}" }
+
+    fn bytes(&self) -> i64 { self.code * 10 }
+}
+
+struct Request {
+    id: i64
+}
+
+impl Request {
+    fn form_value(&self, key: String) -> String { f"own {key} of {self.id}" }
+}
+
+mod quic {
+    pub struct Server {
+        pub port: i64
+    }
+
+    impl Server {
+        pub fn addr(&self) -> String { f"quic:{self.port}" }
+    }
+}
+
+// A loop over the program types' methods, so the JIT compiles them too.
+fn own_addresses(n: i64) -> i64 {
+    let mut total = 0
+    for port in 0..n {
+        total += Server { port }.addr().len() + Router { routes: port }.get("/").len()
+    }
+    total
+}
+
+fn ok(_r: http::Request) -> Result<http::Response, errors::Error> { Ok(http::Response::text(200, "hi")) }
+
+fn main() -> Result<(), errors::Error> {
+    println(own_addresses(3))
+    println(Server { port: 1 }.addr())
+    println(quic::Server { port: 2 }.addr())
+    println(Router { routes: 3 }.get("/x"))
+    let mut own_group = WaitGroup { count: 0 }
+    own_group.add(4)
+    println(own_group.count)
+    let own_response = Response { code: 5 }
+    println(f"{own_response.with_header("a", "b")} {own_response.bytes()}")
+
+    let server = http::Server::new()
+    server.listen("127.0.0.1:0")?
+    println(server.addr().starts_with("127.0.0.1:"))
+    let app = router::Router::new().get("/", ok)
+    println(server.shutdown(10))
+    let group = sync::WaitGroup::new()
+    group.add(1)
+    group.done()
+    group.wait()
+    println("waited")
+    let response = http::Response::text(200, "hi").with_header("x-k", "v")
+    println(f"{response.status} {response.headers[0].0} {response.bytes().len()}")
+    println(Request { id: 6 }.form_value("a"))
+    let posted = http::Request { method: "POST", path: "/f", query: "", query_pairs: #[], headers: #[("content-type", "application/x-www-form-urlencoded")], body: "a=7", raw_body: "a=7".bytes(), peer_addr: "" }
+    println(f"{posted.method} {posted.form_value("a")}")
+    let _ = app
+    Ok(())
+}

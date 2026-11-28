@@ -69,73 +69,6 @@ use crate::registry::{StdItem, StdItemKind, StdModule};
 
 use super::*;
 
-pub const OS_EXEC: StdModule = StdModule {
-    path: "std::os::exec",
-    summary: "Deprecated compatibility facade for child processes; new code uses std::process.",
-    items: &[
-        StdItem {
-            name: "Path",
-            kind: StdItemKind::Type,
-            doc: "Immutable UTF-8 lexical path value with value-returning operations.",
-        },
-        StdItem {
-            name: "Child",
-            kind: StdItemKind::Type,
-            doc: "Handle to a still-running child supporting wait / kill.",
-        },
-        StdItem {
-            name: "Pipeline",
-            kind: StdItemKind::Type,
-            doc: "Multi-stage subprocess pipeline (stdout-to-stdin chain).",
-        },
-        StdItem {
-            name: "Signal",
-            kind: StdItemKind::Type,
-            doc: "Portable signal selector (Term/Kill/Stop/Cont/Hup/Int/Usr1/Usr2/Pipe/Quit).",
-        },
-        StdItem {
-            name: "run",
-            kind: StdItemKind::Function,
-            doc: "One-shot: runs a program with args, captures stdout/stderr, returns Result<{stdout, stderr, code}, String>.",
-        },
-        StdItem {
-            name: "spawn",
-            kind: StdItemKind::Function,
-            doc: "Non-blocking launch; returns the child PID as Result<i64, errors::Error>.",
-        },
-        StdItem {
-            name: "spawn_piped",
-            kind: StdItemKind::Function,
-            doc: "Spawns a child with piped stdin/stdout; returns Result<Child, errors::Error>. The Child's write_stdin / close_stdin / read_line / read_stdout / wait / kill methods drive it interactively.",
-        },
-        StdItem {
-            name: "kill",
-            kind: StdItemKind::Function,
-            doc: "Best-effort SIGTERM by pid; returns true on success.",
-        },
-        StdItem {
-            name: "signal",
-            kind: StdItemKind::Function,
-            doc: "Send an arbitrary signal number to a pid; returns true on success.",
-        },
-        StdItem {
-            name: "kill_group",
-            kind: StdItemKind::Function,
-            doc: "Send SIGTERM to the entire process group (Unix); best-effort TerminateProcess on Windows.",
-        },
-        StdItem {
-            name: "wait_timeout",
-            kind: StdItemKind::Function,
-            doc: "Wait up to N ms for a pid to exit; returns exit code, -1 on timeout, -2 on error.",
-        },
-        StdItem {
-            name: "pipeline_run",
-            kind: StdItemKind::Function,
-            doc: "Run a Vec<String> of shell-tokenised commands as a stdout-to-stdin pipeline.",
-        },
-    ],
-};
-
 pub const OS_SIGNAL: StdModule = StdModule {
     path: "std::os::signal",
     summary: "POSIX-style signal subscription (Go's os/signal shape).",
@@ -542,6 +475,11 @@ pub const TERM: StdModule = StdModule {
             doc: "`read_input(timeout_ms, fd = STDIN) -> Result<Vec<u8>, errors::Error>`: the bytes of input available on `fd` within `timeout_ms` milliseconds (negative waits indefinitely), empty at the timeout or when the goroutine's cohort is cancelled. The goroutine parks while it waits.",
         },
         StdItem {
+            name: "read_password",
+            kind: StdItemKind::Function,
+            doc: "`read_password(prompt = \"\", fd = STDIN) -> Result<String, errors::Error>`: writes `prompt` to standard error and reads a line with echo off. On a terminal, line editing and signal keys are off too and the mode comes back at every exit, so Ctrl-C answers an `Err` (`interrupted`); backspace and Ctrl-U edit the line. Input that is not a terminal is read to its next newline. The line leaves out its `\\n` and a `\\r` before it; an empty input is an `Err`.",
+        },
+        StdItem {
             name: "resized",
             kind: StdItemKind::Function,
             doc: "`resized(fd = STDOUT) -> bool`: whether the size changed since the last call; the first call answers false.",
@@ -636,6 +574,16 @@ pub const FS: StdModule = StdModule {
     summary: "Filesystem reading, writing, and traversal (Rust std::fs shape).",
     items: &[
         StdItem {
+            name: "TempDir",
+            kind: StdItemKind::Type,
+            doc: "A fresh folder that removes itself, and everything in it, when the last reference to it goes (Python's `TemporaryDirectory`): `TempDir::new(prefix)?` in the system temporary root, or inside a chosen folder with `TempDir::new(prefix, parent: Some(dir))?`; `path()`, `join(name)`, and `keep()`, which leaves the folder in place and answers its path. An early `return` or `?` removes it too.",
+        },
+        StdItem {
+            name: "TempFile",
+            kind: StdItemKind::Type,
+            doc: "A fresh file that removes itself when the last reference to it goes (Python's `NamedTemporaryFile`): `TempFile::new(prefix)?` in the system temporary root, or inside a chosen folder with `TempFile::new(prefix, parent: Some(dir))?`; `path()`, `file()` (the open `fs::File`), and `keep()`, which leaves the file in place and answers its path.",
+        },
+        StdItem {
             name: "File",
             kind: StdItemKind::Type,
             doc: "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family. The file closes at `close()` or with its last handle. `std::term` and `os::fd` calls take the file itself, which keeps it open while they use it; `fd()` answers the OS descriptor (a handle on Windows) for a foreign call, and `File::from_raw(raw)` takes ownership of one a foreign call answered, as Go's `os.NewFile` does.",
@@ -673,7 +621,7 @@ pub const FS: StdModule = StdModule {
         StdItem {
             name: "temp_file",
             kind: StdItemKind::Function,
-            doc: "Creates a unique temporary file and returns its handle plus path.",
+            doc: "`temp_file(prefix, parent: Option<String> = None) -> Result<(fs::File, String), io::Error>`: creates a fresh file, open for reading and writing, and answers it with its path; the caller removes it. Without `parent` it lands in the system temporary root, with one inside that folder, named as `temp_dir` names its folders.",
         },
         StdItem {
             name: "read",
@@ -822,6 +770,46 @@ pub const FS: StdModule = StdModule {
             kind: StdItemKind::Function,
             doc: "Resolves a path to an absolute, symlink-free canonical form.",
         },
+        StdItem {
+            name: "symlink",
+            kind: StdItemKind::Function,
+            doc: "Creates `link`, a symbolic link to `target`; a relative target is read from the link's directory. On Windows, creating a link needs Developer Mode or privilege.",
+        },
+        StdItem {
+            name: "hard_link",
+            kind: StdItemKind::Function,
+            doc: "Creates `link`, a second name for the file `original` on the same filesystem.",
+        },
+        StdItem {
+            name: "read_link",
+            kind: StdItemKind::Function,
+            doc: "The target a symbolic link names, as written.",
+        },
+        StdItem {
+            name: "copy_dir",
+            kind: StdItemKind::Function,
+            doc: "Copies the directory `src` and everything below it to `dst`, which must not exist, answering the bytes copied. Links are copied as links and permissions are kept; `dst` inside `src` is refused.",
+        },
+        StdItem {
+            name: "move",
+            kind: StdItemKind::Function,
+            doc: "Moves a file, link, or directory: a rename on one filesystem, otherwise a copy followed by removing `src`.",
+        },
+        StdItem {
+            name: "chown",
+            kind: StdItemKind::Function,
+            doc: "`chown(path, uid: Option<i64> = None, gid: Option<i64> = None)` sets a file's owner and group on Unix, leaving an id given as `None` unchanged; other platforms answer `Err`.",
+        },
+        StdItem {
+            name: "disk_space",
+            kind: StdItemKind::Function,
+            doc: "The space of the filesystem holding a path, as a `DiskSpace`.",
+        },
+        StdItem {
+            name: "DiskSpace",
+            kind: StdItemKind::Type,
+            doc: "A filesystem's space in bytes: `total`, `free`, and `available` (free to an unprivileged caller).",
+        },
     ],
 };
 
@@ -954,6 +942,11 @@ pub const IO: StdModule = StdModule {
             doc: "Errors raised by I/O operations.",
         },
         StdItem {
+            name: "Stream",
+            kind: StdItemKind::Type,
+            doc: "A process standard stream, from `stdin()`, `stdout()`, or `stderr()`: `write`, `write_str`, `write_byte`, `write_byte_array`, `flush`, `read_line`, and `read_to_string`.",
+        },
+        StdItem {
             name: "MemoryStream",
             kind: StdItemKind::Type,
             doc: "An in-memory reader or writer made by the functions below. Copies of a stream name the same stream, and adapters built on it keep it alive; it is freed with the last of them.",
@@ -1030,12 +1023,17 @@ pub const OS: StdModule = StdModule {
             kind: StdItemKind::Function,
             doc: "Returns the target CPU architecture (e.g. \"x86_64\").",
         },
+        StdItem {
+            name: "hostname",
+            kind: StdItemKind::Function,
+            doc: "`hostname() -> Result<String, errors::Error>`: the machine's host name, as Go's `os.Hostname`.",
+        },
     ],
 };
 
 pub const PROCESS: StdModule = StdModule {
     path: "std::process",
-    summary: "Canonical process control and child-process API; std::os::exec is compatibility-only.",
+    summary: "Process control and child processes.",
     items: &[
         StdItem {
             name: "Command",
@@ -1077,6 +1075,17 @@ pub const PROCESS: StdModule = StdModule {
                   after the name as written when it has an extension. `None` when nothing matches.",
         },
         StdItem {
+            name: "exec",
+            kind: StdItemKind::Function,
+            doc: "`exec(program, args) -> Result<(), errors::Error>`: hands this process to the \
+                  program, found on `PATH`, and answers only when it cannot be started. On Unix \
+                  the process image is replaced (`execvp`): the process id, the parent, the \
+                  streams, and the signals sent to the process pass to the program. Windows runs \
+                  the program on this process's streams and ends this process with its exit \
+                  code. Buffered output is written first; pending `defer`s and exit hooks do not \
+                  run. Go's `syscall.Exec`, Python's `os.execvp`.",
+        },
+        StdItem {
             name: "run_inherit",
             kind: StdItemKind::Function,
             doc: "`run_inherit(program, args) -> Result<i64, errors::Error>`: runs the program on this \
@@ -1103,7 +1112,7 @@ pub const PROCESS: StdModule = StdModule {
         StdItem {
             name: "exit",
             kind: StdItemKind::Function,
-            doc: "Exits the current process with the given status code.",
+            doc: "Ends the process with the given status code after unwinding the calling goroutine, so the deferred expressions pending in each of its frames run first; `abort()` ends it at once.",
         },
         StdItem {
             name: "id",

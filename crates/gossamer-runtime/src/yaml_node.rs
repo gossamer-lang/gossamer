@@ -12,6 +12,8 @@ use serde::de::{
     self, Deserialize, DeserializeSeed, Deserializer, EnumAccess, MapAccess, SeqAccess, Visitor,
 };
 
+pub use gossamer_core::json::DuplicateKeys;
+
 /// Deepest nesting of sequences and mappings a YAML document may have.
 pub const DEFAULT_MAX_DEPTH: usize = 128;
 
@@ -148,10 +150,23 @@ pub enum JsonDecodeError {
 /// # Errors
 /// Returns why the document was refused.
 pub fn parse_json(text: &str, max_depth: usize) -> Result<serde_json::Value, JsonDecodeError> {
+    parse_json_with(text, max_depth, DuplicateKeys::Error)
+}
+
+/// [`parse_json`], reading a key a mapping repeats as `duplicates` says.
+///
+/// # Errors
+/// Returns why the document was refused.
+pub fn parse_json_with(
+    text: &str,
+    max_depth: usize,
+    duplicates: DuplicateKeys,
+) -> Result<serde_json::Value, JsonDecodeError> {
     let too_deep = std::cell::Cell::new(false);
     let seed = JsonSeed {
         depth_left: max_depth,
         too_deep: &too_deep,
+        duplicates,
     };
     seed.deserialize(serde_norway::Deserializer::from_str(text))
         .map_err(|e| {
@@ -173,13 +188,26 @@ pub fn decode_json(
     max_depth: usize,
     max_size: usize,
 ) -> Result<serde_json::Value, String> {
+    decode_json_with(text, max_depth, max_size, DuplicateKeys::Error)
+}
+
+/// [`decode_json`], reading a key a mapping repeats as `duplicates` says.
+///
+/// # Errors
+/// Returns the size cap's, the depth cap's, or the parser's message.
+pub fn decode_json_with(
+    text: &str,
+    max_depth: usize,
+    max_size: usize,
+    duplicates: DuplicateKeys,
+) -> Result<serde_json::Value, String> {
     if text.len() > max_size {
         return Err(format!(
             "input exceeds max_size ({} > {max_size})",
             text.len()
         ));
     }
-    parse_json(text, max_depth).map_err(|e| match e {
+    parse_json_with(text, max_depth, duplicates).map_err(|e| match e {
         JsonDecodeError::Parse(e) => e.to_string(),
         JsonDecodeError::TooDeep => format!("nesting depth exceeds max_depth ({max_depth})"),
     })
@@ -208,6 +236,7 @@ pub fn decode_all_json(
             let seed = JsonSeed {
                 depth_left: max_depth,
                 too_deep: &too_deep,
+                duplicates: DuplicateKeys::Error,
             };
             seed.deserialize(doc).map_err(|e| {
                 if too_deep.get() {
@@ -225,6 +254,7 @@ pub fn decode_all_json(
 struct JsonSeed<'a> {
     depth_left: usize,
     too_deep: &'a std::cell::Cell<bool>,
+    duplicates: DuplicateKeys,
 }
 
 impl JsonSeed<'_> {
@@ -238,6 +268,7 @@ impl JsonSeed<'_> {
         Ok(Self {
             depth_left: self.depth_left - 1,
             too_deep: self.too_deep,
+            duplicates: self.duplicates,
         })
     }
 }
@@ -321,7 +352,23 @@ impl<'de> Visitor<'de> for JsonSeed<'_> {
                 return Err(de::Error::custom("nesting depth exceeds max_depth"));
             }
             let value = map.next_value_seed(inner)?;
-            entries.insert(key.key_text(), value);
+            let key = key.key_text();
+            // YAML 1.2 requires a mapping's keys to be unique; a program that
+            // reads documents breaking that says which value stands.
+            match self.duplicates {
+                DuplicateKeys::UseLast => {
+                    entries.insert(key, value);
+                }
+                DuplicateKeys::UseFirst => {
+                    entries.entry(key).or_insert(value);
+                }
+                DuplicateKeys::Error => {
+                    if entries.contains_key(&key) {
+                        return Err(de::Error::custom(format!("duplicate key `{key}`")));
+                    }
+                    entries.insert(key, value);
+                }
+            }
         }
         Ok(serde_json::Value::Object(entries))
     }

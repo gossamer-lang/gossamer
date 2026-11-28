@@ -72,7 +72,7 @@ pub(crate) fn terminate_all() {
     }
     // A command that ran a program in-process may also hold children that
     // program started; they belong to the same interrupt.
-    gossamer_std::exec::terminate_live_children();
+    gossamer_std::process::terminate_live_children();
 }
 
 /// Ends the process group `pid` leads.
@@ -83,7 +83,7 @@ pub(crate) fn terminate_all() {
 pub(crate) fn terminate_group(pid: u32) {
     #[cfg(unix)]
     {
-        use gossamer_std::exec::{Signal, signal_process_group};
+        use gossamer_std::process::{Signal, signal_process_group};
         let _ = signal_process_group(pid, Signal::Term);
         // SIGKILL after a short grace so a worker that ignores SIGTERM - or
         // one wedged where no handler runs - still goes away.

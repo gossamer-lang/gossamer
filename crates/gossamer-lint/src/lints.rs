@@ -358,7 +358,7 @@ impl gossamer_ast::visitor::Visitor for NameUseScan<'_> {
     fn visit_expr(&mut self, expr: &Expr) {
         if let ExprKind::Struct { fields, .. } = &expr.kind {
             for field in fields {
-                if field.value.is_none() {
+                if field.shorthand || field.value.is_none() {
                     self.used.insert(field.name.name.clone());
                 }
             }

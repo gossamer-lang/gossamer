@@ -136,10 +136,6 @@ pub struct Router {
     method_not_allowed: Option<Handler>,
     /// Next insertion order.
     next_order: u32,
-    /// Optional shared application state. Handlers retrieve typed
-    /// values through `State::<T>::from_router(router)`.
-    /// Wired in by `http_state::attach_to_router(&mut router, state)`.
-    state: Option<crate::http_state::AppState>,
 }
 
 impl Router {
@@ -147,18 +143,6 @@ impl Router {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Stores `state` as the router's shared application state.
-    /// Called through [`crate::http_state::attach_to_router`].
-    pub fn set_state(&mut self, state: crate::http_state::AppState) {
-        self.state = Some(state);
-    }
-
-    /// Returns the attached application state, if any.
-    #[must_use]
-    pub fn state(&self) -> Option<&crate::http_state::AppState> {
-        self.state.as_ref()
     }
 
     /// Registers a handler under any method.

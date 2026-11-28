@@ -1,0 +1,23 @@
+// A signed `MIN / -1` (and `MIN % -1`) has a quotient past its type, so it
+// panics on every tier and at every width, as an overflowing `+` does.
+// `checked_div` and `checked_rem` answer `None` there instead.
+use std::env
+
+fn divide(a: i64, b: i64) -> i64 {
+    a / b
+}
+
+fn main() {
+    let min = i64::MIN
+    let neg = -(env::args().len() as i64 + 1)
+    println(f"{min.checked_div(-1):?} {min.checked_rem(-1):?} {min.checked_div(2):?}")
+    let small: i8 = -128
+    println(f"{small.checked_div(-1):?} {small / 2} {small % 3}")
+    println(f"{divide(-7, -1)} {divide(min, 1)}")
+    let mut total = 0
+    for d in 1..8 {
+        total += divide(-840, d)
+    }
+    println(f"{total}")
+    println(f"{divide(min, neg)}")
+}

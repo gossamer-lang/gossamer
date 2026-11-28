@@ -56,6 +56,13 @@ pub(crate) struct Builder<'a> {
     /// binding's own storage for the rest of its scope, so no later
     /// rebinding may re-point the call that defines it.
     pub(crate) named_locals: std::collections::HashSet<Local>,
+    /// The first local the statement being lowered created: the cleanup
+    /// point after a statement gives back the temporaries from here on
+    /// whose type holds a cleanup.
+    pub(crate) statement_locals_start: usize,
+    /// The local each `match` scrutinee was lowered into, by the scrutinee's
+    /// HIR id, for the release of a temporary scrutinee an arm makes.
+    pub(crate) temp_scrutinees: HashMap<u32, Local>,
     /// Names bound to a direct local reference. These names resolve to the
     /// source local, while deref lowering uses the marker to avoid adding a
     /// second physical dereference to that source place.
@@ -238,12 +245,10 @@ pub(crate) struct LoopContext {
 pub(crate) const fn int_to_str_symbol(int: gossamer_types::IntTy) -> &'static str {
     use gossamer_types::IntTy;
     match int {
-        IntTy::U8 | IntTy::U16 | IntTy::U32 | IntTy::U64 | IntTy::U128 | IntTy::Usize => {
-            "gos_rt_u64_to_str"
-        }
-        IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::I128 | IntTy::Isize => {
-            "gos_rt_i64_to_str"
-        }
+        IntTy::U128 => "gos_rt_u128_to_str",
+        IntTy::I128 => "gos_rt_i128_to_str",
+        IntTy::U8 | IntTy::U16 | IntTy::U32 | IntTy::U64 | IntTy::Usize => "gos_rt_u64_to_str",
+        IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::Isize => "gos_rt_i64_to_str",
     }
 }
 

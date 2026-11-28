@@ -111,6 +111,7 @@ pub(crate) fn install_encoding_yaml(globals: &mut Vec<(&'static str, Value)>) {
     // built-in string/value method dispatch.
     for (short, call) in [
         ("parse", builtin_yaml_parse as BuiltinFnPub),
+        ("__parse_with", builtin_yaml_parse),
         ("parse_all", builtin_yaml_parse_all),
         ("encode", builtin_yaml_encode),
         ("encode_all", builtin_yaml_encode_all),
@@ -193,7 +194,7 @@ pub(crate) fn gossamer_value_to_yaml(v: &Value) -> gossamer_std::encoding::yaml:
         Value::Float(f) => YV::Float(*f),
         Value::String(s) => YV::String(s.as_str().to_string()),
         Value::Array(arr) => YV::Seq(arr.iter().map(gossamer_value_to_yaml).collect()),
-        Value::Json(json) => json_value_to_yaml(json.as_value()),
+        Value::Json(json) => json_value_to_yaml(&json.as_value()),
         Value::Map(map) => {
             let guard = map.lock();
             let pairs: Vec<_> = guard
@@ -235,10 +236,15 @@ fn json_value_to_yaml(v: &gossamer_std::json::Value) -> gossamer_std::encoding::
 
 pub(crate) fn builtin_yaml_parse(args: &[Value]) -> RuntimeResult<Value> {
     let src = args.first().and_then(as_str).unwrap_or("");
+    // `yaml::__parse_with(text, policy)` is `yaml::parse(text, duplicate_keys:)`.
+    let duplicates = match args.get(1) {
+        Some(Value::Int(n)) => gossamer_std::encoding::yaml::DuplicateKeys::from_index(*n),
+        _ => gossamer_std::encoding::yaml::DuplicateKeys::Error,
+    };
     // The document is a `json::Value` exactly as `json::parse` answers one,
     // so every `json::` accessor reads it, as on the compiled tier
     // (`gos_rt_yaml_parse`).
-    match gossamer_std::encoding::yaml::parse_json(src) {
+    match gossamer_std::encoding::yaml::parse_json_with(src, duplicates) {
         Ok(v) => Ok(ok_variant(Value::Json(Arc::new(
             crate::value::JsonInner::new(v),
         )))),

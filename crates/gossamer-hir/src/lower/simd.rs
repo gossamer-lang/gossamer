@@ -2028,6 +2028,7 @@ impl Lowerer<'_> {
             Some(TyKind::Int(IntTy::I8 | IntTy::U8)) => 8,
             Some(TyKind::Int(IntTy::I16 | IntTy::U16)) => 16,
             Some(TyKind::Int(IntTy::I32 | IntTy::U32)) => 32,
+            Some(TyKind::Int(IntTy::I128 | IntTy::U128)) => 128,
             _ => 64,
         }
     }

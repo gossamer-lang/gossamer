@@ -1,0 +1,46 @@
+// `math::Rational`: exact ratios of big integers in lowest terms with a
+// positive denominator, `+ - * /`, ordering, conversion from integers,
+// decimals, and the exact value of a float, the nearest float back with
+// ties to even, and parsing of `n/d` and decimal text.
+use std::math::{Decimal, Rational}
+use std::math::big
+
+fn r(text: String) -> Rational { Rational::parse(text).unwrap() }
+
+fn main() {
+    let third = Rational::from_i64(1) / Rational::from_i64(3)
+    let sixth = r("1/6")
+    println(f"{third} + {sixth} = {third + sixth}")
+    println(f"{third} - {sixth} = {third - sixth}, times {third * sixth}, over {third / sixth}")
+    println(f"normalized {Rational::new(big::int_from_i64(6), big::int_from_i64(-4))} parts {r("-6/4").numerator()} {r("-6/4").denominator()}")
+    println(f"ordering {third > sixth} {sixth < third} {r("2/4") == r("1/2")} max {third.max(sixth)}")
+    let mut values = #[r("3/4"), r("-1/2"), r("5/3"), r("0"), r("1/3")]
+    values.sort()
+    println(f"sorted {values}")
+    println(f"decimal {Rational::from_decimal(Decimal::parse("1.25").unwrap())} parse {r("-0.075")} {r("+7/21")} {r(" 12 ")}")
+    println(f"exact 0.1 = {Rational::from_f64(0.1).unwrap()}")
+    println(f"exact -2.5 = {Rational::from_f64(-2.5).unwrap()}, 0 = {Rational::from_f64(-0.0).unwrap()}")
+    match Rational::from_f64(f64::NAN) {
+        Ok(v) => println(f"nan became {v}")
+        Err(e) => println(f"nan: {e}")
+    }
+    match Rational::from_f64(f64::INFINITY) {
+        Ok(v) => println(f"inf became {v}")
+        Err(e) => println(f"inf: {e}")
+    }
+    println(f"to_f64 {third.to_f64()} {r("1/10").to_f64()} {Rational::from_f64(1e-310).unwrap().to_f64():e} {r("2/3").to_f64() * 3.0}")
+    let big_ratio = Rational::new(big::int_pow(big::int_from_i64(10), 400), big::int_from_i64(3))
+    println(f"huge {big_ratio.to_f64()} {(-big_ratio).to_f64()} tiny {big_ratio.recip().to_f64()}")
+    let tie = Rational::new(big::int_from_str("9007199254740993").unwrap(), big::int_from_i64(1))
+    println(f"tie {tie.to_f64() == 9007199254740992.0}")
+    println(f"abs {r("-3/7").abs()} recip {r("-3/7").recip()} zero {r("0/5").is_zero()} integer {r("8/4").is_integer()} {r("8/4")}")
+    let mut sum = Rational::from_i64(0)
+    for k in 1..=20 { sum = sum + Rational::new(big::int_from_i64(1), big::int_from_i64(k * (k + 1))) }
+    println(f"telescoping sum {sum}")
+    for bad in #["3/0", "1/2/3", "3/-4", "x/2", "", "1.2.3"] {
+        match Rational::parse(bad) {
+            Ok(v) => println(f"{bad:?} accepted as {v}")
+            Err(e) => println(f"{bad:?}: {e}")
+        }
+    }
+}

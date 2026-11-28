@@ -150,7 +150,7 @@ pub(crate) fn builtin_static_serve_file(args: &[Value]) -> RuntimeResult<Value> 
             ];
             fields.push(("headers", Value::Array(Arc::new(Vec::new()))));
             Ok(ok_variant(Value::struct_(
-                "Response",
+                "http::Response",
                 Arc::unwrap_or_clone(Arc::new(fields)),
             )))
         }

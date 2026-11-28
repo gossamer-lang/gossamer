@@ -30,7 +30,7 @@ use anyhow::{Result, anyhow};
 
 use crate::cmd::attr_walk::{collect_selected_fn_names, item_has_attr};
 use crate::loaders::load_and_check_with_sf;
-use crate::paths::{collect_lint_targets, default_test_root, read_source};
+use crate::paths::{collect_lint_targets, default_test_root};
 
 /// Options threaded into [`run_with_opts`].
 pub(crate) struct BenchOpts {
@@ -212,10 +212,7 @@ fn run_one(target: &BenchTarget) -> Result<BenchRecord> {
 }
 
 fn run_one_inner(target: &BenchTarget) -> Result<BenchRecord> {
-    let source = read_source(&target.file)?;
-    let mut map = gossamer_lex::SourceMap::new();
-    let file_id = map.add_file(target.file.to_string_lossy().into_owned(), source.clone());
-    let (program, _sf, tcx) = load_and_check_with_sf(&source, file_id, &map, None)?;
+    let (program, _sf, tcx) = load_bench_unit(&target.file)?;
     let mut vm = gossamer_interp::Vm::new();
     // A benchmark run enters the one function it times, so that is the body
     // the promotion snapshot is built around.
@@ -308,11 +305,32 @@ fn digits(n: u128) -> usize {
 /// annotated fn name in source order. Mirrors `gos test`'s
 /// `collect_test_names`.
 fn collect_bench_names(file: &Path) -> Result<Vec<String>> {
-    let source = read_source(file)?;
-    let mut map = gossamer_lex::SourceMap::new();
-    let file_id = map.add_file(file.to_string_lossy().into_owned(), source.clone());
-    let (_program, sf, _tcx) = load_and_check_with_sf(&source, file_id, &map, None)?;
+    let (_program, sf, _tcx) = load_bench_unit(file)?;
     let mut names = Vec::new();
     collect_selected_fn_names(&sf.items, &|item| item_has_attr(item, "bench"), &mut names);
     Ok(names)
+}
+
+/// The checked program of `file`, prepared as `gos run` and `gos test`
+/// prepare it: sibling modules bundled, the standard library's Gossamer
+/// wrappers and derives added, and compile-time blocks folded, so a bench
+/// times the program the other commands run.
+fn load_bench_unit(
+    file: &Path,
+) -> Result<(
+    gossamer_hir::HirProgram,
+    gossamer_ast::SourceFile,
+    gossamer_types::TyCtxt,
+)> {
+    let unit = crate::paths::read_entry_unit(file)?;
+    let prepared = crate::unit_cache::prepare(&unit.source, &file.to_string_lossy(), &unit.origins);
+    if let Some(error) = prepared.fold_error {
+        return Err(anyhow!(
+            "{}: compile-time evaluation failed: {error}",
+            file.display()
+        ));
+    }
+    let (map, file_id) =
+        super::test::unit_source_map(file, &unit, prepared.source.clone(), prepared.generated_len);
+    load_and_check_with_sf(&prepared.source, file_id, &map, prepared.program)
 }

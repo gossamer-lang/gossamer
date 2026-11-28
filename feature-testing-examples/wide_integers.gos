@@ -1,0 +1,125 @@
+// 128-bit integers: arithmetic at the full width, the containers and
+// payloads that hold them, callbacks over them, map keys in order, and
+// their text and JSON forms.
+use std::encoding::json
+
+struct Account {
+    id: u128
+    cents: i128
+}
+
+enum Amount {
+    Cents(i128)
+    Pair(u128, i64)
+    Nothing
+}
+
+fn describe(a: Amount) -> String {
+    match a {
+        Amount::Cents(c) => f"cents {c}"
+        Amount::Pair(u, n) => f"pair {u} {n}"
+        Amount::Nothing => "nothing"
+    }
+}
+
+fn half(x: i128) -> Option<i128> {
+    if x % 2 == 0 { Some(x / 2) } else { None }
+}
+
+fn apply(f: Fn(i128) -> i128, x: i128) -> i128 {
+    f(x)
+}
+
+fn arithmetic(a: i128, b: i128, u: u128) {
+    println(f"{a + b} {a - b} {a * 3} {a / 7} {a % 7} {-a}")
+    println(f"{a < b} {a == b} {a.min(b)} {a.max(b)} {a.clamp(-5, 5)}")
+    println(f"{a & b} {a | b} {a ^ b} {!a} {a << 3} {a >> 2} {u >> 100}")
+    println(f"{a as% i64} {a as% u8} {a as f64} {u as% u64}")
+    println(f"{a.abs()} {a +% b} {a *% b} {u +% 1}")
+    println(f"{a.checked_add(b):?} {a.checked_mul(a):?}")
+    println(f"{u / 3} {u % 1000} {a:x} {u:o}")
+}
+
+fn sign(n: i128) -> String {
+    match n {
+        i128::MIN..=-1 => "neg"
+        0 => "zero"
+        1..=i128::MAX => "pos"
+    }
+}
+
+fn size(u: u128) -> String {
+    match u {
+        0 => "none"
+        1..=1000 => "few"
+        _ => "many"
+    }
+}
+
+fn main() {
+    let min: i128 = -170141183460469231731687303715884105728
+    let max: u128 = 340282366920938463463374607431768211455
+    let mut down = max
+    for i in 0..3 {
+        let a: i128 = 1000000000000000000 * (i as i128 - 1) + 7
+        arithmetic(a, -12345678901234567890123, down)
+        down -= 1
+    }
+    println(min)
+    println(max)
+    println(f"{170141183460469231731687303715884105727i128:x}")
+    println(5i128.checked_add(170141183460469231731687303715884105727))
+
+    let mut xs: Vec<i128> = #[6, 100000000000000000002, -9, min]
+    xs.push(1)
+    xs.insert(0, 100000000000000000001).unwrap()
+    println(xs)
+    println(xs.pop())
+    xs.sort()
+    println(xs)
+    xs.sort_by(|p, q| q.cmp(p))
+    println(xs)
+    println(xs.iter().fold(0i128, |acc, v| acc +% v))
+    println(xs.iter().max_by_key(|v| v.abs_diff(0)))
+    println(xs.map(|v| v / 3))
+    println(xs.filter(|v| *v > 7))
+    println(xs.contains(min))
+
+    let k: i128 = 1000000000000000000000
+    println(apply(|v| v + k, 5))
+    println(half(100000000000000000000))
+    println(half(7))
+
+    let mut m: Map<i128, u128> = Map::new()
+    m[min] = 1
+    m[7] = max
+    m[7] -= 5
+    println(m[min])
+    println(m[7])
+    println(m.get(8))
+    let mut tree: BTreeMap<i128, i64> = BTreeMap::new()
+    tree.insert(min, 1)
+    tree.insert(5, 2)
+    tree.insert(-5, 3)
+    for (key, v) in tree { println(f"{key} {v}") }
+    let mut seen: Set<u128> = Set::new()
+    seen.insert(max)
+    seen.insert(max)
+    println(seen.len())
+
+    println(describe(Amount::Cents(min)))
+    println(describe(Amount::Pair(max, -3)))
+    println(describe(Amount::Nothing))
+
+    let acct = Account { id: max, cents: -42 }
+    let text = json::encode(acct).unwrap()
+    println(text)
+    println(json::decode::<Account>(text).unwrap())
+    println(json::decode::<Account>("{\"id\": \"12\", \"cents\": 7}").unwrap())
+    println("123456789012345678901234567890".to_i128())
+    println("-5".to_u128())
+    println(max.to_string().len())
+    for n in #[min, -1, 0, 7, (1 << 100)] {
+        println(f"{sign(n)} {size((n as% u128) >> 64)}")
+    }
+}

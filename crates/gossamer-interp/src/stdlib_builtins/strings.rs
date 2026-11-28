@@ -138,6 +138,8 @@ pub(crate) fn install_strings(globals: &mut Vec<(&'static str, Value)>) {
         ("to_lowercase", builtin_strings_to_lower),
         ("to_uppercase", builtin_strings_to_upper),
         ("to_i64", builtin_strings_to_i64),
+        ("to_i128", builtin_strings_to_i128),
+        ("to_u128", builtin_strings_to_u128),
         ("to_f64", builtin_strings_to_f64),
         ("to_bool", builtin_strings_to_bool),
         ("starts_with", builtin_strings_starts_with),
@@ -344,6 +346,22 @@ pub(crate) fn builtin_strings_to_i64(args: &[Value]) -> RuntimeResult<Value> {
         Ok(n) => Ok(some_variant(Value::Int(n))),
         Err(_) => Ok(none_variant()),
     }
+}
+
+/// `s.to_i128() -> Option<i128>`: strict full-string parse.
+pub(crate) fn builtin_strings_to_i128(args: &[Value]) -> RuntimeResult<Value> {
+    let text = args.first().and_then(as_str).unwrap_or("");
+    Ok(text
+        .parse::<i128>()
+        .map_or_else(|_| none_variant(), |n| some_variant(Value::from_i128(n))))
+}
+
+/// `s.to_u128() -> Option<u128>`: strict full-string parse.
+pub(crate) fn builtin_strings_to_u128(args: &[Value]) -> RuntimeResult<Value> {
+    let text = args.first().and_then(as_str).unwrap_or("");
+    Ok(text
+        .parse::<u128>()
+        .map_or_else(|_| none_variant(), |n| some_variant(Value::from_u128(n))))
 }
 
 /// `s.to_f64() -> Option<f64>`: strict full-string parse.

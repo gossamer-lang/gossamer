@@ -1179,12 +1179,6 @@ pub const REGISTRY: &[(&str, &str)] = &[
                      payload through a typed `match`.",
     ),
     (
-        "GT0014",
-        "`i128` / `u128` have no 128-bit runtime representation on any\n\
-                     tier. Use `i64` / `u64`, or split the value into two 64-bit\n\
-                     halves.",
-    ),
-    (
         "GT0015",
         "A std free function was used as a first-class value, but the\n\
                      signature catalogue carries no fixed parameter list for it, so\n\
@@ -2194,6 +2188,31 @@ pub const REGISTRY: &[(&str, &str)] = &[
             A guard passed to a function, returned, stored, or copied would\n\
             outlive that release. Call `guard.unlock()` to release the lock\n\
             sooner, and take another guard where the lock is needed again.",
+    ),
+    (
+        "GT0145",
+        "`impl Drop` names a generic type or an enum.\n\
+            A type with `impl Drop` is a shared handle over one record of its\n\
+            fields, so it is a struct whose field types are known where it is\n\
+            declared. Hold the cleanup in a `runtime::Guard` field to give a\n\
+            generic type or an enum one.",
+    ),
+    (
+        "GT0146",
+        "`clone()` of a value whose type has `impl Drop`.\n\
+            `let b = a` shares one value, and `drop` runs once when the last\n\
+            reference goes; a clone would be a second value owning the same\n\
+            resource, released a second time. Build a new value with its own\n\
+            resource instead.",
+    ),
+    (
+        "GT0147",
+        "A `{v:.N}` precision on a value that is neither a number nor text.\n\
+            On a float it fixes the digits after the point, on an integer it\n\
+            writes that many zeros after the point, and on a `String` it keeps\n\
+            the first N characters. An `Option`, a collection, a struct, a\n\
+            `bool`, or a `char` has no such reading: format the number inside\n\
+            it, or drop the precision.",
     ),
     (
         "GX0001",

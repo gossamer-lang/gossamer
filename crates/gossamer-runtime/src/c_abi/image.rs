@@ -1,385 +1,260 @@
-//! Native bridge for the public `std::image` opaque-handle API.
+//! Native leaves under the `std::image` wrapper source. An `image::Image` is a
+//! Gossamer value holding its size and RGBA8 bytes; these calls decode,
+//! encode, fill, and resample those bytes, each checking the pixel limit
+//! before it allocates.
 
-use std::collections::HashMap;
-use std::os::raw::c_char;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::io::Write;
 
-use super::string::alloc_cstring;
+use super::result::gos_rt_result_new;
+use super::vec::GosVec;
+use crate::image_ops::ByteStore;
 
-#[derive(Clone, Copy)]
-struct Rgba(u8, u8, u8, u8);
+/// A packed `Vec<u8>` an image operation writes its answer into in place, so
+/// compiled code receives the bytes without a copy. An answer dropped before
+/// [`GosBytes::into_raw`] is freed.
+struct GosBytes(*mut GosVec);
 
-struct Image {
-    width: u32,
-    height: u32,
-    pixels: Vec<Rgba>,
+impl GosBytes {
+    /// The vector, handed to its new owner.
+    fn into_raw(self) -> *mut GosVec {
+        let raw = self.0;
+        std::mem::forget(self);
+        raw
+    }
 }
 
-impl Image {
-    fn new(width: u32, height: u32) -> Option<Self> {
-        Self::filled(width, height, Rgba(0, 0, 0, 0))
+impl Drop for GosBytes {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is the live vector this value alone holds.
+        unsafe { crate::c_abi::map::gos_rt_vec_free(self.0) };
     }
+}
 
-    fn filled(width: u32, height: u32, color: Rgba) -> Option<Self> {
-        let count = usize::try_from(u64::from(width) * u64::from(height)).ok()?;
-        Some(Self {
-            width,
-            height,
-            pixels: vec![color; count],
-        })
-    }
-
-    fn pixel(&self, x: u32, y: u32) -> Option<Rgba> {
-        let index = usize::try_from(u64::from(y) * u64::from(self.width) + u64::from(x)).ok()?;
-        (x < self.width && y < self.height).then(|| self.pixels[index])
-    }
-
-    fn set_pixel(&mut self, x: u32, y: u32, color: Rgba) -> bool {
-        let Some(index) = usize::try_from(u64::from(y) * u64::from(self.width) + u64::from(x)).ok()
-        else {
-            return false;
-        };
-        if x >= self.width || y >= self.height {
-            return false;
+impl ByteStore for GosBytes {
+    fn zeroed(len: usize) -> Self {
+        let raw = super::vec::gos_rt_vec_with_capacity(1, i64::try_from(len).unwrap_or(i64::MAX));
+        // SAFETY: a non-negative capacity answers a live header this value
+        // alone holds, with room for `len` bytes.
+        unsafe {
+            let header = &mut *raw;
+            if len > 0 && !header.ptr.is_null() {
+                std::ptr::write_bytes(header.ptr.as_ptr(), 0, len);
+                header.len = len as i64;
+            }
         }
-        self.pixels[index] = color;
-        true
+        Self(raw)
     }
 
-    fn rgba(&self) -> Vec<u8> {
-        self.pixels
-            .iter()
-            .flat_map(|p| [p.0, p.1, p.2, p.3])
-            .collect()
-    }
-
-    fn from_rgba(width: u32, height: u32, bytes: Vec<u8>) -> Option<Self> {
-        let count = usize::try_from(u64::from(width) * u64::from(height)).ok()?;
-        (bytes.len() == count.checked_mul(4)?).then(|| Self {
-            width,
-            height,
-            pixels: bytes
-                .chunks_exact(4)
-                .map(|p| Rgba(p[0], p[1], p[2], p[3]))
-                .collect(),
-        })
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: the vector holds `len` initialised bytes at `ptr`, and this
+        // value is its only holder for the borrow.
+        unsafe {
+            let header = &mut *self.0;
+            if header.ptr.is_null() {
+                return &mut [];
+            }
+            std::slice::from_raw_parts_mut(header.ptr.as_ptr(), header.len.max(0) as usize)
+        }
     }
 }
 
-fn decode(bytes: &[u8]) -> Option<Image> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        decode_png(bytes)
-    } else if bytes.starts_with(&[0xff, 0xd8]) {
-        decode_jpeg(bytes)
-    } else {
-        None
+impl Write for GosBytes {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // SAFETY: the vector is live and held by this value alone; the reserve
+        // leaves room for `buf` past its length.
+        unsafe {
+            let len = (*self.0).len;
+            super::vec::gos_rt_vec_reserve_at_least(self.0, len + buf.len() as i64);
+            let header = &mut *self.0;
+            std::ptr::copy_nonoverlapping(
+                buf.as_ptr(),
+                header.ptr.as_ptr().add(len as usize),
+                buf.len(),
+            );
+            header.len = len + buf.len() as i64;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
-fn decode_png(bytes: &[u8]) -> Option<Image> {
-    let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-    let mut reader = decoder.read_info().ok()?;
-    let mut buffer = vec![0; reader.output_buffer_size()?];
-    let info = reader.next_frame(&mut buffer).ok()?;
-    let bytes = &buffer[..info.buffer_size()];
-    let rgba = match info.color_type {
-        png::ColorType::Rgba => bytes.to_vec(),
-        png::ColorType::Rgb => bytes
-            .chunks_exact(3)
-            .flat_map(|p| [p[0], p[1], p[2], 255])
-            .collect(),
-        png::ColorType::Grayscale => bytes.iter().flat_map(|&v| [v, v, v, 255]).collect(),
-        png::ColorType::GrayscaleAlpha => bytes
-            .chunks_exact(2)
-            .flat_map(|p| [p[0], p[0], p[0], p[1]])
-            .collect(),
-        png::ColorType::Indexed => return None,
-    };
-    Image::from_rgba(info.width, info.height, rgba)
+fn err_result(message: &str) -> i128 {
+    let err = crate::c_abi::errors::error_new_from_bytes(message.as_bytes());
+    gos_rt_result_new(1, err as i64)
 }
 
-fn decode_jpeg(bytes: &[u8]) -> Option<Image> {
-    let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
-    let data = decoder.decode().ok()?;
-    let info = decoder.info()?;
-    let rgba = match info.pixel_format {
-        jpeg_decoder::PixelFormat::L8 => data.iter().flat_map(|&v| [v, v, v, 255]).collect(),
-        jpeg_decoder::PixelFormat::RGB24 => data
-            .chunks_exact(3)
-            .flat_map(|p| [p[0], p[1], p[2], 255])
-            .collect(),
-        jpeg_decoder::PixelFormat::CMYK32 => data
-            .chunks_exact(4)
-            .flat_map(|p| {
-                let (c, m, y, k) = (
-                    u16::from(p[0]),
-                    u16::from(p[1]),
-                    u16::from(p[2]),
-                    u16::from(p[3]),
-                );
-                [
-                    (255 - (c + k).min(255)) as u8,
-                    (255 - (m + k).min(255)) as u8,
-                    (255 - (y + k).min(255)) as u8,
-                    255,
-                ]
-            })
-            .collect(),
-        jpeg_decoder::PixelFormat::L16 => return None,
-    };
-    Image::from_rgba(u32::from(info.width), u32::from(info.height), rgba)
-}
-
-fn encode_png(image: &Image) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
-    let mut encoder = png::Encoder::new(&mut out, image.width, image.height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header().ok()?;
-    writer.write_image_data(&image.rgba()).ok()?;
-    drop(writer);
-    Some(out)
-}
-
-fn encode_jpeg(image: &Image, quality: u8) -> Option<Vec<u8>> {
-    let mut rgb = Vec::with_capacity(image.pixels.len() * 3);
-    for Rgba(r, g, b, a) in &image.pixels {
-        let alpha = u16::from(*a);
-        rgb.extend([
-            ((u16::from(*r) * alpha + 127) / 255) as u8,
-            ((u16::from(*g) * alpha + 127) / 255) as u8,
-            ((u16::from(*b) * alpha + 127) / 255) as u8,
-        ]);
-    }
-    let mut out = Vec::new();
-    jpeg_encoder::Encoder::new(&mut out, quality.clamp(1, 100))
-        .encode(
-            &rgb,
-            u16::try_from(image.width).ok()?,
-            u16::try_from(image.height).ok()?,
-            jpeg_encoder::ColorType::Rgb,
-        )
-        .ok()?;
-    Some(out)
-}
-
-static IMAGES: OnceLock<Mutex<HashMap<i64, Image>>> = OnceLock::new();
-static NEXT_IMAGE_ID: AtomicI64 = AtomicI64::new(1);
-
-fn images() -> &'static Mutex<HashMap<i64, Image>> {
-    IMAGES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn lock_images() -> std::sync::MutexGuard<'static, HashMap<i64, Image>> {
-    images()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-fn insert(image: Image) -> i64 {
-    let id = NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed);
-    lock_images().insert(id, image);
-    id
-}
-
-/// Releases an opaque image handle and its pixels. Invalid or already released
-/// handles answer false; later reads of a released handle use invalid defaults.
-#[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_image_release(handle: i64) -> i64 {
-    i64::from(lock_images().remove(&handle).is_some())
-}
-
-/// Native shutdown releases any remaining opaque handles after user hooks.
-pub(crate) fn release_program_images() {
-    if let Some(images) = IMAGES.get() {
-        let mut images = images
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        images.clear();
-        images.shrink_to_fit();
+fn bytes_result(answer: Result<GosBytes, String>) -> i128 {
+    match answer {
+        Ok(bytes) => gos_rt_result_new(0, bytes.into_raw() as i64),
+        Err(message) => err_result(&message),
     }
 }
 
-fn dimension(value: i64) -> u32 {
-    if value < 0 {
-        crate::c_abi::panic::panic_text("image dimension must be non-negative");
-    }
-    u32::try_from(value).unwrap_or_else(|_| {
-        crate::c_abi::panic::panic_text("image dimension is too large");
-        0
-    })
-}
+/// Layout of [`gos_rt_image_decode_raw`]'s `(i64, i64, Vec<u8>)` answer: the
+/// width, the height, then the pixel bytes the blob owns.
+static DECODED_META: [i64; 5] = [
+    gossamer_abi::rc::RC_KIND_STRUCT,
+    1,
+    0,
+    1,
+    (gossamer_abi::rc::RC_CHILD_VEC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 2,
+];
 
-fn rgba(value: i64) -> Rgba {
-    Rgba(
-        ((value >> 24) & 0xff) as u8,
-        ((value >> 16) & 0xff) as u8,
-        ((value >> 8) & 0xff) as u8,
-        (value & 0xff) as u8,
-    )
-}
-
-fn pack(value: Rgba) -> i64 {
-    (i64::from(value.0) << 24)
-        | (i64::from(value.1) << 16)
-        | (i64::from(value.2) << 8)
-        | i64::from(value.3)
-}
-
-unsafe fn input<'a>(value: *const c_char) -> Option<&'a str> {
-    if value.is_null() {
-        return None;
-    }
-    // SAFETY: this `unsafe fn`'s caller passes `value` live; non-null, checked above.
-    std::str::from_utf8(unsafe { crate::c_abi::gos_str_arg_bytes(value) }).ok()
-}
-
-/// `image::new(width, height) -> i64`.
-#[unsafe(no_mangle)]
-pub extern "C-unwind" fn gos_rt_image_new(width: i64, height: i64) -> i64 {
-    ffi_entry_passthrough!({ Image::new(dimension(width), dimension(height)).map_or(0, insert) })
-}
-
-/// `image::filled(width, height, rgba) -> i64`.
-#[unsafe(no_mangle)]
-pub extern "C-unwind" fn gos_rt_image_filled(width: i64, height: i64, color: i64) -> i64 {
-    ffi_entry_passthrough!({
-        Image::filled(dimension(width), dimension(height), rgba(color)).map_or(0, insert)
-    })
-}
-
-/// Decodes a base64 PNG or JPEG, returning zero for malformed data.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_image_decode_base64(text: *const c_char) -> i64 {
-    ffi_entry!({
-        // SAFETY: `text` is this shim's argument, live for the call (C-ABI contract) or null,
-        // which `input` accepts.
-        unsafe { input(text) }
-            .and_then(|text| crate::codec::base64::decode(text).ok())
-            .and_then(|bytes| decode(&bytes))
-            .map_or(0, insert)
-    })
-}
-
-/// `image::width(handle) -> i64`.
-#[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_image_width(handle: i64) -> i64 {
-    ffi_entry!({
-        lock_images()
-            .get(&handle)
-            .map_or(0, |image| i64::from(image.width))
-    })
-}
-
-/// `image::height(handle) -> i64`.
-#[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_image_height(handle: i64) -> i64 {
-    ffi_entry!({
-        lock_images()
-            .get(&handle)
-            .map_or(0, |image| i64::from(image.height))
-    })
-}
-
-/// `image::pixel(handle, x, y) -> i64`, returning -1 outside the image.
-#[unsafe(no_mangle)]
-pub extern "C-unwind" fn gos_rt_image_pixel(handle: i64, x: i64, y: i64) -> i64 {
-    ffi_entry_passthrough!({
-        lock_images()
-            .get(&handle)
-            .and_then(|image| image.pixel(dimension(x), dimension(y)))
-            .map_or(-1, pack)
-    })
-}
-
-/// `image::from_rgba_bytes(width, height, bytes) -> i64`: an image over
-/// `width * height` RGBA8 pixels, or 0 when `bytes` has another length.
+/// The pixel bytes of a checked `width` by `height` image, or the error.
 ///
 /// # Safety
-///
-/// `bytes` is null or a live `Vec<u8>` for the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C-unwind" fn gos_rt_image_from_rgba_bytes(
+/// `rgba` is null or a live vector for the call.
+unsafe fn pixels<'a>(
+    rgba: *const GosVec,
     width: i64,
     height: i64,
-    bytes: *const super::vec::GosVec,
-) -> i64 {
-    ffi_entry_passthrough!({
-        // SAFETY: `bytes` is this shim's argument, null or a live `Vec` (contract).
-        let bytes = unsafe { super::vec::vec_bytes(bytes) };
-        Image::from_rgba(dimension(width), dimension(height), bytes).map_or(0, insert)
-    })
+    context: &str,
+) -> Result<std::borrow::Cow<'a, [u8]>, String> {
+    let len = crate::image_ops::checked_len(context, width, height)?;
+    // SAFETY: this `unsafe fn`'s caller passes `rgba` live or null for the
+    // call, which `vec_bytes_cow` accepts; the borrow ends with the call.
+    let bytes = unsafe { super::vec::vec_bytes_cow(rgba) };
+    if bytes.len() != len {
+        return Err(format!(
+            "{context}: a {width}x{height} image holds {len} bytes, not {}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes)
 }
 
-/// `image::to_rgba_bytes(handle) -> Vec<u8>`: the pixels as RGBA8 bytes, row
-/// by row, empty for an invalid handle.
+/// `__gos_image_decode_raw(bytes) -> Result<(i64, i64, Vec<u8>), Error>`: a
+/// PNG, JPEG, or GIF (its first frame) as its size and RGBA8 bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_image_to_rgba_bytes(handle: i64) -> *mut super::vec::GosVec {
+pub unsafe extern "C" fn gos_rt_image_decode_raw(bytes: *const GosVec) -> i128 {
     ffi_entry!({
-        let bytes = lock_images()
-            .get(&handle)
-            .map(Image::rgba)
-            .unwrap_or_default();
-        super::encoding::bytes_to_gosvec(&bytes)
+        // SAFETY: `bytes` is this shim's argument, live for the call or null
+        // (C-ABI contract), which `vec_bytes` accepts.
+        let bytes = unsafe { super::vec::vec_bytes(bytes) };
+        match crate::image_ops::decode::<GosBytes>(&bytes) {
+            Ok(decoded) => {
+                let words = [
+                    i64::from(decoded.width),
+                    i64::from(decoded.height),
+                    decoded.rgba.into_raw() as i64,
+                ];
+                let blob = crate::c_abi::rc::counted_words(&words, &DECODED_META);
+                gos_rt_result_new(0, blob as i64)
+            }
+            Err(message) => err_result(&message),
+        }
     })
 }
 
-/// `image::set_pixel(handle, x, y, rgba) -> bool`.
+/// `__gos_image_filled_raw(width, height, r, g, b, a) -> Result<Vec<u8>, Error>`:
+/// the bytes of an image of one colour.
 #[unsafe(no_mangle)]
-pub extern "C-unwind" fn gos_rt_image_set_pixel(handle: i64, x: i64, y: i64, color: i64) -> i64 {
-    ffi_entry_passthrough!({
-        i64::from(
-            lock_images()
-                .get_mut(&handle)
-                .is_some_and(|image| image.set_pixel(dimension(x), dimension(y), rgba(color))),
+pub extern "C" fn gos_rt_image_filled_raw(
+    width: i64,
+    height: i64,
+    r: i64,
+    g: i64,
+    b: i64,
+    a: i64,
+) -> i128 {
+    ffi_entry!({
+        bytes_result(
+            crate::image_ops::checked_len("Image::filled", width, height)
+                .map(|len| crate::image_ops::fill(len, [r as u8, g as u8, b as u8, a as u8])),
         )
     })
 }
 
-/// Encodes a handle as base64 PNG, returning an empty string for an invalid handle.
+/// `__gos_image_check_raw(width, height, len) -> Result<(), Error>`: whether
+/// `len` bytes make a `width` by `height` image within the pixel limit.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_image_encode_png_base64(handle: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_image_check_raw(width: i64, height: i64, len: i64) -> i128 {
     ffi_entry!({
-        let text = lock_images()
-            .get(&handle)
-            .and_then(encode_png)
-            .map_or_else(String::new, |bytes| crate::codec::base64::encode(&bytes));
-        alloc_cstring(text.as_bytes())
-    })
-}
-
-/// Encodes a handle as base64 JPEG, returning an empty string for an invalid handle.
-#[unsafe(no_mangle)]
-pub extern "C-unwind" fn gos_rt_image_encode_jpeg_base64(handle: i64, quality: i64) -> *mut c_char {
-    ffi_entry_passthrough!({
-        if !(1..=100).contains(&quality) {
-            crate::c_abi::panic::panic_text(
-                "image::encode_jpeg: quality must be between 1 and 100",
-            );
+        match crate::image_ops::checked_len("Image::from_rgba", width, height) {
+            Ok(expected) if usize::try_from(len) == Ok(expected) => gos_rt_result_new(0, 0),
+            Ok(expected) => err_result(&format!(
+                "Image::from_rgba: a {width}x{height} image holds {expected} bytes, not {len}"
+            )),
+            Err(message) => err_result(&message),
         }
-        let text = lock_images()
-            .get(&handle)
-            .and_then(|image| encode_jpeg(image, quality as u8))
-            .map_or_else(String::new, |bytes| crate::codec::base64::encode(&bytes));
-        alloc_cstring(text.as_bytes())
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// `__gos_image_resize_raw(rgba, width, height, new_width, new_height)
+/// -> Result<Vec<u8>, Error>`: the bytes resampled with a Lanczos-3 filter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_image_resize_raw(
+    rgba: *const GosVec,
+    width: i64,
+    height: i64,
+    new_width: i64,
+    new_height: i64,
+) -> i128 {
+    ffi_entry!({
+        // SAFETY: `rgba` is this shim's argument, live for the call or null.
+        let answer = unsafe { pixels(rgba, width, height, "Image::resize") }.and_then(|bytes| {
+            crate::image_ops::checked_len("Image::resize", new_width, new_height)?;
+            Ok(crate::image_ops::resize_rgba(
+                &bytes,
+                width as usize,
+                height as usize,
+                new_width as usize,
+                new_height as usize,
+            ))
+        });
+        bytes_result(answer)
+    })
+}
 
-    #[test]
-    fn releasing_an_image_retires_the_handle_and_pixels() {
-        let handle = gos_rt_image_filled(32, 16, 0xff00ffff);
-        assert!(handle > 0);
-        assert_eq!(gos_rt_image_width(handle), 32);
-        assert_eq!(gos_rt_image_release(handle), 1);
-        assert!(!lock_images().contains_key(&handle));
-        assert_eq!(gos_rt_image_width(handle), 0);
-        assert_eq!(gos_rt_image_release(handle), 0);
-        assert_eq!(gos_rt_image_release(0), 0);
-    }
+/// `__gos_image_encode_png_raw(rgba, width, height) -> Result<Vec<u8>, Error>`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_image_encode_png_raw(
+    rgba: *const GosVec,
+    width: i64,
+    height: i64,
+) -> i128 {
+    ffi_entry!({
+        // SAFETY: `rgba` is this shim's argument, live for the call or null.
+        let answer = unsafe { pixels(rgba, width, height, "Image::encode_png") }
+            .and_then(|bytes| crate::image_ops::encode_png(&bytes, width as u32, height as u32));
+        bytes_result(answer)
+    })
+}
+
+/// `__gos_image_encode_jpeg_raw(rgba, width, height, quality)
+/// -> Result<Vec<u8>, Error>`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_image_encode_jpeg_raw(
+    rgba: *const GosVec,
+    width: i64,
+    height: i64,
+    quality: i64,
+) -> i128 {
+    ffi_entry!({
+        let Some(quality) = u8::try_from(quality).ok().filter(|q| (1..=100).contains(q)) else {
+            return err_result(&format!(
+                "Image::encode_jpeg: quality runs from 1 through 100, not {quality}"
+            ));
+        };
+        // SAFETY: `rgba` is this shim's argument, live for the call or null.
+        let answer =
+            unsafe { pixels(rgba, width, height, "Image::encode_jpeg") }.and_then(|bytes| {
+                crate::image_ops::encode_jpeg(&bytes, width as u32, height as u32, quality)
+            });
+        bytes_result(answer)
+    })
+}
+
+/// `__gos_image_set_max_pixels_raw(limit) -> Result<(), Error>`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_image_set_max_pixels_raw(limit: i64) -> i128 {
+    ffi_entry!({
+        match crate::image_ops::set_max_pixels(limit) {
+            Ok(()) => gos_rt_result_new(0, 0),
+            Err(message) => err_result(&message),
+        }
+    })
 }

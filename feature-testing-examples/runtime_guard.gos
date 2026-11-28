@@ -1,0 +1,123 @@
+// `runtime::Guard::new(f)` runs `f` once, when the last reference to the
+// guard goes. A binding that holds a guard (directly, or through a `Vec`, a
+// `Map`, an `Option`, a tuple, or a field) lives to the end of its block, and
+// a cleanup runs when the statement that released the last reference ends,
+// on every tier.
+use std::{errors, runtime}
+use std::sync::channel
+
+fn make(name: String) -> runtime::Guard {
+    runtime::Guard::new(|| println(f"cleanup {name}"))
+}
+
+struct Holder {
+    label: String
+    guard: runtime::Guard
+}
+
+fn early(flag: bool) -> i64 {
+    let _g = make("early")
+    if flag {
+        println("returning early")
+        return 1
+    }
+    println("falling through")
+    2
+}
+
+fn fallible(fail: bool) -> Result<i64, errors::Error> {
+    let _g = make("fallible")
+    if fail {
+        Err(errors::new("boom"))?
+    }
+    println("no failure")
+    Ok(3)
+}
+
+fn take(_g: runtime::Guard) {
+    println("took guard")
+}
+
+fn hand_back() -> runtime::Guard {
+    let g = make("returned")
+    println("handing back")
+    g
+}
+
+fn containers() {
+    let mut all = #[make("v0"), make("v1")]
+    let _ = all.remove(0)
+    println("removed v0")
+    let mut m = { "a": make("map a") }
+    m["b"] = make("map b")
+    m.remove("a")
+    println("removed map a")
+    m["b"] = make("map b2")
+    println("replaced map b")
+    let mut opt = Some(make("opt"))
+    opt = None
+    println("cleared opt")
+    let h = Holder { label: "h", guard: make("holder") }
+    println(f"holder {h.label}")
+    let pair = (make("t0"), make("t1"))
+    let _a, _b = pair
+    println("destructured")
+}
+
+fn loops() {
+    for i in 0..5 {
+        let _g = make(f"iter {i}")
+        if i == 2 {
+            println("breaking")
+            break
+        }
+    }
+    let guards = #[make("e0"), make("e1")]
+    for _g in guards {
+        println("visiting")
+    }
+    if let Some(_g) = Some(make("if let")) {
+        println("in if let")
+    }
+    println("loops done")
+}
+
+fn handoff() {
+    let tx, rx = channel()
+    let _ = cohort {
+        let worker = spawn(|| {
+            while let Some(_g) = rx.recv() {
+                println("worker got a guard")
+            }
+            println("worker done")
+        })
+        tx.send(make("sent 1"))
+        tx.send(make("sent 2"))
+        tx.close()
+        let _ = worker.join()
+    }
+}
+
+fn main() {
+    let a = make("a")
+    let _b = a
+    println(f"early {early(true)}")
+    println(f"early {early(false)}")
+    println(f"fallible {fallible(true).is_err()}")
+    println(f"fallible {fallible(false).is_ok()}")
+    take(make("param"))
+    println("after take")
+    let _back = hand_back()
+    println("got it back")
+    let mut r = make("first")
+    r = make("second")
+    println("reassigned")
+    let _shared = make("captured")
+    let f = || println("closure holds it")
+    f()
+    containers()
+    loops()
+    handoff()
+    let _quiet = runtime::Guard::new(|| println("cleanup without captures"))
+    println("end of main")
+}

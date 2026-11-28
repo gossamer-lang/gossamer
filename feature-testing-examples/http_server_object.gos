@@ -4,10 +4,11 @@
 // and `shutdown(deadline)` drains and says whether it finished.
 //
 // Binds port 0, so it needs no port lock and cannot collide with another
-// fixture. Self-terminating: the client runs in main and the program
+// fixture. `listen` has bound the socket before the server goroutine
+// starts, so a request made at once waits in the backlog for `serve`. Self-terminating: the client runs in main and the program
 // returns normally.
 
-use std::{errors, http, time}
+use std::{errors, http}
 
 fn hello(_r: http::Request) -> Result<http::Response, errors::Error> {
     Ok(http::Response::text(200, "hi"))
@@ -19,7 +20,6 @@ fn main() -> Result<(), errors::Error> {
     let addr = s.addr()
     println("bound: {}", addr.contains("127.0.0.1:"))
     spawn(|| run_server(s))
-    time::sleep(300)
     match http::get(format("http://{}/x", addr), Vec::from([])) {
         Ok(r) => println("get status={} body={}", r.status, r.body)
         Err(e) => println("get error: {}", e)

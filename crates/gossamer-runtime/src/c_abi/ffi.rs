@@ -230,11 +230,14 @@ pub fn attach_foreign_thread() {
 /// Ends the program with the fault a callback raised on a thread outside
 /// the program's foreign calls, where no Gossamer frame can take it: the
 /// report it would have printed, and exit code 101.
-pub fn foreign_thread_fault(code: &str, prefix: &str, text: &str, trace: &str) -> ! {
-    if !trace.is_empty() {
-        eprint!("{trace}");
+pub fn foreign_thread_fault(fault: &super::panic::DeferredFault) -> ! {
+    if let Some(code) = fault.exit {
+        super::panic::exit_now(code);
     }
-    super::panic::fatal_program_fault(code, prefix, text, false)
+    if !fault.trace.is_empty() {
+        eprint!("{}", fault.trace);
+    }
+    super::panic::fatal_program_fault(&fault.code, &fault.prefix, &fault.text, false)
 }
 
 /// The C-ABI entry of a compiled callback: runs the adapter `code` over the
@@ -267,9 +270,7 @@ pub unsafe extern "C" fn gos_rt_ffi_callback_run(
         // SAFETY: the adapter reads only the words the shim stored.
         return match super::par::run_deferred(|| unsafe { adapter(words as i64) }) {
             Ok(result) => result as u64,
-            Err(fault) => {
-                foreign_thread_fault(&fault.code, &fault.prefix, &fault.text, &fault.trace)
-            }
+            Err(fault) => foreign_thread_fault(&fault),
         };
     }
     // SAFETY: the adapter reads only the words the shim stored.
@@ -318,7 +319,7 @@ fn start_library(init: *const u8) {
         let init: Init = unsafe { std::mem::transmute::<*const u8, Init>(init) };
         // SAFETY: as above.
         if let Err(fault) = super::par::run_deferred(|| unsafe { init() }) {
-            foreign_thread_fault(&fault.code, &fault.prefix, &fault.text, &fault.trace);
+            foreign_thread_fault(&fault);
         }
     });
 }
@@ -684,7 +685,6 @@ pub unsafe extern "C-unwind" fn gos_rt_ffi_atomic_rmw(
         Ok(old) => old,
         Err(message) => {
             super::panic::panic_text(&message);
-            0
         }
     }
 }
@@ -706,7 +706,6 @@ pub unsafe extern "C-unwind" fn gos_rt_ffi_atomic_cas(
         Ok(old) => old,
         Err(message) => {
             super::panic::panic_text(&message);
-            0
         }
     }
 }
@@ -1004,6 +1003,8 @@ fn class_shape(class: i64) -> (usize, bool, bool) {
 /// until the matching [`gos_rt_ffi_buf_end`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ffi_buf_begin(v: *mut GosVec, class: i64) -> *mut u8 {
+    // SAFETY: `v` is this shim's vector, null or live, which it writes.
+    unsafe { crate::c_abi::vec::vec_unshare(v) };
     if v.is_null() {
         return std::ptr::NonNull::<u8>::dangling().as_ptr();
     }

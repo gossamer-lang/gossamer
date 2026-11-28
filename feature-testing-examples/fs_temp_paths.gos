@@ -1,0 +1,73 @@
+// fs::TempDir and fs::TempFile remove themselves when the last reference
+// goes, an early return or ? included; keep() leaves them in place. Only
+// their owner may read them (0700 and 0600 on Unix). `parent:` makes either,
+// and `fs::temp_file`'s file, inside a chosen folder.
+use std::{errors, fs, path}
+
+fn work(fail: bool) -> Result<String, errors::Error> {
+    let dir = fs::TempDir::new("work")?
+    let file = dir.join("data.txt")
+    fs::write(file, "hello".bytes())?
+    println(f"wrote: {fs::exists(file)}")
+    if fail {
+        return Err(errors::new("failed midway"))
+    }
+    Ok(dir.path())
+}
+
+/// A temporary file made in `area` that an early `Err` still removes.
+fn export(area: String, fail: bool) -> Result<String, errors::Error> {
+    let out = fs::TempFile::new("export", parent: Some(area))?
+    let _ = out.file().write_bytes("rows".bytes())
+    println(f"export in area: {out.path().starts_with(area)}")
+    if fail {
+        return Err(errors::new("export failed"))
+    }
+    Ok(out.path())
+}
+
+fn main() {
+    match work(true) {
+        Ok(_) => println("ok")
+        Err(e) => println(f"error: {e}")
+    }
+    let path = work(false).unwrap_or("")
+    println(f"dir left behind: {fs::exists(path)}")
+    let mut kept = fs::TempDir::new("kept").unwrap_or_else(|_| panic("no temp dir"))
+    let kept_path = kept.keep()
+    {
+        let t = fs::TempFile::new("note").unwrap_or_else(|_| panic("no temp file"))
+        let _ = t.file().write_bytes("abc".bytes())
+        println(f"temp file exists: {fs::exists(t.path())}")
+        println(f"size: {fs::file_size(t.path())}")
+    }
+    println(f"kept exists: {fs::exists(kept_path)}")
+    let probe_dir = fs::TempDir::new("mode").unwrap_or_else(|_| panic("no temp dir"))
+    let probe_file = fs::TempFile::new("mode").unwrap_or_else(|_| panic("no temp file"))
+    let dir_mode = fs::permissions(probe_dir.path()).unwrap_or(0) & 0o777
+    let file_mode = fs::permissions(probe_file.path()).unwrap_or(0) & 0o777
+    println(f"modes: dir {dir_mode:o}, file {file_mode:o}")
+    let _ = fs::remove_dir_all(kept_path)
+
+    let area = fs::TempDir::new("area").unwrap_or_else(|_| panic("no temp dir"))
+    match export(area.path(), true) {
+        Ok(_) => println("export ok")
+        Err(e) => println(f"error: {e}")
+    }
+    let left = export(area.path(), false).unwrap_or("")
+    println(f"export left behind: {fs::exists(left)}")
+    let nested = fs::TempDir::new("nested", parent: Some(area.path())).unwrap_or_else(|_| panic("no nested dir"))
+    println(f"nested in area: {nested.path().starts_with(area.path())}")
+    match fs::temp_file("raw", parent: Some(area.path())) {
+        Ok((raw, raw_path)) => {
+            println(f"raw file in area: {raw_path.starts_with(area.path())}")
+            let _ = raw.close()
+            let _ = fs::remove_file(raw_path)
+        }
+        Err(e) => println(f"error: {e}")
+    }
+    match fs::TempFile::new("export", parent: Some(path::join(area.path(), "missing"))) {
+        Ok(_) => println("missing parent accepted")
+        Err(_) => println("missing parent refused: true")
+    }
+}

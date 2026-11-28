@@ -259,16 +259,8 @@ fn mutable_call_arguments_reject_obvious_overlapping_aliases() {
 }
 
 #[test]
-fn mutable_call_arguments_reject_aliases_through_captures_and_values() {
+fn mutable_call_arguments_reject_aliases_through_windows_and_values() {
     let cases = [
-        (
-            "closure argument captures the mutable root",
-            "fn poke(xs: &mut [i64], peek: Fn() -> i64) -> i64 { xs[0] = 1\n peek() }\nfn main() { let mut xs = #[0]\n let _ = poke(&mut xs, || xs[0]) }",
-        ),
-        (
-            "let-bound closure captures the mutable root",
-            "fn run(xs: &mut Vec<i64>, f: Fn()) { xs[0] = 1\n f() }\nfn main() { let mut xs = #[0]\n let grow = || xs.push(2)\n run(&mut xs, grow) }",
-        ),
         (
             "by-value container argument reads the mutable root",
             "fn both(xs: &mut Vec<i64>, ys: Vec<i64>) -> i64 { xs[0] = 1\n ys[0] }\nfn main() { let mut xs = #[0]\n let _ = both(&mut xs, xs) }",
@@ -289,6 +281,16 @@ fn mutable_call_arguments_reject_aliases_through_captures_and_values() {
     assert_accepted(
         "scalar and string reads beside a mutable argument",
         "fn set(xs: &mut Vec<i64>, n: i64) { xs[0] = n }\nfn label(s: &mut String, t: String) { *s = t }\nfn main() { let mut xs = #[0]\n set(&mut xs, xs.len())\n let mut s = \"a\"\n label(&mut s, s) }",
+    );
+    // A closure over a binding lent `&mut` reads its current value and its
+    // writes reach it, as the callee's do.
+    assert_accepted(
+        "closure argument captures the mutable root",
+        "fn poke(xs: &mut [i64], peek: Fn() -> i64) -> i64 { xs[0] = 1\n peek() }\nfn main() { let mut xs = #[0]\n let _ = poke(&mut xs, || xs[0]) }",
+    );
+    assert_accepted(
+        "let-bound closure captures the mutable root",
+        "fn run(xs: &mut Vec<i64>, f: Fn()) { xs[0] = 1\n f() }\nfn main() { let mut xs = #[0]\n let grow = || xs.push(2)\n run(&mut xs, grow) }",
     );
     assert_accepted(
         "a closure that shadows the root does not capture it",

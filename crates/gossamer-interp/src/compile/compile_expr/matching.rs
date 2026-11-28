@@ -54,6 +54,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 let g = self.compile_expr(guard)?;
                 fails.push(self.emit(Op::BranchIfNot { cond: g, target: 0 }));
             }
+            self.release_cleanup_scrutinee(scrutinee, scrut);
             // Hand the arm's result to the match register instead of
             // cloning when its last use is here (the `?` desugar's
             // `Ok(__try_value) => __try_value` keeps the unwrapped value
@@ -109,6 +110,26 @@ impl<'tcx> FnBuilder<'tcx> {
         Ok(result)
     }
 
+    /// Empties a temporary scrutinee whose type holds a cleanup once an arm
+    /// has taken what it binds, so the arm's bindings hold the only shares,
+    /// as on the compiled tiers.
+    fn release_cleanup_scrutinee(&mut self, scrutinee: &HirExpr, scrut: Reg) {
+        let place = matches!(
+            scrutinee.kind,
+            HirExprKind::Path { .. }
+                | HirExprKind::Field { .. }
+                | HirExprKind::TupleIndex { .. }
+                | HirExprKind::Index { .. }
+                | HirExprKind::Unary { .. }
+        );
+        if !place && self.tcx.is_scope_bound(scrutinee.ty) {
+            self.emit(Op::ClearRegs {
+                start: scrut,
+                count: 1,
+            });
+        }
+    }
+
     /// Compiles a `match` whose value is discarded (statement position).
     /// Each arm body is compiled in statement context via
     /// `compile_expr_discarded`, so a tail-position in-place mutation
@@ -146,6 +167,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 let g = self.compile_expr(guard)?;
                 fails.push(self.emit(Op::BranchIfNot { cond: g, target: 0 }));
             }
+            self.release_cleanup_scrutinee(scrutinee, scrut);
             self.compile_expr_discarded(&arm.body)?;
             self.writeback_variant_payload(scrutinee, scrut, arm)?;
             end_jumps.push(self.emit(Op::Jump { target: 0 }));
@@ -340,7 +362,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 );
             }
             HirPatKind::Literal(lit) => {
-                let lit_reg = self.compile_literal(lit)?;
+                let lit_reg = self.compile_pattern_literal(lit, pat.ty)?;
                 let eq = self.alloc_reg();
                 self.emit(Op::Eq {
                     dst: eq,
@@ -447,7 +469,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 );
             }
             HirPatKind::Range { lo, hi, inclusive } => {
-                let lo_reg = self.compile_literal(lo)?;
+                let lo_reg = self.compile_pattern_literal(lo, pat.ty)?;
                 let ge = self.alloc_reg();
                 self.emit(Op::Ge {
                     dst: ge,
@@ -458,7 +480,7 @@ impl<'tcx> FnBuilder<'tcx> {
                     cond: ge,
                     target: 0,
                 }));
-                let hi_reg = self.compile_literal(hi)?;
+                let hi_reg = self.compile_pattern_literal(hi, pat.ty)?;
                 let cmp = self.alloc_reg();
                 if *inclusive {
                     self.emit(Op::Le {

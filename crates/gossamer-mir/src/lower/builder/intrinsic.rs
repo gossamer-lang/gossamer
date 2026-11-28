@@ -780,12 +780,24 @@ impl<'a> Builder<'a> {
         // `elem_bytes`. A float is the one class that needs its own helper,
         // because its comparator takes SSE registers.
         let elem_is_float = matches!(elem_kind, TyKind::Float(_));
-        let elem_is_scalar = matches!(
-            elem_kind,
-            TyKind::Int(_) | TyKind::String | TyKind::Bool | TyKind::Char | TyKind::Float(_)
-        ) || elem_is_opaque_handle;
-        let elem_is_aggregate =
-            !elem_is_opaque_handle && matches!(elem_kind, TyKind::Tuple(_) | TyKind::Adt { .. });
+        // A 128-bit element spans two slots, so it sorts the way a slot block
+        // does, its comparator reading both elements through their addresses.
+        let elem_is_wide = self.tcx.is_wide_int(elem_ty_concrete);
+        // A nested `Vec` element is one header word, read by the comparator
+        // as a `String` element is.
+        let elem_is_scalar = !elem_is_wide
+            && matches!(
+                elem_kind,
+                TyKind::Int(_)
+                    | TyKind::String
+                    | TyKind::Bool
+                    | TyKind::Char
+                    | TyKind::Float(_)
+                    | TyKind::Vec(_)
+            )
+            || elem_is_opaque_handle;
+        let elem_is_aggregate = elem_is_wide
+            || !elem_is_opaque_handle && matches!(elem_kind, TyKind::Tuple(_) | TyKind::Adt { .. });
         if !elem_is_scalar && !elem_is_aggregate {
             return None;
         }
@@ -799,7 +811,12 @@ impl<'a> Builder<'a> {
         // body's field-access projections walk off those
         // pointers correctly, no auto-deref needed.
         let i64_ty = self.tcx.int_ty(IntTy::I64);
-        let elem_ty = if elem_is_scalar || elem_is_aggregate {
+        let elem_ty = if elem_is_wide {
+            self.tcx.intern(TyKind::Ref {
+                mutability: gossamer_types::Mutbl::Not,
+                inner: elem_ty_concrete,
+            })
+        } else if elem_is_scalar || elem_is_aggregate {
             elem_ty_concrete
         } else {
             i64_ty
@@ -1082,7 +1099,7 @@ impl<'a> Builder<'a> {
         // A multi-slot value crosses as one handle word the backend copies
         // onto the heap, as a content-keyed map's value does.
         let _ = self.ensure_aggr_struct_meta(val_ty);
-        if self.is_inline_aggregate_ty(val_ty) {
+        if self.map_value_is_copied(val_ty) {
             let _ = self.ensure_aggr_copy_meta(val_ty);
         }
         let recv_local = self.lower_expr(receiver)?;
@@ -1194,7 +1211,7 @@ impl<'a> Builder<'a> {
         // frame gives back - and the structural meta names the heap children
         // that copy owns.
         let _ = self.ensure_aggr_struct_meta(val_ty);
-        if self.is_inline_aggregate_ty(val_ty) {
+        if self.map_value_is_copied(val_ty) {
             let _ = self.ensure_aggr_copy_meta(val_ty);
         }
         let recv_local = self.lower_expr(receiver)?;

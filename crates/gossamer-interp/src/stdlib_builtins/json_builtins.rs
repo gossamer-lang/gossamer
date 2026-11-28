@@ -161,7 +161,7 @@ pub(crate) fn builtin_json_std_parse(args: &[Value]) -> RuntimeResult<Value> {
 pub(crate) fn builtin_json_std_encode(args: &[Value]) -> RuntimeResult<Value> {
     if let Some(Value::Json(value)) = args.first() {
         return Ok(Value::String(
-            gossamer_std::json::encode(value.as_value()).into(),
+            gossamer_std::json::encode(&value.as_value()).into(),
         ));
     }
     let jv = crate::builtins::gossamer_to_json_value(args.first().unwrap_or(&Value::Unit));
@@ -171,7 +171,7 @@ pub(crate) fn builtin_json_std_encode(args: &[Value]) -> RuntimeResult<Value> {
 pub(crate) fn builtin_json_std_encode_pretty(args: &[Value]) -> RuntimeResult<Value> {
     if let Some(Value::Json(value)) = args.first() {
         return Ok(Value::String(
-            gossamer_std::json::encode_pretty(value.as_value()).into(),
+            gossamer_std::json::encode_pretty(&value.as_value()).into(),
         ));
     }
     let jv = crate::builtins::gossamer_to_json_value(args.first().unwrap_or(&Value::Unit));

@@ -162,6 +162,9 @@ pub use external_natives::{
     register_external_value,
 };
 pub use stdlib_builtins::cohort::{close_root as close_root_cohort, open_root as open_root_cohort};
+pub use stdlib_builtins::guard::{
+    discard_pending_cleanups, run_pending_cleanups, take_cleanup_fault,
+};
 pub use value::{
     Channel, Closure, NativeEnumOwner, NativeEnumShape, NativeStructShape, RuntimeError,
     RuntimeResult, SmolStr, Value, native_enum_to_variant, registry_stats_for_test,

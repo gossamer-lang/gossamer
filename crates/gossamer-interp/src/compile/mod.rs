@@ -378,6 +378,111 @@ pub fn collect_mut_self_methods(program: &gossamer_hir::HirProgram) -> MutSelfMe
     out
 }
 
+/// Prefix of the cell the HIR keeps a binding in when closures capture it
+/// and something writes it.
+const CAPTURE_CELL_PREFIX: &str = "__cell_";
+
+/// Whether some call in `program` lends `&mut`, as an argument or a `&mut
+/// self` receiver, a place inside a binding closures capture. Such a call
+/// passes the place itself, so the functions it may reach need their
+/// [`FnChunk::cell_variant`].
+pub fn lends_captured_places(
+    program: &gossamer_hir::HirProgram,
+    method_muts: &MutSelfMethods,
+) -> bool {
+    fn visit(expr: &HirExpr, method_muts: &MutSelfMethods, found: &mut bool) {
+        if *found {
+            return;
+        }
+        match &expr.kind {
+            HirExprKind::Unary {
+                op: HirUnaryOp::RefMut,
+                operand,
+            } if lends_captured_binding(operand) => *found = true,
+            HirExprKind::MethodCall { receiver, name, .. }
+                if lends_captured_binding(receiver)
+                    && method_muts
+                        .iter()
+                        .any(|qual| qual.rsplit("::").next() == Some(name.name.as_str())) =>
+            {
+                *found = true;
+            }
+            _ => {}
+        }
+        gossamer_hir::for_each_child_expr(expr, &mut |child| visit(child, method_muts, found));
+    }
+    let mut found = false;
+    let visit_fn = |decl: &HirFn, found: &mut bool| {
+        if let Some(body) = &decl.body {
+            gossamer_hir::for_each_child_expr_in_block(&body.block, &mut |expr| {
+                visit(expr, method_muts, found);
+            });
+        }
+    };
+    for item in &program.items {
+        match &item.kind {
+            gossamer_hir::HirItemKind::Fn(decl) => visit_fn(decl, &mut found),
+            gossamer_hir::HirItemKind::Impl(decl) => {
+                decl.methods.iter().for_each(|m| visit_fn(m, &mut found));
+            }
+            gossamer_hir::HirItemKind::Trait(decl) => {
+                decl.methods.iter().for_each(|m| visit_fn(m, &mut found));
+            }
+            gossamer_hir::HirItemKind::Const(decl) => visit(&decl.value, method_muts, &mut found),
+            gossamer_hir::HirItemKind::Static(decl) => {
+                visit(&decl.value, method_muts, &mut found);
+            }
+            gossamer_hir::HirItemKind::Adt(_) => {}
+        }
+    }
+    found
+}
+
+/// Whether `place` lies in a binding the HIR keeps in a capture cell.
+fn lends_captured_binding(place: &HirExpr) -> bool {
+    place_steps(place).is_some_and(|(root, _)| root.starts_with(CAPTURE_CELL_PREFIX))
+}
+
+/// The local a place lies in, with the steps from it to the place: fields,
+/// tuple slots, and literal indices.
+pub(crate) fn place_steps(place: &HirExpr) -> Option<(&str, Vec<crate::value::CaptureStep>)> {
+    use crate::value::CaptureStep;
+    let mut steps = Vec::new();
+    let mut current = place;
+    let root = loop {
+        current = match &current.kind {
+            HirExprKind::Unary {
+                op: HirUnaryOp::RefMut | HirUnaryOp::RefShared,
+                operand,
+            } if std::ptr::eq(current, place) => operand,
+            HirExprKind::Field { receiver, name } => {
+                steps.push(CaptureStep::Field(crate::value::intern_type_name(
+                    &name.name,
+                )));
+                receiver
+            }
+            HirExprKind::TupleIndex { receiver, index } => {
+                steps.push(CaptureStep::Tuple(usize::try_from(*index).ok()?));
+                receiver
+            }
+            HirExprKind::Index { base, index } => {
+                let HirExprKind::Literal(HirLiteral::Int(text)) = &index.kind else {
+                    return None;
+                };
+                steps.push(CaptureStep::Index(text.parse().ok()?));
+                base
+            }
+            HirExprKind::Path { segments, .. } => match segments.as_slice() {
+                [segment] => break segment.name.as_str(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+    };
+    steps.reverse();
+    Some((root, steps))
+}
+
 /// Collects the [`ImplMethodNames`] set, mirroring every key the loader
 /// files an `impl` or `trait` method under.
 pub fn collect_impl_method_names(program: &gossamer_hir::HirProgram) -> ImplMethodNames {
@@ -427,7 +532,9 @@ fn method_has_mut_self(decl: &HirFn) -> bool {
 }
 
 /// Compiles an [`HirFn`] body into a [`FnChunk`]. The caller owns the
-/// resulting chunk; the compiler itself has no shared state.
+/// resulting chunk; the compiler itself has no shared state. With
+/// `cell_variants`, a function taking a `&mut` parameter also gets its
+/// [`FnChunk::cell_variant`].
 pub fn compile_fn(
     decl: &HirFn,
     tcx: &TyCtxt,
@@ -443,6 +550,54 @@ pub fn compile_fn(
     source_map: Option<&gossamer_lex::SourceMap>,
     cov: Option<&gossamer_lex::SourceMap>,
     dispatch: Option<(&ParamDispatch, &str)>,
+    cell_variants: bool,
+) -> RuntimeResult<FnChunk> {
+    let compile = |cell_params| {
+        compile_fn_body(
+            decl,
+            tcx,
+            layouts,
+            wrappers,
+            inline_fns,
+            fn_param_shareable,
+            fn_param_tys,
+            consts,
+            method_muts,
+            impl_methods,
+            mut_statics,
+            source_map,
+            cov,
+            dispatch,
+            cell_params,
+            cell_variants,
+        )
+    };
+    let chunk = compile(false)?;
+    if cell_variants && !chunk.mut_ref_params.is_empty() {
+        let _ = chunk.cell_variant.set(compile(true)?.into_shared());
+    }
+    Ok(chunk)
+}
+
+/// [`compile_fn`] for one body: the ordinary one, or with `cell_params` the
+/// one whose `&mut` parameters arrive as captured bindings' cells or places.
+fn compile_fn_body(
+    decl: &HirFn,
+    tcx: &TyCtxt,
+    layouts: &StructLayouts,
+    wrappers: &InlinableWrappers,
+    inline_fns: &InlinableFns,
+    fn_param_shareable: &FnParamShareable,
+    fn_param_tys: &FnParamTypes,
+    consts: &ConstValues,
+    method_muts: &MutSelfMethods,
+    impl_methods: &ImplMethodNames,
+    mut_statics: &MutStatics,
+    source_map: Option<&gossamer_lex::SourceMap>,
+    cov: Option<&gossamer_lex::SourceMap>,
+    dispatch: Option<(&ParamDispatch, &str)>,
+    cell_params: bool,
+    cell_variants: bool,
 ) -> RuntimeResult<FnChunk> {
     let name = crate::value::intern_type_name(&decl.name.name);
     let Some(body) = decl.body.as_ref() else {
@@ -469,6 +624,9 @@ pub fn compile_fn(
             closure_protos: Vec::new(),
             select_arms: Vec::new(),
             unwind_table: Vec::new(),
+            cell_variant: std::sync::OnceLock::new(),
+            cell_params: false,
+            passes_capture_cells: false,
         });
     };
     let mut builder = FnBuilder::new(
@@ -490,14 +648,24 @@ pub fn compile_fn(
         builder.dispatch = Some(table);
         builder.dispatch_key = key;
     }
+    builder.cell_params = cell_params;
+    builder.cell_variants = cell_variants;
     builder.consumable = consume::consumable_locals(decl, method_muts);
     let (captured_locals, mutated_locals) =
         consume::closure_captured_locals(&decl.params, &body.block, method_muts);
     builder.capture_cell_names = capture_cell_names(tcx, &captured_locals, &mutated_locals);
     let mut pending_cells: Vec<(String, Reg, gossamer_types::Ty)> = Vec::new();
+    let mut cell_param_regs: Vec<(&HirPat, Reg)> = Vec::new();
     for (idx, param) in decl.params.iter().enumerate() {
         let reg = builder.alloc_reg();
-        if matches!(tcx.kind(param.ty), Some(TyKind::Int(_))) {
+        let writes_through = is_mut_ref_writeback(tcx, param.ty)
+            || (idx == 0 && method_has_mut_self(decl) && builder.is_adt_ref(param.ty));
+        if cell_params && writes_through {
+            cell_param_regs.push((&param.pattern, reg));
+            builder.mut_ref_params.push(reg);
+            continue;
+        }
+        if matches!(tcx.kind(param.ty), Some(TyKind::Int(it)) if !it.is_wide()) {
             let int_reg = builder.alloc_int();
             builder.bind_typed_param(&param.pattern, int_reg, RegKind::I64);
             builder.i64_params.push((reg, int_reg));
@@ -521,9 +689,7 @@ pub fn compile_fn(
         // caller's binding. Marking the receiver register here lets the
         // call-site cell wrapping in `compile_method_call` publish the
         // post-call `self` back to the receiver place.
-        if is_mut_ref_writeback(tcx, param.ty)
-            || (idx == 0 && method_has_mut_self(decl) && builder.is_adt_ref(param.ty))
-        {
+        if writes_through {
             builder.mut_ref_params.push(reg);
         }
         // Numeric Vec and slice parameters normally arrive in the flat storage
@@ -543,6 +709,16 @@ pub fn compile_fn(
         if let HirPatKind::Binding { name, .. } = &param.pattern.kind {
             pending_cells.push((name.name.clone(), reg, param.ty));
         }
+    }
+    // A cell parameter's register holds the cell or place the caller passed;
+    // its binding gets a working register every instruction loads from, and
+    // stores back to, that cell, as a closure's cell capture does.
+    for (pattern, cell) in cell_param_regs {
+        let home = builder.alloc_reg();
+        builder.bind_param(pattern, home)?;
+        builder.capture_cells.push((home, cell));
+        builder.cell_param_homes.push(home);
+        builder.capture_cells_used = true;
     }
     // Capture cells claim registers of their own, so they are installed
     // only once every parameter holds its register: the VM fills the
@@ -596,9 +772,8 @@ fn capture_cell_names(
         .filter(|(name, ty)| {
             // A cell exists so both sides of a capture name one buffer once
             // either writes it. A binding nothing writes has no such reader
-            // to serve, and the cell's read - which empties the cell for the
-            // length of the instruction - is what two goroutines sharing one
-            // capture race on.
+            // to serve, and every instruction that names a cell-backed
+            // binding pays for the cell's lock.
             mutated.contains(name)
                 && matches!(tcx.kind(*ty), Some(TyKind::Vec(_) | TyKind::Slice(_)))
         })
@@ -735,6 +910,18 @@ pub(crate) struct FnBuilder<'tcx> {
     /// Peepholes that assume a call's argument moves sit in one
     /// uninterrupted run are skipped, since cell traffic separates them.
     pub(crate) capture_cells_used: bool,
+    /// Whether this body is a function's [`FnChunk::cell_variant`], whose
+    /// `&mut` parameters arrive as capture cells.
+    pub(crate) cell_params: bool,
+    /// Whether a call here passes a captured binding's cell for a `&mut`
+    /// parameter.
+    pub(crate) passes_capture_cells: bool,
+    /// Home registers of the parameters a [`Self::cell_params`] body reads
+    /// and writes through the caller's cell.
+    pub(crate) cell_param_homes: Vec<Reg>,
+    /// Whether the program lends captured bindings `&mut`, so a closure
+    /// with a `&mut` parameter also gets its [`FnChunk::cell_variant`].
+    pub(crate) cell_variants: bool,
     /// Registers bound by a pattern to an array / vec / slice value
     /// (`Some(arr)`, `(head, tail)`, …). A pattern binding's `Path`
     /// reference carries the binding's *declared* type only when the
@@ -936,6 +1123,8 @@ pub(crate) enum ConstKey {
     Int(i64),
     Float(u64),
     Char(char),
+    /// A 128-bit integer literal wider than a word.
+    Wide(crate::value::wide::WideInt),
     String(String),
     Variant(String),
     /// A struct's field-name list, interned as `Value::Array` of names. Its
@@ -1158,6 +1347,35 @@ fn is_array_elem_kind(
         }
     }
     false
+}
+
+/// The value of an integer literal written at a 128-bit type: `unsigned` for
+/// `u128`. A literal the checker admitted always fits.
+fn parse_wide_literal(text: &str, unsigned: bool) -> Option<Value> {
+    let cleaned = strip_int_suffix(text).replace('_', "");
+    let (negative, digits) = match cleaned.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, cleaned.as_str()),
+    };
+    let (radix, digits) = [
+        ("0x", 16),
+        ("0X", 16),
+        ("0o", 8),
+        ("0O", 8),
+        ("0b", 2),
+        ("0B", 2),
+    ]
+    .iter()
+    .find_map(|(prefix, radix)| digits.strip_prefix(prefix).map(|rest| (*radix, rest)))
+    .unwrap_or((10, digits));
+    let magnitude = u128::from_str_radix(digits, radix).ok()?;
+    if unsigned {
+        (!negative).then(|| Value::from_u128(magnitude))
+    } else if negative {
+        0i128.checked_sub_unsigned(magnitude).map(Value::from_i128)
+    } else {
+        i128::try_from(magnitude).ok().map(Value::from_i128)
+    }
 }
 
 fn parse_int(text: &str) -> Option<i64> {

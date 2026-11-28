@@ -2,8 +2,27 @@ fn builtin_json_parse(args: &[Value]) -> RuntimeResult<Value> {
     let Some(source) = args.first().and_then(as_str) else {
         return Ok(err_variant("json::parse: argument must be a string"));
     };
-    match json_std::parse(source) {
-        Ok(value) => Ok(ok_variant(json_root_to_lazy_value(value))),
+    // `json::__parse_with(text, policy)` is `json::parse(text, duplicate_keys:)`.
+    let duplicates = match args.get(1) {
+        Some(Value::Int(n)) => json_std::DuplicateKeys::from_index(*n),
+        _ => json_std::DuplicateKeys::Error,
+    };
+    // A document reads into its tape, as native code reads it. Every read of
+    // a tape takes the last of equal keys, so one that repeats a key and keeps
+    // the first, or is too long for a tape, is read as a tree.
+    match json_std::parse_to_tape(source.as_bytes(), duplicates) {
+        Ok((text, Some(tape)))
+            if !(duplicates == json_std::DuplicateKeys::UseFirst
+                && json_std::has_duplicate_key(text, Some(&tape))) =>
+        {
+            let doc = JsonInner::parsed(json_std::ParsedTape::new(text, tape));
+            let root = json_child_to_lazy_value(&doc, doc.get());
+            Ok(ok_variant(root))
+        }
+        Ok(_) => match json_std::parse_with(source, duplicates) {
+            Ok(value) => Ok(ok_variant(json_root_to_lazy_value(value))),
+            Err(e) => Ok(err_variant(format!("{e}"))),
+        },
         Err(e) => Ok(err_variant(format!("{e}"))),
     }
 }
@@ -30,7 +49,7 @@ fn builtin_json_render(args: &[Value]) -> RuntimeResult<Value> {
     };
     if let Value::Json(json_value) = value {
         return Ok(Value::String(SmolStr::from(json_std::encode(
-            json_value.as_value(),
+            &json_value.as_value(),
         ))));
     }
     let json_value = gossamer_to_json_value(value);
@@ -50,12 +69,10 @@ fn builtin_json_get(args: &[Value]) -> RuntimeResult<Value> {
         return Ok(none_variant());
     };
     if let Value::Json(value) = receiver {
-        if let json_std::Value::Object(entries) = value.as_value() {
-            if let Some(child) = entries.get(key) {
-                return Ok(some_variant(json_child_to_lazy_value(value, child)));
-            }
-        }
-        return Ok(none_variant());
+        return Ok(value
+            .get()
+            .get(key)
+            .map_or_else(none_variant, |child| some_variant(json_child_to_lazy_value(value, child))));
     }
     if let Value::Struct(inner) = receiver {
         for (field_name, value) in &inner.fields {
@@ -72,7 +89,7 @@ pub(crate) fn builtin_json_pointer(args: &[Value]) -> RuntimeResult<Value> {
     let pointer = args.get(1).and_then(as_str).unwrap_or("");
     match args.first() {
         Some(Value::Json(value)) => {
-            Ok(json_std::pointer(value.as_value(), pointer).map_or_else(none_variant, |child| {
+            Ok(value.get().pointer(pointer).map_or_else(none_variant, |child| {
                 some_variant(json_child_to_lazy_value(value, child))
             }))
         }
@@ -89,14 +106,13 @@ pub(crate) fn builtin_json_pointer(args: &[Value]) -> RuntimeResult<Value> {
 /// pattern-match the result so we always emit an Option variant.
 fn builtin_json_keys(args: &[Value]) -> RuntimeResult<Value> {
     if let Some(Value::Json(value)) = args.first() {
-        if let json_std::Value::Object(entries) = value.as_value() {
+        return Ok(value.get().entries().map_or_else(none_variant, |entries| {
             let keys = entries
-                .keys()
-                .map(|name| Value::String(SmolStr::from(name.as_str())))
+                .into_iter()
+                .map(|(name, _)| Value::String(SmolStr::from(&*name)))
                 .collect();
-            return Ok(some_variant(Value::Array(Arc::new(keys))));
-        }
-        return Ok(none_variant());
+            some_variant(Value::Array(Arc::new(keys)))
+        }));
     }
     if let Some(Value::Struct(inner)) = args.first() {
         let mut out: Vec<Value> = Vec::new();
@@ -132,8 +148,7 @@ pub(crate) fn builtin_json_at_opt(args: &[Value]) -> RuntimeResult<Value> {
         _ => None,
     };
     if let (Some(Value::Json(value)), Some(index)) = (args.first(), index)
-        && let json_std::Value::Array(items) = value.as_value()
-        && let Some(child) = items.get(index)
+        && let Some(child) = value.get().at(index)
     {
         return Ok(some_variant(json_child_to_lazy_value(value, child)));
     }
@@ -144,11 +159,10 @@ pub(crate) fn builtin_json_at_opt(args: &[Value]) -> RuntimeResult<Value> {
 /// `None` for any other value, as `json::keys` answers.
 pub(crate) fn builtin_json_len_opt(args: &[Value]) -> RuntimeResult<Value> {
     let count = match args.first() {
-        Some(Value::Json(value)) => match value.as_value() {
-            json_std::Value::Array(items) => Some(items.len()),
-            json_std::Value::Object(entries) => Some(entries.len()),
-            _ => None,
-        },
+        Some(Value::Json(value)) => {
+            let node = value.get();
+            (node.is_array() || node.is_object()).then(|| node.len())
+        }
         _ => None,
     };
     Ok(count.map_or_else(none_variant, |n| {
@@ -159,15 +173,15 @@ pub(crate) fn builtin_json_len_opt(args: &[Value]) -> RuntimeResult<Value> {
 /// `json::is_null(value)` → `true` when the value is the `null` shape.
 fn builtin_json_is_null(args: &[Value]) -> RuntimeResult<Value> {
     let is_null = matches!(args.first(), Some(Value::Unit | Value::Void) | None)
-        || matches!(args.first(), Some(Value::Json(value)) if matches!(value.as_value(), json_std::Value::Null));
+        || matches!(args.first(), Some(Value::Json(value)) if value.get().is_null());
     Ok(Value::Bool(is_null))
 }
 
 /// `json::as_str(value)` → `Option<String>`.
 fn builtin_json_as_str(args: &[Value]) -> RuntimeResult<Value> {
     if let Some(Value::Json(value)) = args.first() {
-        if let json_std::Value::String(text) = value.as_value() {
-            return Ok(some_variant(Value::String(SmolStr::from(text.as_str()))));
+        if let Some(text) = value.get().string() {
+            return Ok(some_variant(Value::String(SmolStr::from(&*text))));
         }
     }
     if let Some(Value::String(s)) = args.first() {
@@ -199,7 +213,7 @@ fn gossamer_core_cap(n: i64) -> usize {
 /// `json::as_i64(value)` → `Option<i64>`.
 fn builtin_json_as_i64(args: &[Value]) -> RuntimeResult<Value> {
     if let Some(Value::Json(value)) = args.first() {
-        if let Some(n) = json_std::as_i64(value.as_value()) {
+        if let Some(n) = value.get().number().as_ref().and_then(json_std::as_i64) {
             return Ok(some_variant(Value::Int(n)));
         }
     }
@@ -221,7 +235,7 @@ fn builtin_json_as_i64(args: &[Value]) -> RuntimeResult<Value> {
 /// and fits a `u64`.
 fn builtin_json_as_u64(args: &[Value]) -> RuntimeResult<Value> {
     let n = match args.first() {
-        Some(Value::Json(value)) => json_std::as_u64(value.as_value()),
+        Some(Value::Json(value)) => value.get().number().as_ref().and_then(json_std::as_u64),
         Some(Value::Uint(n)) => Some(*n),
         Some(Value::Int(n)) => u64::try_from(*n).ok(),
         Some(Value::Float(f)) => json_std::as_u64(&json_std::Value::Number(*f)),
@@ -233,7 +247,7 @@ fn builtin_json_as_u64(args: &[Value]) -> RuntimeResult<Value> {
 /// `json::as_f64(value)` → `Option<f64>`.
 fn builtin_json_as_f64(args: &[Value]) -> RuntimeResult<Value> {
     if let Some(Value::Json(value)) = args.first() {
-        if let Some(n) = json_std::as_f64(value.as_value()) {
+        if let Some(n) = value.get().number().as_ref().and_then(json_std::as_f64) {
             return Ok(some_variant(Value::Float(n)));
         }
     }
@@ -252,8 +266,8 @@ fn builtin_json_as_f64(args: &[Value]) -> RuntimeResult<Value> {
 /// `json::as_bool(value)` → `Option<bool>`.
 fn builtin_json_as_bool(args: &[Value]) -> RuntimeResult<Value> {
     if let Some(Value::Json(value)) = args.first() {
-        if let json_std::Value::Bool(b) = value.as_value() {
-            return Ok(some_variant(Value::Bool(*b)));
+        if let Some(b) = value.get().as_bool() {
+            return Ok(some_variant(Value::Bool(b)));
         }
     }
     if let Some(Value::Bool(b)) = args.first() {
@@ -268,10 +282,10 @@ fn builtin_json_as_bool(args: &[Value]) -> RuntimeResult<Value> {
 /// fails loudly instead of returning a misleading empty array.
 fn builtin_json_as_array(args: &[Value]) -> RuntimeResult<Value> {
     if let Some(Value::Json(value)) = args.first() {
-        if let json_std::Value::Array(items) = value.as_value() {
+        if let Some(items) = value.get().items() {
             return Ok(some_variant(Value::Array(Arc::new(
                 items
-                    .iter()
+                    .into_iter()
                     .map(|child| json_child_to_lazy_value(value, child))
                     .collect(),
             ))));
@@ -284,17 +298,21 @@ fn builtin_json_as_array(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 
-fn json_child_to_lazy_value(parent: &JsonInner, child: &json_std::Value) -> Value {
-    match child {
-        json_std::Value::Null => Value::Json(Arc::new(parent.child(child))),
-        json_std::Value::Bool(b) => Value::Bool(*b),
-        json_std::Value::Int(n) => Value::Int(*n),
-        json_std::Value::Uint(n) => Value::Uint(*n),
-        json_std::Value::Number(n) => Value::Float(*n),
-        json_std::Value::String(text) => Value::String(SmolStr::from(text.as_str())),
-        json_std::Value::Array(_) | json_std::Value::Object(_) => {
-            Value::Json(Arc::new(parent.child(child)))
-        }
+/// A node a read of `parent` answered, as the VM carries it: a scalar as the
+/// plain value, and `null`, an array, or an object as a handle on the same
+/// document.
+fn json_child_to_lazy_value(parent: &JsonInner, child: json_std::ValueRef<'_>) -> Value {
+    if let Some(b) = child.as_bool() {
+        return Value::Bool(b);
+    }
+    if let Some(text) = child.string() {
+        return Value::String(SmolStr::from(&*text));
+    }
+    match child.number() {
+        Some(json_std::Value::Int(n)) => Value::Int(n),
+        Some(json_std::Value::Uint(n)) => Value::Uint(n),
+        Some(json_std::Value::Number(n)) => Value::Float(n),
+        _ => Value::Json(Arc::new(parent.child(child))),
     }
 }
 
@@ -311,9 +329,16 @@ pub(crate) fn gossamer_to_json_value(value: &Value) -> json_std::Value {
             let inner = c.lock().clone();
             gossamer_to_json_value(&inner)
         }
+        Value::CapturePlace(place) => gossamer_to_json_value(&place.read()),
         Value::Unit | Value::Void | Value::Weak(_) => json_std::Value::Null,
         Value::Bool(b) => json_std::Value::Bool(*b),
         Value::Int(n) => json_std::Value::Int(*n),
+        // A 128-bit integer past 64 bits has no JSON number every reader
+        // holds exactly, so it is written as its decimal digits in a string.
+        Value::Wide(wide) => json_std::Value::String(wide.to_string()),
+        Value::WideInline(..) => json_std::Value::String(
+            value.wide_int().map(|w| w.to_string()).unwrap_or_default(),
+        ),
         // JSON has no NaN or infinity, so such a float is `null`, as the
         // compiled tiers build it.
         Value::Float(f) if !f.is_finite() => json_std::Value::Null,

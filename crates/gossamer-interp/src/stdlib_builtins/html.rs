@@ -115,31 +115,99 @@ pub(crate) fn install_html(globals: &mut Vec<(&'static str, Value)>) {
         ],
         globals,
     );
-    // `html::template::render_json(source, json_data)` - the
-    // stateless cross-tier template renderer. Registered under its
-    // fully-qualified path so the resolver's `html::template::render_json`
-    // call binds here, matching the compiled tier's shim.
-    globals.push((
-        "html::template::render_json",
-        crate::builtins::builtin_pub(
-            "html::template::render_json",
-            builtin_html_template_render_json,
+    for (name, call) in [
+        (
+            "__gos_mail_address_raw",
+            builtin_mail_address_raw as BuiltinFnPub,
         ),
-    ));
+        ("__gos_mail_address_list_raw", builtin_mail_address_list_raw),
+        ("__gos_template_new_raw", builtin_template_new_raw),
+        ("__gos_template_render_raw", builtin_template_render_raw),
+        (
+            "__gos_template_render_source_raw",
+            builtin_template_render_source_raw,
+        ),
+        ("__gos_template_release_raw", builtin_template_release_raw),
+    ] {
+        globals.push((name, crate::builtins::builtin_pub(name, call)));
+    }
+}
+
+fn int_arg(args: &[Value], n: usize) -> i64 {
+    args.get(n)
+        .and_then(crate::builtins::value_to_int)
+        .unwrap_or(0)
+}
+
+/// `__gos_template_new_raw(source, html, strict)`: the id of the parsed template.
+pub(crate) fn builtin_template_new_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let source = args.first().and_then(as_str).unwrap_or("");
+    Ok(
+        match gossamer_runtime::templates::new_template(
+            source,
+            int_arg(args, 1) != 0,
+            int_arg(args, 2) != 0,
+        ) {
+            Ok(id) => ok_variant(Value::Int(id)),
+            Err(e) => err_variant(e),
+        },
+    )
+}
+
+/// `__gos_template_render_raw(id, json)`: a parsed template rendered.
+pub(crate) fn builtin_template_render_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let json = args.get(1).and_then(as_str).unwrap_or("");
+    Ok(html_answer(gossamer_runtime::templates::render_template(
+        int_arg(args, 0),
+        json,
+    )))
+}
+
+/// `__gos_template_render_source_raw(source, html, json)`: parsed and rendered once.
+pub(crate) fn builtin_template_render_source_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let source = args.first().and_then(as_str).unwrap_or("");
+    let json = args.get(2).and_then(as_str).unwrap_or("");
+    Ok(html_answer(gossamer_runtime::templates::render_source(
+        source,
+        int_arg(args, 1) != 0,
+        json,
+    )))
+}
+
+/// `__gos_template_release_raw(id)`: gives back the parsed template.
+pub(crate) fn builtin_template_release_raw(args: &[Value]) -> RuntimeResult<Value> {
+    gossamer_runtime::templates::release_template(int_arg(args, 0));
+    Ok(ok_variant(Value::Unit))
+}
+
+fn html_answer(answer: Result<String, String>) -> Value {
+    match answer {
+        Ok(json) => ok_variant(Value::String(json.into())),
+        Err(e) => err_variant(e),
+    }
+}
+
+/// `__gos_mail_address_raw(text)`, the leaf under the injected
+/// `mail::parse_address`.
+pub(crate) fn builtin_mail_address_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let text = args.first().and_then(as_str).unwrap_or("");
+    Ok(html_answer(gossamer_runtime::mail_address::address_json(
+        text,
+    )))
+}
+
+/// `__gos_mail_address_list_raw(text)`, the leaf under the injected
+/// `mail::parse_address_list`.
+pub(crate) fn builtin_mail_address_list_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let text = args.first().and_then(as_str).unwrap_or("");
+    Ok(html_answer(
+        gossamer_runtime::mail_address::address_list_json(text),
+    ))
 }
 
 pub(crate) fn builtin_html_escape(args: &[Value]) -> RuntimeResult<Value> {
     let s = args.first().and_then(as_str).unwrap_or("").to_string();
     Ok(Value::String(gossamer_std::html::escape(&s).into()))
-}
-
-pub(crate) fn builtin_html_template_render_json(args: &[Value]) -> RuntimeResult<Value> {
-    let source = args.first().and_then(as_str).unwrap_or("").to_string();
-    let json_data = args.get(1).and_then(as_str).unwrap_or("").to_string();
-    match gossamer_std::html::template::render_json(&source, &json_data) {
-        Ok(out) => Ok(ok_variant(Value::String(out.into()))),
-        Err(e) => Ok(err_variant(format!("{e}"))),
-    }
 }
 
 pub(crate) fn builtin_html_unescape(args: &[Value]) -> RuntimeResult<Value> {

@@ -328,6 +328,15 @@ pub(crate) fn cmd_doc_std(query: &str) -> Result<()> {
             item.call_name()
         );
         outln!("{}", item.doc);
+        if item.kind == registry::StdItemKind::Type
+            && let Some(outline) =
+                gossamer_parse::autoderive::stdlib_wrapper_type_outline(module.path, item.name)
+        {
+            outln!();
+            outln!("```gossamer");
+            out!("{outline}");
+            outln!("```");
+        }
         return Ok(());
     }
 

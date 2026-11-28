@@ -304,6 +304,24 @@ unsafe fn debug_payload_string(payload: i64, kind: i64) -> String {
         },
         // A unit payload carries no value: the arm renders as `()`.
         13 => "()".to_string(),
+        // A 128-bit payload is boxed: the word addresses its two slots, and
+        // a null word reads as zero.
+        k if k == i64::from(gossamer_abi::TUPLE_TAG_I128)
+            || k == i64::from(gossamer_abi::TUPLE_TAG_U128) =>
+        {
+            let at: *const u8 = std::ptr::with_exposed_provenance(payload as usize);
+            let bits = if at.is_null() {
+                0
+            } else {
+                // SAFETY: a non-null payload of this kind addresses a 128-bit value's two slots.
+                unsafe { crate::c_abi::desc_cmp::read_wide_slots(at) }
+            };
+            if k == i64::from(gossamer_abi::TUPLE_TAG_U128) {
+                bits.to_string()
+            } else {
+                bits.cast_signed().to_string()
+            }
+        }
         // A `dyn::Value` payload arrives as its runtime handle; render it
         // through the DynValue debug renderer, which quotes string payloads
         // the way the VM's Debug output does.
@@ -456,7 +474,6 @@ pub extern "C-unwind" fn gos_rt_result_unwrap(r: i128) -> i64 {
     ffi_entry_passthrough!({
         if result_disc_of(r) != 0 {
             crate::c_abi::panic::panic_text("called `Result::unwrap()` on an `Err` value");
-            return 0;
         }
         result_payload_of(r)
     })
@@ -470,7 +487,6 @@ pub extern "C-unwind" fn gos_rt_option_unwrap(r: i128) -> i64 {
     ffi_entry_passthrough!({
         if result_disc_of(r) != 0 {
             crate::c_abi::panic::panic_text("called `Option::unwrap()` on a `None` value");
-            return 0;
         }
         result_payload_of(r)
     })
@@ -505,7 +521,6 @@ pub unsafe extern "C-unwind" fn gos_rt_option_unwrap_carrier(r: i128) -> i128 {
     ffi_entry_passthrough!({
         if result_disc_of(r) != 0 {
             crate::c_abi::panic::panic_text("called `Option::unwrap()` on a `None` value");
-            return 0;
         }
         // SAFETY: this function's contract is the one the callee states.
         unsafe { boxed_carrier_of(r) }
@@ -523,7 +538,6 @@ pub unsafe extern "C-unwind" fn gos_rt_result_unwrap_carrier(r: i128) -> i128 {
     ffi_entry_passthrough!({
         if result_disc_of(r) != 0 {
             crate::c_abi::panic::panic_text("called `Result::unwrap()` on an `Err` value");
-            return 0;
         }
         // SAFETY: this function's contract is the one the callee states.
         unsafe { boxed_carrier_of(r) }
@@ -949,6 +963,26 @@ pub extern "C" fn gos_rt_result_is_ok(r: i128) -> i64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_result_is_err(r: i128) -> i64 {
     i64::from(result_disc_of(r) != 0)
+}
+
+/// Layout of a `(String, String)` answer: both strings owned by the blob.
+static STRING_PAIR_META: [i64; 6] = [
+    gossamer_abi::rc::RC_KIND_STRUCT,
+    1,
+    0,
+    2,
+    gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT,
+    (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 1,
+];
+
+/// `Ok` of a `(String, String)` answer.
+pub(crate) fn ok_string_pair((first, second): (String, String)) -> i128 {
+    let a = super::string::alloc_cstring(first.as_bytes()) as i64;
+    let b = super::string::alloc_cstring(second.as_bytes()) as i64;
+    gos_rt_result_new(
+        0,
+        crate::c_abi::rc::counted_words(&[a, b], &STRING_PAIR_META) as i64,
+    )
 }
 
 #[cfg(test)]

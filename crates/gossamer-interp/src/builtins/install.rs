@@ -17,28 +17,28 @@ fn install_io_builtins(globals: &mut Vec<(&'static str, Value)>) {
         builtin("write_byte", builtin_stream_write_byte),
     ));
     globals.push((
-        "Stream::write_byte",
-        builtin("Stream::write_byte", builtin_stream_write_byte),
+        "io::Stream::write_byte",
+        builtin("io::Stream::write_byte", builtin_stream_write_byte),
     ));
     globals.push(("write", builtin("write", builtin_stream_write_str)));
     globals.push((
-        "Stream::write",
-        builtin("Stream::write", builtin_stream_write_str),
+        "io::Stream::write",
+        builtin("io::Stream::write", builtin_stream_write_str),
     ));
     globals.push(("write_str", builtin("write_str", builtin_stream_write_str)));
     globals.push((
-        "Stream::write_str",
-        builtin("Stream::write_str", builtin_stream_write_str),
+        "io::Stream::write_str",
+        builtin("io::Stream::write_str", builtin_stream_write_str),
     ));
     globals.push(("flush", builtin("flush", builtin_stream_flush)));
     globals.push((
-        "Stream::flush",
-        builtin("Stream::flush", builtin_stream_flush),
+        "io::Stream::flush",
+        builtin("io::Stream::flush", builtin_stream_flush),
     ));
     globals.push(("read_line", builtin("read_line", builtin_stream_read_line)));
     globals.push((
-        "Stream::read_line",
-        builtin("Stream::read_line", builtin_stream_read_line),
+        "io::Stream::read_line",
+        builtin("io::Stream::read_line", builtin_stream_read_line),
     ));
     globals.push((
         "gos_rt_stream_next_line",
@@ -49,8 +49,8 @@ fn install_io_builtins(globals: &mut Vec<(&'static str, Value)>) {
         builtin("read_to_string", builtin_stream_read_to_string),
     ));
     globals.push((
-        "Stream::read_to_string",
-        builtin("Stream::read_to_string", builtin_stream_read_to_string),
+        "io::Stream::read_to_string",
+        builtin("io::Stream::read_to_string", builtin_stream_read_to_string),
     ));
     // io::ReadAll(reader) / io::Copy(dst, src) helpers for moving
     // bytes around the fd-shaped stream values.
@@ -175,6 +175,30 @@ fn install_http_builtins(globals: &mut Vec<(&'static str, Value)>) {
             "http::serve_tls",
             native("http::serve_tls", native_http_serve_tls),
         ));
+        globals.push((
+            "http::__serve_tls_live",
+            native("http::__serve_tls_live", native_http_serve_tls_live),
+        ));
+        for (name, call) in [
+            (
+                "__gos_tls_server_config_new_raw",
+                builtin_tls_server_config_new_raw as BuiltinFnPub,
+            ),
+            (
+                "__gos_tls_server_config_add_sni_raw",
+                builtin_tls_server_config_add_sni_raw,
+            ),
+            (
+                "__gos_tls_server_config_reload_raw",
+                builtin_tls_server_config_reload_raw,
+            ),
+            (
+                "__gos_tls_server_config_release_raw",
+                builtin_tls_server_config_release_raw,
+            ),
+        ] {
+            globals.push((name, crate::builtins::builtin_pub(name, call)));
+        }
     }
     globals.push((
         "websocket::serve",
@@ -193,20 +217,20 @@ fn install_http_builtins(globals: &mut Vec<(&'static str, Value)>) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         globals.push((
-            "Router::serve",
-            native("Router::serve", crate::stdlib_builtins::native_router_serve),
+            "http::router::Router::serve",
+            native("http::router::Router::serve", crate::stdlib_builtins::native_router_serve),
         ));
         globals.push((
-            "FileServer::serve",
+            "http::static_files::FileServer::serve",
             native(
-                "FileServer::serve",
+                "http::static_files::FileServer::serve",
                 crate::stdlib_builtins::native_file_server_serve,
             ),
         ));
         globals.push((
-            "Middleware::serve",
+            "http::middleware::Handler::serve",
             native(
-                "Middleware::serve",
+                "http::middleware::Handler::serve",
                 crate::stdlib_builtins::native_middleware_serve,
             ),
         ));
@@ -217,10 +241,6 @@ fn install_http_builtins(globals: &mut Vec<(&'static str, Value)>) {
         globals.push((
             "http::serve_h2c",
             native("http::serve_h2c", native_http2_bind_and_run_h2c),
-        ));
-        globals.push((
-            "http_h3::serve",
-            native("http_h3::serve", native_http3_serve),
         ));
         globals.push((
             "http::Http2Config::default",
@@ -262,8 +282,8 @@ fn install_http_builtins(globals: &mut Vec<(&'static str, Value)>) {
         ),
     ));
     globals.push((
-        "Response::with_header",
-        builtin("Response::with_header", builtin_http_response_with_header),
+        "http::Response::with_header",
+        builtin("http::Response::with_header", builtin_http_response_with_header),
     ));
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -317,86 +337,86 @@ fn install_http_builtins(globals: &mut Vec<(&'static str, Value)>) {
             ),
         ));
         globals.push((
-            "Client::request",
+            "http::Client::request",
             builtin(
-                "Client::request",
+                "http::Client::request",
                 crate::http_client_builtins::builtin_http_client_request,
             ),
         ));
         globals.push((
-            "Client::request_bytes",
+            "http::Client::request_bytes",
             builtin(
-                "Client::request_bytes",
+                "http::Client::request_bytes",
                 crate::http_client_builtins::builtin_http_client_request_bytes,
             ),
         ));
         globals.push((
-            "Client::get",
+            "http::Client::get",
             builtin(
-                "Client::get",
+                "http::Client::get",
                 crate::http_client_builtins::builtin_http_client_get,
             ),
         ));
         globals.push((
-            "Client::post",
+            "http::Client::post",
             builtin(
-                "Client::post",
+                "http::Client::post",
                 crate::http_client_builtins::builtin_http_client_post,
             ),
         ));
         globals.push((
-            "Client::put",
+            "http::Client::put",
             builtin(
-                "Client::put",
+                "http::Client::put",
                 crate::http_client_builtins::builtin_http_client_put,
             ),
         ));
         globals.push((
-            "Client::options",
+            "http::Client::options",
             builtin(
-                "Client::options",
+                "http::Client::options",
                 crate::http_client_builtins::builtin_http_client_options,
             ),
         ));
         globals.push((
-            "Client::delete",
+            "http::Client::delete",
             builtin(
-                "Client::delete",
+                "http::Client::delete",
                 crate::http_client_builtins::builtin_http_client_delete,
             ),
         ));
         globals.push((
-            "Client::head",
+            "http::Client::head",
             builtin(
-                "Client::head",
+                "http::Client::head",
                 crate::http_client_builtins::builtin_http_client_head,
             ),
         ));
         globals.push((
-            "Request::header",
+            "http::Request::header",
             builtin(
-                "Request::header",
+                "http::Request::header",
                 crate::http_client_builtins::builtin_http_request_header,
             ),
         ));
         globals.push((
-            "Request::body",
+            "http::Request::body",
             builtin(
-                "Request::body",
+                "http::Request::body",
                 crate::http_client_builtins::builtin_http_request_body,
             ),
         ));
         globals.push((
-            "Request::send",
+            "http::Request::send",
             builtin(
-                "Request::send",
+                "http::Request::send",
                 crate::http_client_builtins::builtin_http_request_send,
             ),
         ));
         globals.push((
-            "Response::bytes",
+            "http::Response::bytes",
             builtin(
-                "Response::bytes",
+                "http::Response::bytes",
                 crate::http_client_builtins::builtin_http_response_bytes,
             ),
         ));
@@ -492,6 +512,7 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
             // os identity (canonical - stays on os::).
             ("family", builtin_os_family),
             ("arch", builtin_os_arch),
+            ("hostname", builtin_os_hostname),
         ],
         globals,
     );
@@ -562,40 +583,13 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
         ],
         globals,
     );
-    // Bare `exec::*` is a back-compat alias for `process::*` /
-    // `os::exec::*`. New code should prefer `process::*`.
-    install_module(
-        "exec",
-        &[
-            ("run", builtin_exec_run),
-            ("spawn", builtin_exec_spawn),
-            ("kill", builtin_exec_kill),
-            ("signal", builtin_exec_signal),
-            ("kill_group", builtin_exec_kill_group),
-            ("wait_timeout", builtin_exec_wait_timeout),
-            ("pipeline_run", builtin_exec_pipeline_run),
-        ],
-        globals,
-    );
-    install_module(
-        "os::exec",
-        &[
-            ("run", builtin_exec_run),
-            ("spawn", builtin_exec_spawn),
-            ("kill", builtin_exec_kill),
-            ("signal", builtin_exec_signal),
-            ("kill_group", builtin_exec_kill_group),
-            ("wait_timeout", builtin_exec_wait_timeout),
-            ("pipeline_run", builtin_exec_pipeline_run),
-        ],
-        globals,
-    );
     install_module(
         "process",
         &[
             ("run", builtin_exec_run),
             ("run_in", builtin_exec_run_in),
             ("run_inherit", builtin_exec_run_inherit),
+            ("exec", builtin_exec_replace),
             ("spawn", builtin_exec_spawn),
             ("kill", builtin_exec_kill),
             ("signal", builtin_exec_signal),
@@ -926,6 +920,7 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
         "json",
         &[
             ("parse", builtin_json_parse),
+            ("__parse_with", builtin_json_parse),
             ("encode", builtin_json_render),
             ("is_valid", crate::stdlib_builtins::json_builtins::builtin_json_std_valid),
             // Query surface - operates on the dynamic struct shape
@@ -953,6 +948,7 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
         "encoding::json",
         &[
             ("parse", builtin_json_parse),
+            ("__parse_with", builtin_json_parse),
             ("encode", builtin_json_render),
             ("is_valid", crate::stdlib_builtins::json_builtins::builtin_json_std_valid),
             ("get", builtin_json_get),
@@ -2212,20 +2208,20 @@ fn install_concurrency_builtins(globals: &mut Vec<(&'static str, Value)>) {
         builtin("sync::WaitGroup::new", builtin_waitgroup_new),
     ));
     globals.push((
-        "WaitGroup::add",
-        builtin("WaitGroup::add", builtin_waitgroup_add),
+        "sync::WaitGroup::add",
+        builtin("sync::WaitGroup::add", builtin_waitgroup_add),
     ));
     globals.push((
-        "WaitGroup::done",
-        builtin("WaitGroup::done", builtin_waitgroup_done),
+        "sync::WaitGroup::done",
+        builtin("sync::WaitGroup::done", builtin_waitgroup_done),
     ));
     globals.push((
-        "WaitGroup::wait",
-        builtin("WaitGroup::wait", builtin_waitgroup_wait),
+        "sync::WaitGroup::wait",
+        builtin("sync::WaitGroup::wait", builtin_waitgroup_wait),
     ));
     globals.push((
-        "WaitGroup::wait_ctx",
-        builtin("WaitGroup::wait_ctx", builtin_waitgroup_wait_ctx),
+        "sync::WaitGroup::wait_ctx",
+        builtin("sync::WaitGroup::wait_ctx", builtin_waitgroup_wait_ctx),
     ));
 
     // O(log n) Lehmer LCG affine-transform jump-ahead.
@@ -2238,8 +2234,8 @@ fn install_concurrency_builtins(globals: &mut Vec<(&'static str, Value)>) {
     // Bulk byte-array writer used by `out.write_byte_array(&line, n)`
     // in the `fasta` block-write hot path.
     globals.push((
-        "Stream::write_byte_array",
-        builtin("Stream::write_byte_array", builtin_stream_write_byte_array),
+        "io::Stream::write_byte_array",
+        builtin("io::Stream::write_byte_array", builtin_stream_write_byte_array),
     ));
     globals.push((
         "write_byte_array",

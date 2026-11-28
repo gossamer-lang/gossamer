@@ -441,14 +441,8 @@ impl<'a> Lowerer<'a> {
         matches!(
             self.tcx.kind(elem),
             Some(
-                TyKind::Int(
-                    IntTy::I64
-                        | IntTy::I128
-                        | IntTy::Isize
-                        | IntTy::U64
-                        | IntTy::U128
-                        | IntTy::Usize
-                ) | TyKind::Float(FloatTy::F64)
+                TyKind::Int(IntTy::I64 | IntTy::Isize | IntTy::U64 | IntTy::Usize)
+                    | TyKind::Float(FloatTy::F64)
                     | TyKind::Vec(_)
                     | TyKind::Slice(_)
             )
@@ -1058,6 +1052,24 @@ impl<'a> Lowerer<'a> {
         destination: &Place,
         target: Option<&gossamer_mir::BlockId>,
     ) -> Result<(), BuildError> {
+        let dest_mir = self.body.local_ty(destination.local);
+        // A 128-bit `min` / `max` compares and selects at 128 bits, unsigned
+        // for a `u128`.
+        if let Some(TyKind::Int(int_ty)) = self.tcx.kind(dest_mir)
+            && int_ty.is_wide()
+        {
+            let a = self.lower_operand(&args[0])?;
+            let b = self.lower_operand(&args[1])?;
+            let signedness = if *int_ty == IntTy::U128 { "u" } else { "s" };
+            let pred = format!("{signedness}{}", if is_min { "lt" } else { "gt" });
+            let cmp = self.fresh();
+            writeln!(self.out, "  {cmp} = icmp {pred} i128 {a}, {b}").unwrap();
+            let r = self.fresh();
+            writeln!(self.out, "  {r} = select i1 {cmp}, i128 {a}, i128 {b}").unwrap();
+            self.store_value_to_place(destination, "i128", &r);
+            emit_terminator_branch(&mut self.out, target);
+            return Ok(());
+        }
         let a = self.lower_operand(&args[0])?;
         let a = self.widen_to_i64(&args[0], &a);
         let b = self.lower_operand(&args[1])?;
@@ -1070,6 +1082,60 @@ impl<'a> Lowerer<'a> {
         let r = self.fresh();
         writeln!(self.out, "  {r} = select i1 {cmp}, i64 {a}, i64 {b}").unwrap();
         self.store_i64_as(&r, &dest_ty, &dest_slot);
+        emit_terminator_branch(&mut self.out, target);
+        Ok(())
+    }
+
+    /// A 128-bit `clamp(x, lo, hi)` as compares and selects at 128 bits, with
+    /// bounds out of order raising the panic every tier raises.
+    pub(crate) fn lower_wide_clamp_inline(
+        &mut self,
+        args: &[Operand],
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+    ) -> Result<(), BuildError> {
+        let unsigned = matches!(
+            self.tcx.kind(self.body.local_ty(destination.local)),
+            Some(TyKind::Int(IntTy::U128))
+        );
+        let x = self.lower_operand(&args[0])?;
+        let lo = self.lower_operand(&args[1])?;
+        let hi = self.lower_operand(&args[2])?;
+        let s = if unsigned { "u" } else { "s" };
+        let crossed = self.fresh();
+        writeln!(self.out, "  {crossed} = icmp {s}gt i128 {lo}, {hi}").unwrap();
+        let fail = self.fresh_label("clamp_bounds");
+        let ok = self.fresh_label("clamp_ok");
+        writeln!(self.out, "  br i1 {crossed}, label %{fail}, label %{ok}").unwrap();
+        writeln!(self.out, "{fail}:").unwrap();
+        let (lo_low, lo_high) = self.split_wide(&lo);
+        let (hi_low, hi_high) = self.split_wide(&hi);
+        declare_rt(&mut self.runtime_refs, "gos_rt_clamp_bounds_wide");
+        writeln!(
+            self.out,
+            "  call void @gos_rt_clamp_bounds_wide(i64 {lo_low}, i64 {lo_high}, i64 {hi_low}, i64 {hi_high}, i64 {})",
+            i64::from(unsigned)
+        )
+        .unwrap();
+        writeln!(self.out, "  unreachable").unwrap();
+        writeln!(self.out, "{ok}:").unwrap();
+        let below = self.fresh();
+        writeln!(self.out, "  {below} = icmp {s}lt i128 {x}, {lo}").unwrap();
+        let raised = self.fresh();
+        writeln!(
+            self.out,
+            "  {raised} = select i1 {below}, i128 {lo}, i128 {x}"
+        )
+        .unwrap();
+        let above = self.fresh();
+        writeln!(self.out, "  {above} = icmp {s}gt i128 {raised}, {hi}").unwrap();
+        let r = self.fresh();
+        writeln!(
+            self.out,
+            "  {r} = select i1 {above}, i128 {hi}, i128 {raised}"
+        )
+        .unwrap();
+        self.store_value_to_place(destination, "i128", &r);
         emit_terminator_branch(&mut self.out, target);
         Ok(())
     }
@@ -1500,6 +1566,68 @@ impl<'a> Lowerer<'a> {
     /// are header accesses ([`TBAA_HEADER`]) and the byte store is element data
     /// ([`TBAA_DATA`]), so `-O3` hoists the loop-invariant header loads out of
     /// the enclosing byte loop (fasta's hot inner loop).
+    /// `gos_rt_vec_unshare(v)` inline: the runtime is called only when the
+    /// header's shared flag (bit 7 of the flag byte at offset 21) says copies
+    /// may share its buffer.
+    pub(crate) fn emit_vec_unshare_inline(&mut self, v: &str) {
+        declare_rt(&mut self.runtime_refs, "gos_rt_vec_unshare");
+        let s = self.next_ssa;
+        self.next_ssa += 1;
+        let (flags_b, slow_b, done_b) = (
+            format!("vu_flags_{s}"),
+            format!("vu_slow_{s}"),
+            format!("vu_done_{s}"),
+        );
+        let isnull = self.fresh();
+        writeln!(self.out, "  {isnull} = icmp eq ptr {v}, null").unwrap();
+        writeln!(
+            self.out,
+            "  br i1 {isnull}, label %{done_b}, label %{flags_b}"
+        )
+        .unwrap();
+        writeln!(self.out, "{flags_b}:").unwrap();
+        let flag_addr = self.fresh();
+        writeln!(
+            self.out,
+            "  {flag_addr} = getelementptr i8, ptr {v}, i64 21"
+        )
+        .unwrap();
+        let flags = self.fresh();
+        // A copy on another thread may set the flag while this header is
+        // read, so the read is atomic, as the runtime's is.
+        writeln!(
+            self.out,
+            "  {flags} = load atomic i8, ptr {flag_addr} monotonic, align 1"
+        )
+        .unwrap();
+        let shared = self.fresh();
+        writeln!(self.out, "  {shared} = icmp slt i8 {flags}, 0").unwrap();
+        writeln!(
+            self.out,
+            "  br i1 {shared}, label %{slow_b}, label %{done_b}"
+        )
+        .unwrap();
+        let cold_start = self.out.len();
+        writeln!(self.out, "{slow_b}:").unwrap();
+        if crate::emit::target_has_preserve_most() {
+            // The separation clobbers every caller-saved register, so values
+            // a loop keeps live across the check would be spilled and
+            // reloaded on the hot path. The slow path preserves the caller's
+            // registers instead, saving only what its own call needs.
+            self.runtime_refs.insert(VEC_UNSHARE_SLOW_PATH.to_string());
+            writeln!(
+                self.out,
+                "  call preserve_mostcc void @gos_vec_unshare_slow_path(ptr {v}) cold nounwind"
+            )
+            .unwrap();
+        } else {
+            writeln!(self.out, "  call void @gos_rt_vec_unshare(ptr {v})").unwrap();
+        }
+        writeln!(self.out, "  br label %{done_b}").unwrap();
+        self.mark_cold(cold_start);
+        writeln!(self.out, "{done_b}:").unwrap();
+    }
+
     pub(crate) fn emit_heap_u8_set_branchless(&mut self, v: &str, idx: &str, val: &str) {
         self.runtime_refs
             .insert("@gos_u8_set_scratch = internal global [16 x i8] zeroinitializer".to_string());
@@ -2599,7 +2727,7 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn skey_slot_address(&mut self, arg: &Operand) -> Result<String, BuildError> {
         if let Operand::Copy(p) = arg
             && let TyKind::Ref { inner, .. } = self.tcx.kind_of(self.place_leaf_ty(p))
-            && is_aggregate(self.tcx, *inner)
+            && (is_aggregate(self.tcx, *inner) || self.tcx.is_wide_int(*inner))
             && slot_count(self.tcx, *inner).is_some()
         {
             let value = self.lower_operand(arg)?;
@@ -4336,3 +4464,8 @@ impl<'a> Lowerer<'a> {
         done
     }
 }
+
+/// The copy-on-write check's slow path, one per module: a `preserve_mostcc`
+/// function around the runtime's separation of a shared buffer, which catches
+/// every panic and so never unwinds.
+const VEC_UNSHARE_SLOW_PATH: &str = "define internal preserve_mostcc void @gos_vec_unshare_slow_path(ptr %v) cold noinline nounwind {\n  call void @gos_rt_vec_unshare(ptr %v)\n  ret void\n}";

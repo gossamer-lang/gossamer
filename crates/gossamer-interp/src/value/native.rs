@@ -21,6 +21,8 @@ use smallvec::SmallVec;
 pub(super) enum RegistryEntry {
     /// Integer that did not fit in the i56 immediate range.
     Int(i64),
+    /// A 128-bit integer wider than a word.
+    Wide(Arc<super::wide::WideInt>),
     /// VM string storage. Heap strings stay in their original compact
     /// allocation; inline strings remain a single copied word.
     String(SmolStr),

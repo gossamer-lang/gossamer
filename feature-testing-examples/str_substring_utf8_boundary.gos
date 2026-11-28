@@ -1,11 +1,11 @@
-// String indexing, ranges, substring, and len use Unicode scalar positions.
-// Explicit byte access remains available through as_bytes and byte_at.
+// String indexing (`s[i]`) and len count Unicode scalars; ranges and
+// substring take byte offsets, as as_bytes and byte_at do.
 
 fn main() {
     let s = "ąčęėšž"
     println("len={}", s.len())
     println("chars={} {}", s[0], s[5])
-    println("range={}", s[1..3])
+    println("range={} tail={}", s[2..6], s[8..])
     println("substring={}", s.substring(0, 2))
     match s.slice(2, 4) {
         Ok(piece) => println("slice={}", piece)

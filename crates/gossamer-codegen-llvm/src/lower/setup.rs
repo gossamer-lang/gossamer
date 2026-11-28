@@ -149,10 +149,38 @@ impl<'a> Lowerer<'a> {
                 return vec![false; self.body.arity as usize];
             }
             (0..self.body.arity)
-                .map(|i| self.param_is_by_pointer(i) && param_only_read(self.body, Local(i + 1)))
+                .map(|i| {
+                    self.param_is_by_pointer(i)
+                        && param_only_read(self.body, Local(i + 1), &|callee, n| {
+                            self.call_may_write_arg(callee, n)
+                        })
+                })
                 .collect()
         });
         flags.get(i as usize).copied().unwrap_or(false)
+    }
+
+    /// Whether the call to `callee` may write through its argument `n`. A
+    /// whole aggregate local handed to a `&mut` parameter crosses as the
+    /// local itself, so only the callee's signature tells a write from a
+    /// read; a callee reached through a value has no signature here.
+    fn call_may_write_arg(&self, callee: &gossamer_mir::Operand, n: usize) -> bool {
+        let name = match callee {
+            gossamer_mir::Operand::FnRef { def, .. } => self.fn_name_by_def.get(&def.local),
+            gossamer_mir::Operand::Const(gossamer_mir::ConstValue::Str(name)) => Some(name),
+            _ => return true,
+        };
+        name.and_then(|name| self.param_tys_by_name.get(name))
+            .and_then(|tys| tys.get(n))
+            .is_some_and(|&ty| {
+                matches!(
+                    self.tcx.kind_of(ty),
+                    gossamer_types::TyKind::Ref {
+                        mutability: gossamer_types::Mutbl::Mut,
+                        ..
+                    }
+                )
+            })
     }
 
     pub(crate) fn callee_uses_sret(&self, name: &str) -> bool {
@@ -213,24 +241,6 @@ impl<'a> Lowerer<'a> {
     /// remain in `self.runtime_refs` and are read by the
     /// caller to prepend to the module.
     pub(crate) fn lower(&mut self) -> Result<String, BuildError> {
-        // The frontend rejects i128 / u128 before native codegen. Keep this
-        // guard as an internal invariant so malformed MIR cannot silently
-        // truncate or emit an invalid `sext i128 to i64`.
-        for (i, _) in self.body.locals.iter().enumerate() {
-            let ty = self
-                .body
-                .local_ty(gossamer_mir::Local(u32::try_from(i).unwrap_or(0)));
-            if matches!(
-                self.tcx.kind(ty),
-                Some(gossamer_types::TyKind::Int(
-                    gossamer_types::IntTy::I128 | gossamer_types::IntTy::U128
-                ))
-            ) {
-                return Err(BuildError::InternalLoweringBug(
-                    "frontend accepted i128 / u128 local in native lowering",
-                ));
-            }
-        }
         // Closure bodies (`__closure_N`) used to fall back to
         // Cranelift because their MIR return slot was typed
         // `Unit`. The 2026-05-07 lift fix now propagates the
@@ -720,11 +730,13 @@ impl<'a> Lowerer<'a> {
                 IntTy::I8 => "s8",
                 IntTy::I16 => "s16",
                 IntTy::I32 => "s32",
-                IntTy::I64 | IntTy::Isize | IntTy::I128 => "s64",
+                IntTy::I64 | IntTy::Isize => "s64",
+                IntTy::I128 => "s128",
                 IntTy::U8 => "u8",
                 IntTy::U16 => "u16",
                 IntTy::U32 => "u32",
-                IntTy::U64 | IntTy::Usize | IntTy::U128 => "u64",
+                IntTy::U64 | IntTy::Usize => "u64",
+                IntTy::U128 => "u128",
             }
             .to_string(),
             _ if is_aggregate(self.tcx, ty) && self.heap_spilled_local_bytes_of(ty).is_none() => {
@@ -881,9 +893,14 @@ fn hot_text_reads_frame_line(out: &str, mark: usize, cold: &[(usize, usize)]) ->
 }
 
 /// Whether every mention of `param` in `body` reads its value: no store to it
-/// or into it, no borrow, no call answering into it, and no helper handed the
-/// address of its slot, which may write through it.
-fn param_only_read(body: &gossamer_mir::Body, param: Local) -> bool {
+/// or into it, no borrow, no call answering into it or that `call_writes`
+/// says may write the argument it is handed, and no helper handed the address
+/// of its slot, which may write through it.
+fn param_only_read(
+    body: &gossamer_mir::Body,
+    param: Local,
+    call_writes: &dyn Fn(&gossamer_mir::Operand, usize) -> bool,
+) -> bool {
     use gossamer_mir::{Operand, Rvalue, StatementKind, Terminator};
     let mentions = |op: &Operand| matches!(op, Operand::Copy(p) if p.local == param);
     for block in &body.blocks {
@@ -913,6 +930,14 @@ fn param_only_read(body: &gossamer_mir::Body, param: Local) -> bool {
         }
         match &block.terminator {
             Terminator::Call { destination, .. } if destination.local == param => return false,
+            Terminator::Call { callee, args, .. }
+                if args
+                    .iter()
+                    .enumerate()
+                    .any(|(n, arg)| mentions(arg) && call_writes(callee, n)) =>
+            {
+                return false;
+            }
             Terminator::Drop { place, .. } if place.local == param => return false,
             _ => {}
         }

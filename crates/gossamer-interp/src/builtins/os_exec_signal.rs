@@ -127,16 +127,22 @@ fn builtin_os_family(_args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::String(os_std::family().into()))
 }
 
+fn builtin_os_hostname(_args: &[Value]) -> RuntimeResult<Value> {
+    Ok(match os_std::hostname() {
+        Ok(name) => ok_variant(Value::String(name.into())),
+        Err(message) => err_variant(message),
+    })
+}
+
 fn builtin_os_arch(_args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::String(os_std::arch().into()))
 }
 
+/// `process::exit(code)`: unwinds the calling goroutine, running the
+/// deferred expressions of every frame it leaves; its root then ends the
+/// process with `code`.
 fn builtin_os_exit(args: &[Value]) -> RuntimeResult<Value> {
     let code = i32::try_from(args.first().and_then(value_to_int).unwrap_or(0)).unwrap_or(0);
-    if gossamer_runtime::platform::CAN_END_PROCESS {
-        crate::run_exit_hooks();
-        std::process::exit(code);
-    }
     Err(RuntimeError::Exit(code))
 }
 
@@ -403,8 +409,7 @@ pub(crate) fn builtin_time_sleep_ns_ctx(args: &[Value]) -> RuntimeResult<Value> 
 }
 
 /// Waits for `wait` unless `ctx` is cancelled first, answering whether the
-/// whole wait elapsed. The wait is split into short steps so a cancellation
-/// raised while sleeping is observed promptly.
+/// whole wait elapsed. A cancellation wakes the wait the moment it happens.
 fn sleep_ctx_for(ctx: Option<&Value>, wait: std::time::Duration) -> Value {
     let Some(ctx) = ctx else {
         return Value::Bool(true);
@@ -414,14 +419,31 @@ fn sleep_ctx_for(ctx: Option<&Value>, wait: std::time::Duration) -> Value {
         return Value::Bool(false);
     }
     let deadline = gossamer_runtime::platform::Instant::now() + wait;
-    while gossamer_runtime::platform::Instant::now() < deadline {
-        if cancelled() {
-            return Value::Bool(false);
-        }
-        let remaining = deadline.saturating_duration_since(gossamer_runtime::platform::Instant::now());
-        gossamer_runtime::platform::sleep(remaining.min(std::time::Duration::from_millis(5)));
-    }
+    wait_unless_cancelled(ctx, deadline);
     Value::Bool(!cancelled())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn wait_unless_cancelled(ctx: &Value, deadline: gossamer_runtime::platform::Instant) {
+    let signal = gossamer_runtime::wake::ThreadSignal::new();
+    // Registered before the check below, so a cancel between the two still
+    // raises the signal.
+    let _watch = crate::stdlib_builtins::context::watch(ctx, signal.waker());
+    while !crate::stdlib_builtins::context::value_is_cancelled(ctx)
+        && gossamer_runtime::platform::Instant::now() < deadline
+    {
+        signal.wait_until(deadline);
+    }
+}
+
+/// wasm32 runs one goroutine at a time, so nothing can cancel the context
+/// while this one sleeps.
+#[cfg(target_arch = "wasm32")]
+fn wait_unless_cancelled(_ctx: &Value, deadline: gossamer_runtime::platform::Instant) {
+    let now = gossamer_runtime::platform::Instant::now();
+    if now < deadline {
+        gossamer_runtime::platform::sleep(deadline - now);
+    }
 }
 
 fn builtin_pprof_cpu_profile(args: &[Value]) -> RuntimeResult<Value> {
@@ -613,7 +635,7 @@ fn builtin_time_parse_rfc3339(args: &[Value]) -> RuntimeResult<Value> {
     }
 }
 
-/// `exec::run(prog: String, args: [String]) -> Result<{stdout, stderr, code}, String>`.
+/// `process::run(prog: String, args: [String]) -> Result<{stdout, stderr, code}, String>`.
 /// One-shot subprocess: spawns `prog` with `args`, captures stdout
 /// and stderr, waits for completion, and returns the trio. The
 /// Command builder pattern remains available through the
@@ -621,7 +643,7 @@ fn builtin_time_parse_rfc3339(args: &[Value]) -> RuntimeResult<Value> {
 /// streamed output; this entry point covers the dominant
 /// "run a command and read its output" use case.
 fn builtin_exec_run(args: &[Value]) -> RuntimeResult<Value> {
-    exec_run_with("exec::run", args, None, None, OutputShape::Struct)
+    exec_run_with("process::run", args, None, None, OutputShape::Struct)
 }
 
 /// `process::run` leaf for the injected `Output` wrapper: the same run,
@@ -662,6 +684,21 @@ fn output_value(stdout: String, stderr: String, code: i64, shape: OutputShape) -
 /// The cwd-and-environment shape of `process::run`: an empty `dir`
 /// inherits the caller's working directory, and each `env` pair
 /// overrides the inherited environment rather than replacing it.
+/// `process::exec(prog, args) -> Result<(), errors::Error>`, answering only an
+/// `Err`.
+fn builtin_exec_replace(args: &[Value]) -> RuntimeResult<Value> {
+    let Some(prog) = args.first().and_then(as_str) else {
+        return Ok(err_variant("process::exec: program argument must be a string"));
+    };
+    let mut child_args = Vec::new();
+    if let Some(Value::Array(arr)) = args.get(1) {
+        child_args.extend(arr.iter().filter_map(as_str).map(str::to_owned));
+    }
+    Ok(err_variant(gossamer_runtime::c_abi::exec::exec_replace(
+        prog, child_args,
+    )))
+}
+
 /// `process::run_inherit(prog, args) -> Result<i64, errors::Error>`.
 fn builtin_exec_run_inherit(args: &[Value]) -> RuntimeResult<Value> {
     let Some(prog) = args.first().and_then(as_str) else {
@@ -757,17 +794,17 @@ fn exec_run_with(
     }
 }
 
-/// `exec::spawn(prog, args) -> Result<i64, errors::Error>`.
+/// `process::spawn(prog, args) -> Result<i64, errors::Error>`.
 ///
-/// Non-blocking sibling of `exec::run`: launches a child
+/// Non-blocking sibling of `process::run`: launches a child
 /// process with stdin/stdout/stderr connected to `/dev/null`
-/// and returns the PID immediately. Pairs with `exec::kill`
+/// and returns the PID immediately. Pairs with `process::kill`
 /// for teardown.
 fn builtin_exec_spawn(args: &[Value]) -> RuntimeResult<Value> {
     use std::process::{Command as StdCommand, Stdio as StdStdio};
     let Some(prog) = args.first().and_then(as_str) else {
         return Ok(err_variant(
-            "exec::spawn: program argument must be a string",
+            "process::spawn: program argument must be a string",
         ));
     };
     let prog = prog.to_owned();
@@ -795,12 +832,12 @@ fn builtin_exec_spawn(args: &[Value]) -> RuntimeResult<Value> {
             std::mem::forget(child);
             Ok(ok_variant(Value::Int(pid)))
         }
-        Ok(Err(e)) => Ok(err_variant(format!("exec::spawn({display_prog}): {e}"))),
+        Ok(Err(e)) => Ok(err_variant(format!("process::spawn({display_prog}): {e}"))),
         Err(e) => Ok(err_variant(e)),
     }
 }
 
-/// `exec::kill(pid: i64) -> bool` - best-effort SIGTERM. Mirrors
+/// `process::kill(pid: i64) -> bool` - best-effort SIGTERM. Mirrors
 /// the runtime helper `gos_rt_exec_kill` so the VM and compiled
 /// tiers behave identically for the daemon-launch teardown path.
 /// Shells out to `/bin/kill` instead of pulling in a libc
@@ -848,7 +885,7 @@ fn builtin_exec_kill(args: &[Value]) -> RuntimeResult<Value> {
     }
 }
 
-/// `exec::signal(pid: i64, signum: i64) -> bool`. Sends an
+/// `process::signal(pid: i64, signum: i64) -> bool`. Sends an
 /// arbitrary signal number to the target pid. Mirrors
 /// `gos_rt_exec_signal` so the VM matches the compiled tier.
 fn builtin_exec_signal(args: &[Value]) -> RuntimeResult<Value> {
@@ -858,19 +895,19 @@ fn builtin_exec_signal(args: &[Value]) -> RuntimeResult<Value> {
     let Some(Value::Int(signum)) = args.get(1) else {
         return Ok(Value::Bool(false));
     };
-    Ok(Value::Bool(exec_std::send_raw_signal(*pid, *signum)))
+    Ok(Value::Bool(process_std::send_raw_signal(*pid, *signum)))
 }
 
-/// `exec::kill_group(pid: i64) -> bool`. SIGTERMs the entire group
+/// `process::kill_group(pid: i64) -> bool`. SIGTERMs the entire group
 /// led by `pid` on Unix; best-effort `TerminateProcess` on Windows.
 fn builtin_exec_kill_group(args: &[Value]) -> RuntimeResult<Value> {
     let Some(Value::Int(pid)) = args.first() else {
         return Ok(Value::Bool(false));
     };
-    Ok(Value::Bool(exec_std::send_group_term(*pid)))
+    Ok(Value::Bool(process_std::send_group_term(*pid)))
 }
 
-/// `exec::wait_timeout(pid: i64, ms: i64) -> i64`. Polls the pid
+/// `process::wait_timeout(pid: i64, ms: i64) -> i64`. Polls the pid
 /// with WNOHANG until it exits or `ms` elapses. Returns the exit
 /// code on success, -1 on timeout, -2 on error.
 fn builtin_exec_wait_timeout(args: &[Value]) -> RuntimeResult<Value> {
@@ -883,10 +920,10 @@ fn builtin_exec_wait_timeout(args: &[Value]) -> RuntimeResult<Value> {
     if *ms < 0 {
         return Ok(Value::Int(-2));
     }
-    Ok(Value::Int(exec_std::wait_pid_timeout(*pid, *ms)))
+    Ok(Value::Int(process_std::wait_pid_timeout(*pid, *ms)))
 }
 
-/// `exec::pipeline_run(commands: [String]) -> Result<Output, errors::Error>`.
+/// `process::pipeline_run(commands: [String]) -> Result<Output, errors::Error>`.
 /// Mirrors `gos_rt_exec_pipeline_run_raw`. Each entry is a
 /// whitespace-split shell command; stdout of stage N feeds stdin
 /// of stage N+1.
@@ -902,7 +939,7 @@ pub(crate) fn builtin_process_pipeline_run_raw(args: &[Value]) -> RuntimeResult<
 fn exec_pipeline_run_with(args: &[Value], shape: OutputShape) -> RuntimeResult<Value> {
     let Some(Value::Array(arr)) = args.first() else {
         return Ok(err_variant(
-            "exec::pipeline_run: commands must be Vec<String>",
+            "process::pipeline_run: commands must be Vec<String>",
         ));
     };
     let stages: Vec<Vec<String>> = arr
@@ -912,7 +949,7 @@ fn exec_pipeline_run_with(args: &[Value], shape: OutputShape) -> RuntimeResult<V
         .filter(|s: &Vec<String>| !s.is_empty())
         .collect();
     if stages.is_empty() {
-        return Ok(err_variant("exec::pipeline_run: empty pipeline"));
+        return Ok(err_variant("process::pipeline_run: empty pipeline"));
     }
     match gossamer_runtime::sched_global::run_blocking("exec-pipeline", move || {
         run_pipeline_stages(stages)

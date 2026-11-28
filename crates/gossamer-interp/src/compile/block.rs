@@ -28,8 +28,19 @@ impl<'tcx> FnBuilder<'tcx> {
         self.defer_stack.push(Vec::new());
         let clear_after_stmt = crate::compile::consume::block_last_use_clears(block);
         let mut diverges = false;
+        // The first register of the last statement a cleanup point follows.
+        let mut statement_start: Option<Reg> = None;
         for (idx, stmt) in block.stmts.iter().enumerate() {
             let register_mark = self.register_mark();
+            match cleanup_op(stmt) {
+                Some(CleanupOp::Drain) => {
+                    if let Some(start) = statement_start.take() {
+                        self.clear_statement_temps(start);
+                    }
+                }
+                Some(CleanupOp::Release) => {}
+                None => statement_start = Some(register_mark.0),
+            }
             if self.compile_stmt(stmt)? {
                 diverges = true;
             }
@@ -57,6 +68,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 BlockResult::Unit
             } else {
                 let reg = self.compile_expr(tail)?;
+                let reg = self.detach_from_pending_defers(reg);
                 BlockResult::ValueIn(self.detach_scope_result(reg))
             }
         } else {
@@ -79,6 +91,12 @@ impl<'tcx> FnBuilder<'tcx> {
                 _ => None,
             };
             self.clear_scope_bindings(kept);
+            // A binding the compiled tiers empty where a `match` takes its
+            // payload apart is given back here, so the cleanups it held run
+            // at the block's end, where theirs do.
+            if self.binds_cleanup_carrier(block) {
+                self.emit_cleanup_point(block.span)?;
+            }
         }
         self.pop_scope();
         Ok(result)
@@ -115,6 +133,87 @@ impl<'tcx> FnBuilder<'tcx> {
         }
     }
 
+    /// Whether `block` binds an `Option` or `Result` whose type holds a
+    /// cleanup.
+    fn binds_cleanup_carrier(&self, block: &HirBlock) -> bool {
+        block.stmts.iter().any(|stmt| {
+            matches!(&stmt.kind, HirStmtKind::Let { pattern, .. }
+                if self.tcx.is_two_word_value(pattern.ty) && self.tcx.is_scope_bound(pattern.ty))
+        })
+    }
+
+    /// `__gos_run_cleanups()`.
+    fn emit_cleanup_point(&mut self, span: gossamer_lex::Span) -> RuntimeResult<()> {
+        let Some(unit) = self.tcx.unit_interned() else {
+            return Ok(());
+        };
+        let callee = HirExpr {
+            id: gossamer_hir::HirId(u32::MAX),
+            span,
+            ty: unit,
+            kind: HirExprKind::Path {
+                segments: vec![gossamer_ast::Ident::new("__gos_run_cleanups")],
+                def: None,
+            },
+        };
+        self.compile_call_ex(&callee, &[], unit)?;
+        Ok(())
+    }
+
+    /// A register of its own for a value about to leave its blocks, when
+    /// `reg` is a binding's and a pending deferred expression may release
+    /// that binding before the value is read.
+    pub(crate) fn detach_from_pending_defers(&mut self, reg: Reg) -> Reg {
+        let deferred = self.defer_stack.iter().any(|frame| !frame.is_empty());
+        let bound = self
+            .scopes
+            .iter()
+            .flat_map(|scope| scope.locals.values())
+            .any(|typed| typed.kind == RegKind::Value && typed.reg == reg);
+        if !deferred || !bound {
+            return reg;
+        }
+        let out = self.alloc_reg();
+        self.emit(Op::Move { dst: out, src: reg });
+        out
+    }
+
+    /// Empties the registers at or above `start` that hold no binding and no
+    /// capture cell: the
+    /// temporaries of the statements before a cleanup point, which the
+    /// compiled tiers have given back by then.
+    fn clear_statement_temps(&mut self, start: Reg) {
+        let bound: std::collections::HashSet<Reg> = self
+            .scopes
+            .iter()
+            .flat_map(|scope| scope.locals.values())
+            .filter(|typed| typed.kind == RegKind::Value)
+            .map(|typed| typed.reg)
+            .chain(self.reference_alias_regs.iter().copied())
+            .chain(
+                self.capture_cells
+                    .iter()
+                    .flat_map(|&(home, cell)| [home, cell]),
+            )
+            .collect();
+        let end = self.max_reg.max(self.next_reg);
+        let mut reg = start;
+        while reg < end {
+            if bound.contains(&reg) {
+                reg += 1;
+                continue;
+            }
+            let run_start = reg;
+            while reg < end && !bound.contains(&reg) {
+                reg += 1;
+            }
+            self.emit(Op::ClearRegs {
+                start: run_start,
+                count: reg - run_start,
+            });
+        }
+    }
+
     fn emit_last_use_clears(&mut self, names: &[String]) {
         for name in names {
             let Some(typed) = self.lookup_local(name) else {
@@ -127,6 +226,31 @@ impl<'tcx> FnBuilder<'tcx> {
                 });
             }
         }
+    }
+}
+
+/// The cleanup-point operations the HIR places after a statement.
+enum CleanupOp {
+    /// `__gos_release_binding(x)`.
+    Release,
+    /// `__gos_run_cleanups()`.
+    Drain,
+}
+
+fn cleanup_op(stmt: &HirStmt) -> Option<CleanupOp> {
+    let HirStmtKind::Expr { expr, .. } = &stmt.kind else {
+        return None;
+    };
+    let HirExprKind::Call { callee, .. } = &expr.kind else {
+        return None;
+    };
+    let HirExprKind::Path { segments, .. } = &callee.kind else {
+        return None;
+    };
+    match segments.as_slice() {
+        [only] if only.name == "__gos_run_cleanups" => Some(CleanupOp::Drain),
+        [only] if only.name == "__gos_release_binding" => Some(CleanupOp::Release),
+        _ => None,
     }
 }
 
@@ -196,6 +320,7 @@ mod elide_unit_load_tests {
             None,
             None,
             None,
+            false,
         )
         .expect("compile_fn");
         (chunk, decl)

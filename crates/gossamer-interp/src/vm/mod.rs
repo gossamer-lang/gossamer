@@ -211,6 +211,9 @@ pub struct Vm {
     /// names the nearest declaration - the entry file's own item before a
     /// sibling module's - which is what the compiled tiers resolve it to.
     pub(crate) bare_fn_depth: rustc_hash::FxHashMap<&'static str, usize>,
+    /// Whether the program being loaded lends a captured binding `&mut`, so
+    /// each function taking a `&mut` parameter compiles its cell body too.
+    pub(crate) cell_variants: bool,
     /// VM-owned qualified method-name cache. Dynamic `Type::method` keys are
     /// released with the VM instead of being retained by a process/thread
     /// global interner.
@@ -1185,6 +1188,7 @@ pub(crate) mod goroutine;
 mod lifecycle;
 mod native_dispatch;
 pub use native_dispatch::call_value_on_running_vm;
+pub(crate) mod capture_place;
 mod resolve;
 pub(crate) mod run;
 mod static_cell;
@@ -1202,7 +1206,11 @@ impl Default for Vm {
 /// into release-build undefined behavior.
 fn validate_chunk_for_execution(chunk: &FnChunk) -> RuntimeResult<()> {
     crate::validate::validate_chunk(chunk)
-        .map_err(|e| RuntimeError::Type(format!("invalid bytecode for `{}`: {e}", chunk.name)))
+        .map_err(|e| RuntimeError::Type(format!("invalid bytecode for `{}`: {e}", chunk.name)))?;
+    match chunk.cell_variant.get() {
+        Some(variant) => validate_chunk_for_execution(variant),
+        None => Ok(()),
+    }
 }
 
 /// Recognises `fn name(p) { intrinsic_path(p) }` (a single
@@ -1365,7 +1373,8 @@ pub(crate) fn range_indexable_len(base: &Value) -> Option<usize> {
         Value::InlineByteArray(d) => d.len(),
         Value::ByteVec(d) => d.len(),
         Value::FloatVec(d) => d.len(),
-        Value::String(s) => s.len(),
+        // A string range takes byte offsets, as `substring` does.
+        Value::String(s) => s.byte_len(),
         Value::FloatArray(fa) if fa.stride > 0 => fa.data.len() / fa.stride as usize,
         Value::FloatArray(_) => 0,
         _ => return None,
@@ -1424,10 +1433,9 @@ pub(crate) fn index_range_get(
         ))),
         Value::ByteVec(data) => Ok(Value::ByteVec(Arc::new(data[lo..hi].to_vec()))),
         Value::FloatVec(data) => Ok(Value::FloatVec(Arc::new(data[lo..hi].to_vec()))),
-        Value::String(s) => {
-            let piece = crate::builtins::str_substring_inline(s, lo as i64, hi as i64);
-            Ok(Value::String(piece))
-        }
+        Value::String(s) => Ok(Value::String(crate::builtins::str_substring_checked(
+            s, lo as i64, hi as i64,
+        )?)),
         Value::FloatArray(rx) => {
             let Value::Array(view) = Value::FloatArray(rx.clone()).float_array_to_value_array()
             else {
@@ -1546,6 +1554,13 @@ impl Vm {
             // function of the same name.
             Value::Int(_) => Some(self.intern_qualified("i64", method)),
             Value::Uint(_) => Some(self.intern_qualified("u64", method)),
+            Value::Wide(_) | Value::WideInline(..) => Some(self.intern_qualified(
+                match receiver.wide_int()? {
+                    crate::value::wide::WideInt::I(_) => "i128",
+                    crate::value::wide::WideInt::U(_) => "u128",
+                },
+                method,
+            )),
             Value::Float(_) => Some(self.intern_qualified("f64", method)),
             Value::Bool(_) => Some(self.intern_qualified("bool", method)),
             Value::Char(_) => Some(self.intern_qualified("char", method)),
@@ -1561,7 +1576,8 @@ impl Vm {
             | Value::Native(_)
             | Value::NativeEnum(_)
             | Value::Opaque(_)
-            | Value::CaptureCell(_) => None,
+            | Value::CaptureCell(_)
+            | Value::CapturePlace(_) => None,
         }
     }
 
@@ -1891,7 +1907,10 @@ fn adaptive_div(
                 if *y == 0 {
                     return Err(RuntimeError::Panic("divide by zero".to_string()));
                 }
-                return Ok(Value::Int(x.wrapping_div(*y)));
+                return x
+                    .checked_div(*y)
+                    .map(Value::Int)
+                    .ok_or_else(divide_overflow);
             }
         }
         bytecode::ARITH_FLOAT_FLOAT => {
@@ -1920,7 +1939,10 @@ fn adaptive_rem(
                 if *y == 0 {
                     return Err(RuntimeError::Panic("divide by zero".to_string()));
                 }
-                return Ok(Value::Int(x.wrapping_rem(*y)));
+                return x
+                    .checked_rem(*y)
+                    .map(Value::Int)
+                    .ok_or_else(remainder_overflow);
             }
         }
         bytecode::ARITH_FLOAT_FLOAT => {
@@ -1934,10 +1956,23 @@ fn adaptive_rem(
     rem_int(a, b)
 }
 
+/// The panic of a signed `MIN / -1`, whose quotient does not fit the type.
+pub(crate) fn divide_overflow() -> RuntimeError {
+    RuntimeError::Panic("attempt to divide with overflow".to_string())
+}
+
+/// The panic of a signed `MIN % -1`.
+pub(crate) fn remainder_overflow() -> RuntimeError {
+    RuntimeError::Panic("attempt to calculate the remainder with overflow".to_string())
+}
+
 fn div_int(a: &Value, b: &Value) -> RuntimeResult<Value> {
     match (a, b) {
         (Value::Int(_), Value::Int(0)) => Err(RuntimeError::Panic("divide by zero".to_string())),
-        (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x.wrapping_div(*y))),
+        (Value::Int(x), Value::Int(y)) => x
+            .checked_div(*y)
+            .map(Value::Int)
+            .ok_or_else(divide_overflow),
         (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x / y)),
         (Value::Int(x), Value::Float(y)) => Ok(Value::Float((*x as f64) / y)),
         (Value::Float(x), Value::Int(y)) => Ok(Value::Float(x / (*y as f64))),
@@ -1950,7 +1985,10 @@ fn div_int(a: &Value, b: &Value) -> RuntimeResult<Value> {
 fn rem_int(a: &Value, b: &Value) -> RuntimeResult<Value> {
     match (a, b) {
         (Value::Int(_), Value::Int(0)) => Err(RuntimeError::Panic("divide by zero".to_string())),
-        (Value::Int(x), Value::Int(y)) => Ok(Value::Int(x.wrapping_rem(*y))),
+        (Value::Int(x), Value::Int(y)) => x
+            .checked_rem(*y)
+            .map(Value::Int)
+            .ok_or_else(remainder_overflow),
         (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x % y)),
         (Value::Int(x), Value::Float(y)) => Ok(Value::Float((*x as f64) % y)),
         (Value::Float(x), Value::Int(y)) => Ok(Value::Float(x % (*y as f64))),
@@ -2351,6 +2389,10 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         // A `u64` compares by its bits whichever representation carried it.
         (Value::Uint(x), Value::Uint(y)) => x == y,
         (Value::Uint(x), Value::Int(y)) | (Value::Int(y), Value::Uint(x)) => *x == *y as u64,
+        (Value::Wide(_) | Value::WideInline(..), _)
+        | (_, Value::Wide(_) | Value::WideInline(..)) => {
+            crate::value::wide::compare(a_ref, b_ref) == Some(std::cmp::Ordering::Equal)
+        }
         (Value::Float(x), Value::Float(y)) => x == y,
         (Value::Char(x), Value::Char(y)) => x == y,
         (Value::String(x), Value::String(y)) => x == y,
@@ -2400,7 +2442,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         }
         // A JSON value is equal to one holding the same document, object
         // entries in any order, whichever handle carries it.
-        (Value::Json(xa), Value::Json(xb)) => xa.as_value() == xb.as_value(),
+        (Value::Json(xa), Value::Json(xb)) => *xa.as_value() == *xb.as_value(),
         // A scalar read out of a JSON document travels as the plain value, so
         // it is equal to a JSON value that holds the same scalar.
         (
@@ -2514,6 +2556,12 @@ pub(crate) fn value_ordering(a: &Value, b: &Value) -> RuntimeResult<std::cmp::Or
     }
     match (a_ref, b_ref) {
         (Value::Int(x), Value::Int(y)) => Ok(x.cmp(y)),
+        (Value::Wide(_) | Value::WideInline(..), _)
+        | (_, Value::Wide(_) | Value::WideInline(..))
+            if let Some(order) = crate::value::wide::compare(a_ref, b_ref) =>
+        {
+            Ok(order)
+        }
         // A `Uint` is a `u64` whose bits reach past `i64::MAX`, so it orders
         // unsigned; an `Int` beside it holds the same type's bits, since the
         // two only meet where one static type produced both.
@@ -2607,7 +2655,7 @@ pub(crate) fn auto_deref_cell(v: &Value) -> Option<Value> {
 }
 
 /// Native struct-field read.
-fn field_get(receiver: &Value, name: &str) -> RuntimeResult<Value> {
+pub(crate) fn field_get(receiver: &Value, name: &str) -> RuntimeResult<Value> {
     if let Value::Struct(inner) = receiver {
         if let Some((_, v)) = inner.fields.iter().find(|(ident, _)| (**ident) == name) {
             return Ok(v.clone());
@@ -2630,7 +2678,7 @@ fn field_get(receiver: &Value, name: &str) -> RuntimeResult<Value> {
 /// in place using `Arc::make_mut`, so aliasing values see the
 /// new state only if they share the same `Arc` (value-aggregate
 /// semantics) when the receiver is a local (register) binding.
-fn field_set(receiver: &mut Value, name: &str, new_value: Value) -> RuntimeResult<()> {
+pub(crate) fn field_set(receiver: &mut Value, name: &str, new_value: Value) -> RuntimeResult<()> {
     let Value::Struct(struct_arc) = receiver else {
         return Err(RuntimeError::Type(format!(
             "cannot assign to field `{name}` on non-struct `{receiver}`"
@@ -2701,6 +2749,9 @@ mod tests {
             closure_protos: Vec::new(),
             select_arms: Vec::new(),
             unwind_table: Vec::new(),
+            cell_variant: std::sync::OnceLock::new(),
+            cell_params: false,
+            passes_capture_cells: false,
         }
     }
 

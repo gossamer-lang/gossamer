@@ -260,15 +260,7 @@ impl<'a> Builder<'a> {
             if let Some(inner) = unwrap_inner.or(err_inner)
                 && let Some(sname) = self.struct_name_of(inner)
             {
-                let runtime_kind: Option<&'static str> = match sname.as_str() {
-                    "Error" => Some("errors::Error"),
-                    "Response" => Some("http::Response"),
-                    "Request" => Some("http::Request"),
-                    "Client" => Some("http::Client"),
-                    "Scanner" => Some("bufio::Scanner"),
-                    "Pattern" => Some("regex::Pattern"),
-                    _ => None,
-                };
+                let runtime_kind = self.std_type_runtime_kind(inner, &sname);
                 self.local_struct.insert(dest, sname);
                 if let Some(rk) = runtime_kind {
                     self.local_runtime_kind.insert(dest, rk);

@@ -327,6 +327,12 @@ pub(super) fn collect_field_rc(
         TyKind::Tuple(_) | TyKind::Array { .. } => {
             collect_slot_rc_children(tcx, fty, word, depth + 1, out, has_direct);
         }
+        // A channel end or a join handle is a counted node the element holds
+        // a share of, as a copy of the bare handle does.
+        _ if tcx.is_counted_node(fty) => {
+            out.push((-1, 0, word, SLOT_KIND_RC_NODE));
+            *has_direct = true;
+        }
         _ => {}
     }
 }

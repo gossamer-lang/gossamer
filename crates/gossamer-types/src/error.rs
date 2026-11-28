@@ -83,6 +83,24 @@ fn refusal_help(
                 ));
             }
         }
+        TypeError::DropTypeShape { .. } => {
+            out = out.with_help(
+                "declare the resource as a struct with concrete field types, or hold the \
+                 cleanup in a `runtime::Guard` field, which any type may carry",
+            );
+        }
+        TypeError::PrecisionOnNonNumber { ty } => {
+            out = out.with_help(format!(
+                "format the `{ty}` without a precision, or reach the number inside it first \
+                 (`v.unwrap_or(0.0)`, `if let Some(x) = v`, a field)"
+            ));
+        }
+        TypeError::DropClone { ty } => {
+            out = out.with_help(format!(
+                "`let b = a` already shares the `{ty}` `a` names; build a second `{ty}` \
+                 with its own resource where one is needed"
+            ));
+        }
         TypeError::GuardEscape { name } => {
             out = out
                 .with_help(format!(
@@ -158,7 +176,10 @@ fn source_rule_help(
         | TypeError::BitwiseOnBool { .. }
         | TypeError::InexactFloatEquality { .. }
         | TypeError::MissingOrder { .. }
-        | TypeError::GuardEscape { .. } => out = refusal_help(error, out),
+        | TypeError::GuardEscape { .. }
+        | TypeError::DropTypeShape { .. }
+        | TypeError::DropClone { .. }
+        | TypeError::PrecisionOnNonNumber { .. } => out = refusal_help(error, out),
         TypeError::ConstArithmetic { .. } => {
             out = out.with_help(
                 "a constant's value must fit its declared type at every step: widen the \
@@ -970,16 +991,6 @@ pub enum TypeError {
         /// Why the operator is unsupported at this position.
         reason: String,
     },
-    /// `i128` / `u128` appeared in a type position, a literal
-    /// suffix, or a cast target. The runtime's i64 value model has
-    /// no 128-bit representation on any tier, so the checker
-    /// rejects the types uniformly instead of letting the VM run
-    /// them at silent 64-bit width.
-    #[error("`{ty}` is unsupported because all integer tiers are limited to 64 bits")]
-    Int128Unsupported {
-        /// Which of the two 128-bit spellings appeared.
-        ty: String,
-    },
     /// A std free function was used as a first-class value
     /// (`r.map_err(errors::new)`) but is not in the supported-set
     /// signature catalogue, so the pass that rewrites a std function
@@ -1339,6 +1350,31 @@ pub enum TypeError {
         /// The guard binding.
         name: String,
     },
+    /// `impl Drop` on a type whose values cannot share one record: a
+    /// generic type or an enum.
+    #[error(
+        "`impl Drop` on `{ty}`, which is {reason}: a drop type is a struct with no type parameters"
+    )]
+    DropTypeShape {
+        /// The type the impl names.
+        ty: String,
+        /// What the type is.
+        reason: String,
+    },
+    /// `clone()` of a value whose type has `impl Drop`.
+    #[error(
+        "`{ty}` has `impl Drop`, so it cannot be cloned: a clone would release the resource a second time"
+    )]
+    DropClone {
+        /// The drop type.
+        ty: String,
+    },
+    /// A `{v:.N}` precision on a value that is neither a number nor text.
+    #[error("a `.N` precision applies to a number or a `String`, not to `{ty}`")]
+    PrecisionOnNonNumber {
+        /// The formatted value's type.
+        ty: String,
+    },
     /// A user type is sorted, compared with `<`, or used where an order is
     /// needed, and declares none.
     #[error("`{ty}` has no order: {what} needs `{ty}` to be ordered")]
@@ -1622,7 +1658,6 @@ impl TypeError {
             Self::ClosureParamUninferred { .. } => "closure-param-uninferred",
             Self::GenericReturnTypeUninferred { .. } => "generic-return-type-uninferred",
             Self::QuestionMarkUnsupported { .. } => "question-mark-unsupported",
-            Self::Int128Unsupported { .. } => "int128-unsupported",
             Self::StdFnValueUnsupported { .. } => "std-fn-value-unsupported",
             Self::IteratorStateFormatted => "iterator-state-formatted",
             Self::ValueNotDisplayable { .. } => "value-not-displayable",
@@ -1668,6 +1703,9 @@ impl TypeError {
             Self::InexactFloatEquality { .. } => "inexact-float-equality",
             Self::MissingOrder { .. } => "missing-order",
             Self::GuardEscape { .. } => "guard-escape",
+            Self::DropTypeShape { .. } => "drop-type-shape",
+            Self::DropClone { .. } => "drop-clone",
+            Self::PrecisionOnNonNumber { .. } => "precision-on-non-number",
             Self::MutableReferenceToImmutable { .. } => "mutable-reference-to-immutable",
             Self::MutableReferenceConflict { .. } => "mutable-reference-conflict",
             Self::ReferenceEscapeUnsupported { .. } => "reference-escape-unsupported",
@@ -1766,7 +1804,6 @@ impl TypeError {
             Self::ClosureParamUninferred { .. } => "GT0013",
             Self::GenericReturnTypeUninferred { .. } => "GT0044",
             Self::QuestionMarkUnsupported { .. } => "GT0045",
-            Self::Int128Unsupported { .. } => "GT0014",
             Self::StdFnValueUnsupported { .. } => "GT0015",
             Self::IteratorStateFormatted => "GT0041",
             Self::ValueNotDisplayable { .. } => "GT0062",
@@ -1831,25 +1868,11 @@ impl TypeError {
             Self::InexactFloatEquality { .. } => "GT0142",
             Self::MissingOrder { .. } => "GT0143",
             Self::GuardEscape { .. } => "GT0144",
+            Self::DropTypeShape { .. } => "GT0145",
+            Self::DropClone { .. } => "GT0146",
+            Self::PrecisionOnNonNumber { .. } => "GT0147",
         }
     }
-}
-
-/// Maps the most common `expected X, found Y` pairs to a one-line
-/// "did you mean" hint. Pure string compare on the rendered types -
-/// keeps the table small and avoids re-deriving structure here.
-/// Attaches the GT0014 help + note to an `Int128Unsupported`
-/// diagnostic. Split out of `to_diagnostic` to keep that match
-/// within the line-count lint budget.
-fn int128_diagnostic(
-    out: gossamer_diagnostics::Diagnostic,
-    ty: &str,
-) -> gossamer_diagnostics::Diagnostic {
-    out.with_help("use `i64` / `u64` or split the value into two 64-bit halves")
-        .with_note(format!(
-            "`{ty}` has no 128-bit runtime representation on any tier (VM, JIT, or \
-             compiled tier)"
-        ))
 }
 
 /// Whether every value of the integer type named `from` is a value of the
@@ -2598,7 +2621,6 @@ impl TypeDiagnostic {
                     )
                     .with_note(reason.clone());
             }
-            TypeError::Int128Unsupported { ty } => out = int128_diagnostic(out, ty),
             TypeError::StdFnValueUnsupported { path } => {
                 out = std_fn_value_diagnostic(out, path);
             }
@@ -2873,6 +2895,9 @@ impl TypeDiagnostic {
             | TypeError::InexactFloatEquality { .. }
             | TypeError::MissingOrder { .. }
             | TypeError::GuardEscape { .. }
+            | TypeError::DropTypeShape { .. }
+            | TypeError::DropClone { .. }
+            | TypeError::PrecisionOnNonNumber { .. }
             | TypeError::ConstArithmetic { .. }
             | TypeError::StaticMutOutsideUnsafe { .. } => {
                 out = source_rule_help(&self.error, out);

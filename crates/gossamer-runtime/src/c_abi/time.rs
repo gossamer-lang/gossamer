@@ -388,6 +388,82 @@ pub fn fixed_location_name(offset_seconds: i64) -> Result<String, String> {
     ))
 }
 
+/// `Time::format(layout)`: the instant `ns` nanoseconds from the Unix epoch,
+/// read in `spec` and written by the strftime directives of `layout`.
+///
+/// # Errors
+/// An unknown location, a timestamp out of range, or a layout with a
+/// directive the instant cannot fill.
+pub fn strftime(ns: i64, spec: &str, layout: &str) -> Result<String, String> {
+    let instant = Timestamp::from_nanosecond(i128::from(ns))
+        .map_err(|_| "time::Time::format: timestamp out of range".to_string())?;
+    let zoned = instant.to_zoned_datetime(parse_location(spec)?);
+    jiff::fmt::strtime::format(layout, &zoned)
+        .map_err(|error| format!("time::Time::format: {error}"))
+}
+
+/// `time::parse(layout, text, location)`: the instant `text` names under the
+/// strftime directives of `layout`, as Unix nanoseconds, and the location it
+/// is read in. A parsed IANA name (`%Q`) or offset (`%z`) decides the instant
+/// and its location; without one the civil time is read in `spec`, or in UTC
+/// when `spec` is empty, and a time that location's clock skips or repeats is
+/// an error. A parsed Unix timestamp (`%s`) is read in UTC.
+///
+/// # Errors
+/// Text the layout does not match, a civil time with no date, an unknown
+/// location, an offset that disagrees with the named zone, or a skipped or
+/// repeated wall-clock time.
+pub fn strptime(layout: &str, text: &str, spec: &str) -> Result<(i64, String), String> {
+    let fail = |message: String| format!("time::parse: {message}");
+    let parsed = jiff::fmt::strtime::parse(layout, text).map_err(|e| fail(e.to_string()))?;
+    let nanos = |instant: Timestamp| {
+        i64::try_from(instant.as_nanosecond()).map_err(|_| fail("timestamp out of range".into()))
+    };
+    if let Some(instant) = parsed.timestamp() {
+        let at = match (parsed.iana_time_zone(), parsed.offset()) {
+            (Some(name), _) => name.to_string(),
+            (None, Some(offset)) => fixed_location_name(i64::from(offset.seconds()))?,
+            (None, None) => "UTC".to_string(),
+        };
+        return Ok((nanos(instant)?, at));
+    }
+    let civil = parsed.to_datetime().map_err(|e| fail(e.to_string()))?;
+    let (zone, at) = match (parsed.iana_time_zone(), parsed.offset()) {
+        (Some(name), _) => (parse_location(name)?, name.to_string()),
+        (None, Some(offset)) => {
+            let at = fixed_location_name(i64::from(offset.seconds()))?;
+            (TimeZone::fixed(offset), at)
+        }
+        (None, None) if spec.is_empty() => (TimeZone::UTC, "UTC".to_string()),
+        (None, None) => (parse_location(spec)?, spec.to_string()),
+    };
+    let ambiguous = zone.to_ambiguous_timestamp(civil);
+    let offset = match (ambiguous.offset(), parsed.offset()) {
+        (AmbiguousOffset::Unambiguous { offset }, None) => offset,
+        (AmbiguousOffset::Unambiguous { offset }, Some(written)) if offset == written => offset,
+        (AmbiguousOffset::Fold { before, after }, Some(written))
+            if written == before || written == after =>
+        {
+            written
+        }
+        (AmbiguousOffset::Gap { .. }, _) => {
+            return Err(fail(format!("`{text}` names a time {at} skips")));
+        }
+        (AmbiguousOffset::Fold { .. }, None) => {
+            return Err(fail(format!("`{text}` names a time {at} repeats")));
+        }
+        (_, Some(written)) => {
+            return Err(fail(format!(
+                "`{text}` has offset {written}, which {at} does not use then"
+            )));
+        }
+    };
+    let instant = offset
+        .to_timestamp(civil)
+        .map_err(|_| fail("timestamp out of range".into()))?;
+    Ok((nanos(instant)?, at))
+}
+
 /// The instant `ms` milliseconds from the Unix epoch.
 fn instant_ms(ms: i64) -> Result<Timestamp, String> {
     Timestamp::from_millisecond(ms).map_err(|_| "time: timestamp out of range".to_string())
@@ -548,6 +624,68 @@ pub extern "C" fn gos_rt_time_fixed_location_raw(offset_seconds: i64) -> i128 {
     ffi_entry!({
         match fixed_location_name(offset_seconds) {
             Ok(name) => time_ok_string(&name),
+            Err(error) => time_error(&error),
+        }
+    })
+}
+
+/// Layout of [`gos_rt_time_strptime_raw`]'s `(i64, String)` answer: the
+/// instant, then the location name the blob owns.
+static NANOS_AND_NAME_META: [i64; 5] = [
+    gossamer_abi::rc::RC_KIND_STRUCT,
+    1,
+    0,
+    1,
+    (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 1,
+];
+
+/// `__gos_time_strftime_raw(ns, location, layout) -> Result<String, Error>`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_time_strftime_raw(
+    ns: i64,
+    location: *const c_char,
+    layout: *const c_char,
+) -> i128 {
+    ffi_entry!({
+        // SAFETY: `location` and `layout` are this shim's arguments, as
+        // `read_time_string` requires (C-ABI contract).
+        let result = unsafe { read_time_string(location) }.and_then(|spec| {
+            // SAFETY: as above.
+            let layout = unsafe { read_time_string(layout) }?;
+            strftime(ns, &spec, &layout)
+        });
+        match result {
+            Ok(value) => time_ok_string(&value),
+            Err(error) => time_error(&error),
+        }
+    })
+}
+
+/// `__gos_time_strptime_raw(layout, text, location) -> Result<(i64, String),
+/// Error>`: the instant in Unix nanoseconds and the location it reads in. An
+/// empty `location` is none.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_time_strptime_raw(
+    layout: *const c_char,
+    text: *const c_char,
+    location: *const c_char,
+) -> i128 {
+    ffi_entry!({
+        // SAFETY: the three are this shim's arguments, as `read_time_string`
+        // requires (C-ABI contract).
+        let result = unsafe { read_time_string(layout) }.and_then(|layout| {
+            // SAFETY: as above.
+            let text = unsafe { read_time_string(text) }?;
+            // SAFETY: as above.
+            let spec = unsafe { read_time_string(location) }?;
+            strptime(&layout, &text, &spec)
+        });
+        match result {
+            Ok((ns, at)) => {
+                let name = alloc_cstring(at.as_bytes()) as i64;
+                let blob = crate::c_abi::rc::counted_words(&[ns, name], &NANOS_AND_NAME_META);
+                gos_rt_result_new(0, blob as i64)
+            }
             Err(error) => time_error(&error),
         }
     })

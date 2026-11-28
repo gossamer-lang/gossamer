@@ -1,0 +1,25 @@
+// `json::encode` of a map whose values hold maps - directly, or inside a
+// tuple or a struct - writes each inner map once and leaves the program's
+// maps intact, so encoding the same value again writes the same text and the
+// program exits.
+use std::encoding::json
+
+struct Holder {
+    m: Map<String, i64>
+}
+
+fn main() {
+    let nested = { "k": { "a": 1 }, "j": { "b": 2 } }
+    let deeper = { "k": { "a": { "b": 2 } } }
+    let in_tuple = { "k": (1, { "a": 2 }) }
+    let keyed = { 1: (2, { "a": #[3] }) }
+    let in_struct = { "k": Holder { m: { "z": 1 } } }
+    for _ in 0..3 {
+        println(json::encode(nested).unwrap())
+        println(json::encode(deeper).unwrap())
+        println(json::encode(in_tuple).unwrap())
+        println(json::encode(keyed).unwrap())
+        println(json::encode(in_struct).unwrap())
+    }
+    println(f"still holds: {nested.len()} {deeper.len()} {in_tuple.len()} {keyed.len()} {in_struct.len()}")
+}

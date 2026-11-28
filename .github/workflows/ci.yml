@@ -276,7 +276,7 @@ jobs:
           "$CARGO_BIN" test --no-fail-fast --lib --tests \
             -p gossamer-runtime -p gossamer-interp -p gossamer-sched \
             -p gossamer-coro -p gossamer-std -p gossamer-pkg \
-            -p gossamer-http3 -p gossamer-ws -- --nocapture
+            -p gossamer-ws -- --nocapture
 
   musl-build:
     name: Musl build check
