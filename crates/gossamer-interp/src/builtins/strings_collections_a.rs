@@ -731,6 +731,23 @@ pub(crate) fn str_substring_inline(s: &SmolStr, start: i64, end: i64) -> SmolStr
     SmolStr::from_str(&s.as_str()[lo..hi])
 }
 
+/// `s.substring(start, end)`: the offsets clamped into the string, and a
+/// panic for an offset inside a character, as an index past a sequence's end
+/// panics.
+pub(crate) fn str_substring_checked(s: &SmolStr, start: i64, end: i64) -> RuntimeResult<SmolStr> {
+    let byte_len = s.byte_len();
+    let text = s.as_str();
+    for offset in [start, end] {
+        let at = (offset.max(0) as usize).min(byte_len);
+        if !text.is_char_boundary(at) {
+            return Err(crate::value::RuntimeError::Panic(format!(
+                "substring: byte offset {offset} is not on a character boundary"
+            )));
+        }
+    }
+    Ok(str_substring_inline(s, start, end))
+}
+
 fn next_char_boundary(s: &str, mut index: usize) -> usize {
     while index < s.len() && !s.is_char_boundary(index) {
         index += 1;
@@ -750,7 +767,7 @@ fn builtin_str_substring(args: &[Value]) -> RuntimeResult<Value> {
         Some(Value::Int(n)) => *n,
         _ => s.byte_len() as i64,
     };
-    Ok(Value::String(str_substring_inline(s, start, end)))
+    Ok(Value::String(str_substring_checked(s, start, end)?))
 }
 
 fn builtin_str_byte_len(args: &[Value]) -> RuntimeResult<Value> {

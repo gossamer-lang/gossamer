@@ -1,0 +1,45 @@
+// `text::template`: a template parses once and renders any value with a JSON
+// form, unescaped. A field the data does not hold is an `Err` naming it
+// unless `MissingKey::Empty` is chosen, a syntax error names its line and
+// column, and a nested standard module a `use` binds (`template::`) names
+// its own items on every tier.
+use std::text::template
+use std::text::template::{MissingKey, Template}
+use std::encoding::json
+
+struct Item {
+    name: String
+    qty: i64
+}
+
+struct Order {
+    customer: String
+    items: Vec<Item>
+    rush: bool
+    note: Option<String>
+}
+
+fn main() {
+    let order = Order {
+        customer: "Ada & Co <ops>"
+        items: #[Item { name: "bolts", qty: 40 }, Item { name: "nuts", qty: 12 }]
+        rush: true
+        note: None
+    }
+    let letter = Template::parse("Dear {{ .customer }},\n{{ range .items }}- {{ .qty }} x {{ .name }}\n{{ end }}{{ if .rush }}Shipping today.{{ else }}Shipping this week.{{ end }} [{{ .note }}]\n").unwrap()
+    print(letter.render(order).unwrap())
+    let later = Order { customer: "Bo", items: #[], rush: false, note: Some("call first") }
+    print(letter.render(later).unwrap())
+    println(template::render("{{ .a }}-{{ .b }}", { "a": 1, "b": 2 }).unwrap())
+    println(template::render("{{ .x }}", json::parse("{\"x\": [1, 2]}").unwrap()).unwrap())
+    match template::render("Hi {{ .user.email }}", { "user": { "name": "Ada" } }) {
+        Ok(text) => println(f"missing rendered {text}")
+        Err(e) => println(f"missing: {e}")
+    }
+    let lenient = Template::parse("Hi [{{ .user.email }}]", missing_key: MissingKey::Empty).unwrap()
+    println(lenient.render({ "user": { "name": "Ada" } }).unwrap())
+    match Template::parse("one\n  {{ if .x }}two") {
+        Ok(_) => println("unbalanced parsed")
+        Err(e) => println(f"refused: {e}")
+    }
+}

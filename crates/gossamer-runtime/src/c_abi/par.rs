@@ -351,6 +351,7 @@ fn caught_fault(payload: &(dyn std::any::Any + Send)) -> DeferredFault {
         trace: String::new(),
         code: "GX0005".to_string(),
         prefix: "panic: ".to_string(),
+        exit: None,
     }
 }
 
@@ -512,6 +513,8 @@ impl Drop for ChunkWindow {
 /// the call runs.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_par_chunks(env: *const u8, seq: *mut GosVec, size: i64) {
+    // SAFETY: `seq` is this shim's vector, null or live, which it writes.
+    unsafe { crate::c_abi::vec::vec_unshare(seq) };
     #[cfg(target_arch = "wasm32")]
     {
         // SAFETY: as this shim's contract states.

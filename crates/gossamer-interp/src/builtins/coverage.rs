@@ -213,10 +213,6 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
          fixed-arity `ioctl` / `fcntl` / `open` exports through the symbol table",
     ),
     (
-        "gos_rt_field_error_*",
-        "the VM implements `validate::FieldError` in `stdlib_builtins/validate.rs`",
-    ),
-    (
         "gos_rt_file_server_*",
         "the VM serves static files through `stdlib_builtins/http_static_files.rs`",
     ),
@@ -229,6 +225,12 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
         "gos_rt_floatarr_slice_result",
         "the VM slices a float array with the range-index operation on \
          `Value::FloatArray`",
+    ),
+    (
+        "gos_rt_float_to_wide",
+        "the VM converts a float to an `i128` / `u128` in its numeric cast over \
+         `Value::Float`, answering a word-sized `Value::Int` / `Value::Uint` or a \
+         wide value",
     ),
     (
         "gos_rt_flush_stdout",
@@ -278,9 +280,14 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
         "the VM serves h2c through the same `http2_server` driver from its HTTP builtins",
     ),
     (
-        "gos_rt_http3_*",
-        "the VM serves HTTP/3 through the shared `gossamer-http3` engine from its \
-         HTTP builtins",
+        "gos_rt_i128_to_str",
+        "the VM renders a 128-bit integer through the `Display` implementation of \
+         its wide values (`value/wide.rs`)",
+    ),
+    (
+        "gos_rt_i128_prec_to_str",
+        "the VM renders a `{:.N}` integer exactly in the `__fmt_prec` builtin \
+         (`builtins/core_io_http.rs`)",
     ),
     (
         "gos_rt_i64_*",
@@ -487,6 +494,11 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
          call's position as this native form does",
     ),
     (
+        "gos_rt_runtime_run_cleanups",
+        "the VM runs a released guard's cleanup when its last `Value` share drops, \
+         through Rust ownership of the guard value (`stdlib_builtins/guard.rs`)",
+    ),
+    (
         "gos_rt_retain_held",
         "the VM's values are counted by `Arc`, and an `arena` block's values are \
          ordinary VM values that a node holding one keeps alive by its own `Arc`",
@@ -564,7 +576,12 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
     ),
     (
         "gos_rt_stream_next_line",
-        "the VM reads the next line through `Stream::read_line`",
+        "the VM reads the next line through `io::Stream::read_line`",
+    ),
+    (
+        "gos_rt_stream_*",
+        "the VM implements an `io::Stream`'s methods as the `io::Stream::*` \
+         builtins in `builtins/core_io_http.rs`",
     ),
     (
         "gos_rt_sync_*",
@@ -580,17 +597,28 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
         "the VM records `testing::check_eq` through its testing builtins",
     ),
     (
-        "gos_rt_trace_ended_to_otlp_json",
-        "the VM exports finished spans in `stdlib_builtins/trace.rs`",
-    ),
-    (
         "gos_rt_tuple_*",
         "the VM holds tuples as `Value::Tuple` and compares and renders them \
          structurally",
     ),
     (
+        "gos_rt_u64_prec_to_str",
+        "the VM renders a `{:.N}` integer exactly in the `__fmt_prec` builtin \
+         (`builtins/core_io_http.rs`)",
+    ),
+    (
         "gos_rt_u64_to_str",
         "the VM renders an unsigned integer through its `Display` implementation",
+    ),
+    (
+        "gos_rt_u128_prec_to_str",
+        "the VM renders a `{:.N}` integer exactly in the `__fmt_prec` builtin \
+         (`builtins/core_io_http.rs`)",
+    ),
+    (
+        "gos_rt_u128_to_str",
+        "the VM renders a 128-bit unsigned integer through the `Display` \
+         implementation of its wide values (`value/wide.rs`)",
     ),
     (
         "gos_rt_udp_*",
@@ -622,9 +650,19 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
         "the VM implements `sync::WaitGroup` in `stdlib_builtins/sync.rs`",
     ),
     (
+        "gos_rt_wide_*",
+        "the VM computes 128-bit multiply, divide, remainder, and float conversion \
+         over its wide values in `value/wide.rs`",
+    ),
+    (
         "gos_rt_ws_*",
         "the VM implements WebSockets in `stdlib_builtins/http_websocket.rs` and \
          `http_ws*.rs`",
+    ),
+    (
+        "gos_rt_yaml_parse_with",
+        "the VM reads `yaml::parse(text, duplicate_keys: ..)` through the \
+         `encoding::yaml::__parse_with` builtin in `stdlib_builtins/encoding_yaml.rs`",
     ),
 ];
 

@@ -225,6 +225,11 @@ pub(super) fn lower_intrinsic_call_io_math(
                     other => (other, false),
                 };
                 match kind {
+                    _ if super::print_emit::operand_is_wide_int(body, tcx, arg) => {
+                        super::print_emit::emit_concat_wide(
+                            module, builder, intrinsics, body, tcx, arg, value,
+                        )?;
+                    }
                     PrintKind::Unit => {
                         let text = intrinsics.intern_string(module, "()")?;
                         let text = intrinsics.static_string_body_ptr(module, builder, text);
@@ -318,6 +323,7 @@ pub(super) fn lower_intrinsic_call_io_math(
                     PrintKind::Seq(_) => unreachable!("the sequence spelling is unwrapped above"),
                     PrintKind::VecI64
                     | PrintKind::VecUint
+                    | PrintKind::VecWide(_)
                     | PrintKind::VecF64
                     | PrintKind::VecBool
                     | PrintKind::VecString
@@ -326,6 +332,8 @@ pub(super) fn lower_intrinsic_call_io_math(
                         let helper = match kind {
                             PrintKind::VecI64 => "gos_rt_vec_format_i64",
                             PrintKind::VecUint => "gos_rt_vec_format_u64",
+                            PrintKind::VecWide(false) => "gos_rt_vec_format_i128",
+                            PrintKind::VecWide(true) => "gos_rt_vec_format_u128",
                             PrintKind::VecF64 => "gos_rt_vec_format_f64",
                             PrintKind::VecBool => "gos_rt_vec_format_bool",
                             PrintKind::VecString => "gos_rt_vec_format_string",
@@ -807,7 +815,7 @@ pub(super) fn lower_intrinsic_call_io_math(
                 Some(types::I128),
                 &[stream, buf],
             )?
-            .unwrap_or_else(|| builder.ins().iconst(types::I128, 0));
+            .unwrap_or_else(|| super::lowering_rvalue::int_const(builder, types::I128, 0));
             define_var_to(
                 builder,
                 locals,
@@ -1095,7 +1103,7 @@ pub(super) fn lower_intrinsic_call_io_math(
                         Some(arg) => lower_operand(
                             module, builder, locals, body, tcx, arg, None, intrinsics,
                         )?,
-                        None => builder.ins().iconst(ty, 0),
+                        None => super::lowering_rvalue::int_const(builder, ty, 0),
                     };
                     call_args.push(coerce_arg_to(builder, v, ty).unwrap_or(v));
                     sig_params.push(ty);
@@ -2172,8 +2180,9 @@ pub(super) fn lower_intrinsic_call_io_math(
             let offset_raw = lower_operand(
                 module, builder, locals, body, tcx, &args[1], None, intrinsics,
             )?;
+            let value_hint = (name == "gos_store_i128").then_some(types::I128);
             let value = lower_operand(
-                module, builder, locals, body, tcx, &args[2], None, intrinsics,
+                module, builder, locals, body, tcx, &args[2], value_hint, intrinsics,
             )?;
             // Closures pass `__env` as the first param; if its
             // declared type is the closure's body-return type
@@ -2247,9 +2256,11 @@ pub(super) fn lower_intrinsic_call_io_math(
             } else {
                 builder.ins().ireduce(ptr_ty, addr_i64)
             };
-            // A two-word value is held in both of its words.
+            // A two-word value - a carrier or a 128-bit integer - is held in
+            // both of its words.
             let width = if destination.projection.is_empty()
-                && tcx.is_two_word_value(body.local_ty(destination.local))
+                && (tcx.is_two_word_value(body.local_ty(destination.local))
+                    || tcx.is_wide_int(body.local_ty(destination.local)))
             {
                 types::I128
             } else {

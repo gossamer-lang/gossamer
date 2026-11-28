@@ -27,6 +27,9 @@ struct Reach {
     /// A shape the generated walk writes differently from the tree: a
     /// generic type, a library type, or a map keyed by other than strings.
     unsupported: bool,
+    /// A float, which `json::encode` refuses when it is NaN or an infinity:
+    /// only the walk notes one.
+    floats: bool,
 }
 
 impl Gen<'_> {
@@ -129,14 +132,24 @@ impl Gen<'_> {
             parse_path.push("parse".to_string());
             return Some(self.call_segments(&parse_path, vec![text], expr.ty, expr.span));
         }
+        // A walk answers the text, or `Err` for a float JSON has no number
+        // for (NaN, an infinity).
         let finish = if *last == "encode_pretty" {
+            "wr_finish_json_pretty"
+        } else {
+            "wr_finish_json"
+        };
+        if let Some(walk) =
+            self.rendered_walk(args, finish, expr.ty, Mode::default(), true, expr.span)
+        {
+            return Some(walk);
+        }
+        let fallback = if *last == "encode_pretty" {
             "wr_finish_pretty"
         } else {
             "wr_finish"
         };
-        let text = self.rendered_text(expr, args, finish, Mode::default())?;
-        // Every encode answers a `Result`: writing a value with a JSON form
-        // cannot fail, so the text is always the `Ok`.
+        let text = self.rendered_text(expr, args, fallback, Mode::default())?;
         Some(self.ctor("Ok", vec![text], expr.ty, expr.span))
     }
 
@@ -163,7 +176,7 @@ impl Gen<'_> {
         let unit = self.tcx.unit();
         // A walk finishes in the format's own step; text the tree writes
         // goes through a writer to the same step.
-        if let Some(walk) = self.rendered_walk(args, finish, expr.ty, mode, span) {
+        if let Some(walk) = self.rendered_walk(args, finish, expr.ty, mode, false, span) {
             return Some(walk);
         }
         let string_ty = self.tcx.string_ty();
@@ -191,7 +204,7 @@ impl Gen<'_> {
         mode: Mode,
     ) -> Option<HirExpr> {
         let string_ty = self.tcx.string_ty();
-        if let Some(walk) = self.rendered_walk(args, finish, string_ty, mode, expr.span) {
+        if let Some(walk) = self.rendered_walk(args, finish, string_ty, mode, false, expr.span) {
             return Some(walk);
         }
         args.first()?;
@@ -202,13 +215,15 @@ impl Gen<'_> {
 
     /// The generated walk writing the value `args` opens with, answering what
     /// the step `finish` (of type `finished_ty`) answers. `None` for a value
-    /// the tree writes as the walk would, or one the walk has no form for.
+    /// the tree writes as the walk would (floats aside when `floats_need_walk`),
+    /// or one the walk has no form for.
     fn rendered_walk(
         &mut self,
         args: &[HirExpr],
         finish: &str,
         finished_ty: Ty,
         mode: Mode,
+        floats_need_walk: bool,
         span: gossamer_lex::Span,
     ) -> Option<HirExpr> {
         let (first, rest) = args.split_first()?;
@@ -230,7 +245,7 @@ impl Gen<'_> {
         }
         let mut reach = Reach::default();
         self.render_reach(ty, &mut Vec::new(), &mut reach);
-        if reach.unsupported || !reach.needs_walk {
+        if reach.unsupported || !(reach.needs_walk || (floats_need_walk && reach.floats)) {
             return None;
         }
         // The walk only reads the value, so a place it names is walked where
@@ -300,8 +315,8 @@ impl Gen<'_> {
     fn render_reach(&mut self, ty: Ty, on_walk: &mut Vec<Ty>, reach: &mut Reach) {
         let peeled = self.peel(ty);
         match self.tcx.kind_of(peeled).clone() {
+            TyKind::Float(_) => reach.floats = true,
             TyKind::Int(_)
-            | TyKind::Float(_)
             | TyKind::Bool
             | TyKind::Char
             | TyKind::String

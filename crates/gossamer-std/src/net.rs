@@ -667,6 +667,20 @@ impl TcpStream {
         self.upgrade_tls(host, config)
     }
 
+    /// [`Self::start_tls_ca`], also presenting the client certificate
+    /// `cert_pem` signed with `key_pem` to a server that asks for one
+    /// (mutual TLS).
+    pub fn start_tls_identity(
+        self,
+        host: &str,
+        ca_pem: &str,
+        cert_pem: &str,
+        key_pem: &str,
+    ) -> Result<TlsStream, IoError> {
+        let config = tls_client_config_identity(ca_pem, cert_pem, key_pem)?;
+        self.upgrade_tls(host, config)
+    }
+
     /// Shared upgrade path: switch the socket to blocking, resolve the
     /// SNI hostname, and hand the stream to a rustls client session
     /// built from `config`.
@@ -729,10 +743,49 @@ fn tls_client_config_insecure() -> Arc<rustls::ClientConfig> {
     CONFIG.clone()
 }
 
+/// [`tls_client_config_ca`] that also presents a client identity.
+fn tls_client_config_identity(
+    ca_pem: &str,
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<Arc<rustls::ClientConfig>, IoError> {
+    use rustls::pki_types::PrivateKeyDer;
+    let fail = |e: String| IoError::from_std(io::Error::other(e), "start_tls_identity");
+    let roots = ca_root_store(ca_pem.as_bytes())?;
+    let certs = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| fail(format!("parse client certificate: {e}")))?;
+    if certs.is_empty() {
+        return Err(fail("no certificate in client certificate PEM".to_string()));
+    }
+    let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
+        .map_err(|e| fail(format!("parse client key: {e}")))?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| fail(format!("protocol versions: {e}")))?
+        .with_root_certificates(roots)
+        .with_client_auth_cert(certs, key)
+        .map_err(|e| fail(format!("client identity: {e}")))?;
+    Ok(Arc::new(config))
+}
+
 /// Client config that validates the server certificate chain and
 /// hostname against the CA bundle in `ca_pem` rather than the bundled
 /// public roots (PostgreSQL `sslmode=verify-full` against a private CA).
 fn tls_client_config_ca(ca_pem: &[u8]) -> Result<Arc<rustls::ClientConfig>, IoError> {
+    let roots = ca_root_store(ca_pem)?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("ring provider supports default protocol versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Arc::new(config))
+}
+
+/// The trust roots the PEM bundle `ca_pem` holds, refusing one with none.
+fn ca_root_store(ca_pem: &[u8]) -> Result<RootCertStore, IoError> {
     let mut roots = RootCertStore::empty();
     let mut added = 0usize;
     for cert in CertificateDer::pem_slice_iter(ca_pem) {
@@ -750,13 +803,7 @@ fn tls_client_config_ca(ca_pem: &[u8]) -> Result<Arc<rustls::ClientConfig>, IoEr
             "start_tls_ca",
         ));
     }
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .expect("ring provider supports default protocol versions")
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    Ok(Arc::new(config))
+    Ok(roots)
 }
 
 /// Server-certificate verifier that accepts any presented chain. The

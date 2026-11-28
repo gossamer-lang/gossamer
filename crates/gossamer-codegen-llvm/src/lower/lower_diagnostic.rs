@@ -240,6 +240,12 @@ impl<'a> Lowerer<'a> {
             gossamer_mir::AssertMessage::BoundsCheck { .. } => "index out of bounds\n",
             gossamer_mir::AssertMessage::Overflow => "arithmetic overflow\n",
             gossamer_mir::AssertMessage::DivideByZero => "divide by zero\n",
+            gossamer_mir::AssertMessage::DivideOverflow { rem: false } => {
+                "attempt to divide with overflow\n"
+            }
+            gossamer_mir::AssertMessage::DivideOverflow { rem: true } => {
+                "attempt to calculate the remainder with overflow\n"
+            }
             gossamer_mir::AssertMessage::ShiftOverflow { left: true } => {
                 "attempt to shift left with overflow\n"
             }

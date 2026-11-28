@@ -4,11 +4,10 @@ use super::{
     AstGenericArg, AstType, AstTypeKind, BTREE_SET_DEF_LOCAL, Expectation, Expr, ExprKind,
     FieldPattern, FnSig, HASH_SET_DEF_LOCAL, HashMap, IntTy, LiteralConsts, Mutbl, NodeId, Pattern,
     PatternKind, Resolution, STDLIB_TRAIT_NAMES, SYNC_HANDLE_HI_OFFSET, Span, Ty, TyKind,
-    TypeChecker, TypeError, TypePath, U8_VEC_OFFSET, VALIDATE_ERRORS_DEF_LOCAL,
-    VALIDATE_FIELD_ERROR_DEF_LOCAL, VEC_DEQUE_DEF_LOCAL, VEC_QUEUE_DEF_LOCAL, VEC_STACK_DEF_LOCAL,
-    alias_type_args, builtin_type_head, evaluate_const_int_from_expr, path_matches_dyn_error,
-    path_matches_json_value, prim_to_ty, primitive_from_name, stdlib_handle_by_path,
-    stdlib_net_handle, subst_alias_params,
+    TypeChecker, TypeError, TypePath, U8_VEC_OFFSET, VEC_DEQUE_DEF_LOCAL, VEC_QUEUE_DEF_LOCAL,
+    VEC_STACK_DEF_LOCAL, alias_type_args, builtin_type_head, evaluate_const_int_from_expr,
+    path_matches_dyn_error, path_matches_json_value, prim_to_ty, primitive_from_name,
+    stdlib_handle_by_path, stdlib_net_handle, subst_alias_params,
 };
 
 impl TypeChecker<'_> {
@@ -75,25 +74,6 @@ impl TypeChecker<'_> {
                 }
             }
         };
-        // i128 / u128 have no runtime representation on any tier
-        // (GT0014); reject at the spelling site so every execution
-        // mode fails identically instead of the VM running 128-bit
-        // arithmetic at silent 64-bit width.
-        if let Some(TyKind::Int(it @ (IntTy::I128 | IntTy::U128))) = self.tcx.kind(ty) {
-            let name = if matches!(it, IntTy::I128) {
-                "i128"
-            } else {
-                "u128"
-            };
-            self.emit(
-                TypeError::Int128Unsupported {
-                    ty: name.to_string(),
-                },
-                ast_ty.span,
-            );
-            let err = self.tcx.error_ty();
-            return self.record(ast_ty.id, err);
-        }
         self.record(ast_ty.id, ty)
     }
 
@@ -701,26 +681,6 @@ impl TypeChecker<'_> {
                 "Pattern" => self.tcx.register_def_name(def, "regex::Pattern"),
                 _ => {}
             }
-            return self.tcx.intern(TyKind::Adt {
-                def,
-                substs: crate::Substs::new(),
-            });
-        }
-        // `validate::Errors` / `validate::FieldError` are opaque i64
-        // handles with no dedicated `TyKind`. Resolving the annotation to
-        // a named sentinel Adt (instead of a fresh inference var) lets
-        // method dispatch recover the handle kind from its *type* when an
-        // `Errors` / `FieldError` flows across a function boundary and the
-        // construction-site tag is gone - the same recovery `HashSet`
-        // and `BTreeMap` rely on.
-        let validate_handle: Option<(u32, &str)> = match tail {
-            "Errors" => Some((VALIDATE_ERRORS_DEF_LOCAL, "Errors")),
-            "FieldError" => Some((VALIDATE_FIELD_ERROR_DEF_LOCAL, "FieldError")),
-            _ => None,
-        };
-        if let Some((local, name)) = validate_handle {
-            let def = gossamer_resolve::DefId::local(local);
-            self.tcx.register_def_name(def, name);
             return self.tcx.intern(TyKind::Adt {
                 def,
                 substs: crate::Substs::new(),

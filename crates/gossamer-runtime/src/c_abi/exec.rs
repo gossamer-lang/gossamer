@@ -26,10 +26,10 @@ use super::vec::GosVec;
 // takes a flat `Vec<String>` where each entry is a single
 // whitespace-tokenised command (`"echo hello"` -> `["echo",
 // "hello"]`); richer Pipeline construction is available to Rust
-// callers through `gossamer_std::exec::Pipeline`.
+// callers through `gossamer_std::process::Pipeline`.
 // ---------------------------------------------------------------
 
-/// `exec::pipeline_run(commands: Vec<String>) -> Result<Output, errors::Error>`.
+/// `process::pipeline_run(commands: Vec<String>) -> Result<Output, errors::Error>`.
 ///
 /// Each entry of `commands` is a whitespace-split shell command
 /// (single-quote / double-quote groups are honoured; backslashes
@@ -50,8 +50,9 @@ pub unsafe extern "C" fn gos_rt_exec_pipeline_run_raw(commands: *mut GosVec) -> 
             }
         };
         if stages.is_empty() {
-            let err =
-                crate::c_abi::errors::error_new_from_bytes(b"exec::pipeline_run: empty pipeline");
+            let err = crate::c_abi::errors::error_new_from_bytes(
+                b"process::pipeline_run: empty pipeline",
+            );
             return gos_rt_result_new(1, err as i64);
         }
         match crate::sched_global::run_blocking("exec-pipeline", move || run_pipeline(stages)) {
@@ -64,7 +65,7 @@ pub unsafe extern "C" fn gos_rt_exec_pipeline_run_raw(commands: *mut GosVec) -> 
                 );
                 if blob.is_null() {
                     let err = crate::c_abi::errors::error_new_from_bytes(
-                        b"exec::pipeline_run: out of memory",
+                        b"process::pipeline_run: out of memory",
                     );
                     return gos_rt_result_new(1, err as i64);
                 }
@@ -83,7 +84,7 @@ pub unsafe extern "C" fn gos_rt_exec_pipeline_run_raw(commands: *mut GosVec) -> 
 unsafe fn gather_command_lines(commands: *mut GosVec) -> Result<Vec<Vec<String>>, String> {
     // SAFETY: this `unsafe fn`'s caller passes `commands` null or a live `Vec<String>`.
     let Some(lines) = (unsafe { crate::c_abi::vec::StrVecView::of(commands) }) else {
-        return Err("exec::pipeline_run: commands vec is null".into());
+        return Err("process::pipeline_run: commands vec is null".into());
     };
     Ok((0..lines.len())
         .filter(|&i| !lines.is_null(i))
@@ -159,7 +160,7 @@ fn run_pipeline(stages: Vec<Vec<String>>) -> Result<(String, String, i64), Strin
     Ok((stdout, stderr, code))
 }
 
-/// `exec::signal(pid: i64, signum: i64) -> bool`. Returns true on
+/// `process::signal(pid: i64, signum: i64) -> bool`. Returns true on
 /// success. Sends the supplied signal number to the pid via
 /// `libc::kill` on Unix; on Windows, recognises only 9 / 15 / 2
 /// (KILL / TERM / INT) and routes them through `TerminateProcess`.
@@ -189,7 +190,7 @@ pub unsafe extern "C" fn gos_rt_exec_signal(pid: i64, signum: i64) -> i64 {
     })
 }
 
-/// `exec::kill_group(pid: i64) -> bool`. Unix: sends SIGTERM to the
+/// `process::kill_group(pid: i64) -> bool`. Unix: sends SIGTERM to the
 /// process group whose leader is `pid` (equivalent to `kill -- -pid`).
 /// Windows: best-effort `TerminateProcess` on the pid itself.
 #[unsafe(no_mangle)]
@@ -217,7 +218,7 @@ pub unsafe extern "C" fn gos_rt_exec_kill_group(pid: i64) -> i64 {
     })
 }
 
-/// `exec::wait_timeout(pid: i64, ms: i64) -> i64`: the exit code of `pid`
+/// `process::wait_timeout(pid: i64, ms: i64) -> i64`: the exit code of `pid`
 /// once it ends within `ms` milliseconds, `-1` if it is still running at
 /// the timeout, `-2` on any other error (unknown pid, permission denied).
 #[unsafe(no_mangle)]
@@ -287,6 +288,61 @@ pub fn run_inherit(program: &str, args: Vec<String>) -> Result<i64, String> {
             .map(status_code)
             .map_err(|e| format!("process::run_inherit({program}): {e}"))
     })?
+}
+
+/// Hands the process to `program` run with `args`, found on `PATH` as
+/// `run_inherit` finds it, and answers only when it cannot be started. Output
+/// this program buffered is written first; pending `defer`s and exit hooks do
+/// not run, as the program's state ends here.
+///
+/// On Unix the process image is replaced (`execvp`), so the process id, its
+/// parent, its streams, and the signals sent to it pass to `program`. Windows
+/// has no such call: the program runs on this process's streams and this
+/// process ends with its exit code.
+pub fn exec_replace(program: &str, args: Vec<String>) -> String {
+    super::gos_rt_flush_stdout();
+    platform_exec(program, args)
+}
+
+// Platform: `exec` resets the signal mask and SIGPIPE before replacing the
+// image, so the program starts with the dispositions a fresh process has.
+#[cfg(unix)]
+fn platform_exec(program: &str, args: Vec<String>) -> String {
+    use std::os::unix::process::CommandExt as _;
+    let error = std::process::Command::new(program).args(&args).exec();
+    format!("process::exec({program}): {error}")
+}
+
+// Platform: Windows cannot replace a process image, so the program runs to its
+// end and its exit code becomes this process's.
+#[cfg(not(unix))]
+fn platform_exec(program: &str, args: Vec<String>) -> String {
+    match std::process::Command::new(program).args(&args).status() {
+        Ok(status) => {
+            let code = i32::try_from(status_code(status)).unwrap_or(1);
+            std::process::exit(code)
+        }
+        Err(error) => format!("process::exec({program}): {error}"),
+    }
+}
+
+/// `process::exec(program, args) -> Result<(), errors::Error>`, which answers
+/// only an `Err`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_exec_replace(prog: *const c_char, args: *mut GosVec) -> i128 {
+    ffi_entry!({
+        if prog.is_null() {
+            let err = crate::c_abi::errors::error_new_from_bytes(b"process::exec: program is null");
+            return gos_rt_result_new(1, err as i64);
+        }
+        // SAFETY: `prog` is a live String argument from compiled code.
+        let program = unsafe { crate::c_abi::gos_str_arg_string(prog) };
+        // SAFETY: `args` is null or a live `Vec<String>` for the call.
+        let argv = unsafe { argv_strings(args) };
+        let message = exec_replace(&program, argv);
+        let err = crate::c_abi::errors::error_new_from_bytes(message.as_bytes());
+        gos_rt_result_new(1, err as i64)
+    })
 }
 
 /// The exit code a finished child reports, 128 plus the signal number for

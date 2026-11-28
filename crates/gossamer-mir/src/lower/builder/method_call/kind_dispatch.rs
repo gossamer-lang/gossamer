@@ -619,15 +619,8 @@ impl<'a> Builder<'a> {
             "gos_rt_http_request_path_float" => self.option_f64_adt_ty(),
             "gos_rt_http_request_basic_auth" => self.option_pair_string_adt_ty(),
             "gos_rt_math_rng_next_f64" => self.tcx.float_ty(gossamer_types::FloatTy::F64),
-            "gos_rt_field_error_path"
-            | "gos_rt_field_error_message"
-            | "gos_rt_field_error_code"
-            | "gos_rt_validate_errors_get"
-            | "gos_rt_validate_errors_collect"
-            | "gos_rt_metrics_registry_render"
-            | "gos_rt_trace_ended_to_otlp_json" => self.tcx.string_ty(),
-            "gos_rt_validate_errors_is_empty"
-            | "gos_rt_ctx_is_cancelled"
+            "gos_rt_metrics_registry_render" => self.tcx.string_ty(),
+            "gos_rt_ctx_is_cancelled"
             | "gos_rt_atomic_bool_load"
             | "gos_rt_atomic_bool_cas"
             | "gos_rt_atomic_i64_cas"
@@ -638,17 +631,14 @@ impl<'a> Builder<'a> {
                 self.tcx.intern(gossamer_types::TyKind::Receiver(i))
             }
             "gos_rt_atomic_bool_store" => self.tcx.unit(),
-            "gos_rt_validate_errors_len"
-            | "gos_rt_validate_errors_count"
-            | "gos_rt_rwlock_get"
+            "gos_rt_rwlock_get"
             | "gos_rt_shared_get"
             | "gos_rt_metrics_counter_value"
             | "gos_rt_metrics_histogram_count" => self.tcx.int_ty(gossamer_types::IntTy::I64),
             "gos_rt_metrics_gauge_value" | "gos_rt_metrics_histogram_sum" => {
                 self.tcx.float_ty(gossamer_types::FloatTy::F64)
             }
-            "gos_rt_validate_errors_add"
-            | "gos_rt_vec_reserve_at_least"
+            "gos_rt_vec_reserve_at_least"
             | "gos_rt_vec_reserve_exact"
             | "gos_rt_rwlock_set"
             | "gos_rt_shared_set"
@@ -658,9 +648,7 @@ impl<'a> Builder<'a> {
             | "gos_rt_metrics_gauge_inc"
             | "gos_rt_metrics_gauge_dec"
             | "gos_rt_metrics_histogram_observe"
-            | "gos_rt_metrics_registry_register"
-            | "gos_rt_trace_span_set_attribute"
-            | "gos_rt_trace_span_set_status" => self.tcx.unit(),
+            | "gos_rt_metrics_registry_register" => self.tcx.unit(),
             "gos_rt_bytes_builder_build"
             | "gos_rt_bytes_builder_as_str"
             | "gos_rt_bytes_buffer_to_string" => self.tcx.string_ty(),
@@ -705,7 +693,8 @@ impl<'a> Builder<'a> {
             }
             "gos_rt_tcp_start_tls"
             | "gos_rt_tcp_start_tls_insecure"
-            | "gos_rt_tcp_start_tls_ca" => {
+            | "gos_rt_tcp_start_tls_ca"
+            | "gos_rt_tcp_start_tls_identity" => {
                 let stream = self.sync_handle_ty(12);
                 self.result_of(stream)
             }
@@ -839,9 +828,8 @@ impl<'a> Builder<'a> {
             | "gos_rt_fs_open_options_create_new" => Some("fs::OpenOptions"),
             "gos_rt_tcp_start_tls"
             | "gos_rt_tcp_start_tls_insecure"
-            | "gos_rt_tcp_start_tls_ca" => Some("net::TcpStream"),
-            "gos_rt_trace_tracer_start_span" => Some("trace::Span"),
-            "gos_rt_trace_span_end" => Some("trace::EndedSpan"),
+            | "gos_rt_tcp_start_tls_ca"
+            | "gos_rt_tcp_start_tls_identity" => Some("net::TcpStream"),
             // Router verb methods return the router pointer so |> chaining works.
             "gos_rt_router_get"
             | "gos_rt_router_post"
@@ -1026,6 +1014,7 @@ impl<'a> Builder<'a> {
             (Some("http::Request"), "form_value") => Some("gos_rt_http_request_form_value"),
             (Some("http::Request"), "basic_auth") => Some("gos_rt_http_request_basic_auth"),
             (Some("http::Response"), "with_header") => Some("gos_rt_http_response_with_header"),
+            (Some("http::Response"), "bytes") => Some("gos_rt_http_response_raw_bytes"),
             (Some("http::Response"), "status") => Some("gos_rt_http_response_status"),
             (Some("http::Response"), "body") => Some("gos_rt_http_response_body"),
             (Some("bufio::Scanner"), "scan") => Some("gos_rt_bufio_scanner_scan"),
@@ -1136,15 +1125,6 @@ impl<'a> Builder<'a> {
             (Some("math::rand::Rng"), "next_u32") => Some("gos_rt_math_rng_next_u32"),
             (Some("math::rand::Rng"), "range_u64") => Some("gos_rt_math_rng_range_u64"),
             (Some("math::rand::Rng"), "next_f64") => Some("gos_rt_math_rng_next_f64"),
-            (Some("validate::FieldError"), "path") => Some("gos_rt_field_error_path"),
-            (Some("validate::FieldError"), "message") => Some("gos_rt_field_error_message"),
-            (Some("validate::FieldError"), "code") => Some("gos_rt_field_error_code"),
-            (Some("validate::Errors"), "add") => Some("gos_rt_validate_errors_add"),
-            (Some("validate::Errors"), "is_empty") => Some("gos_rt_validate_errors_is_empty"),
-            (Some("validate::Errors"), "len") => Some("gos_rt_validate_errors_len"),
-            (Some("validate::Errors"), "count") => Some("gos_rt_validate_errors_count"),
-            (Some("validate::Errors"), "get") => Some("gos_rt_validate_errors_get"),
-            (Some("validate::Errors"), "collect") => Some("gos_rt_validate_errors_collect"),
             (Some("sync::RwLock"), "read") => Some("gos_rt_rwlock_get"),
             (Some("sync::RwLock"), "write") => Some("gos_rt_rwlock_set"),
             (Some("sync::Shared"), "get") => Some("gos_rt_shared_get"),
@@ -1167,11 +1147,6 @@ impl<'a> Builder<'a> {
             (Some("metrics::Histogram"), "count") => Some("gos_rt_metrics_histogram_count"),
             (Some("metrics::Registry"), "register") => Some("gos_rt_metrics_registry_register"),
             (Some("metrics::Registry"), "render") => Some("gos_rt_metrics_registry_render"),
-            (Some("trace::Tracer"), "start_span") => Some("gos_rt_trace_tracer_start_span"),
-            (Some("trace::Span"), "set_attribute") => Some("gos_rt_trace_span_set_attribute"),
-            (Some("trace::Span"), "set_status") => Some("gos_rt_trace_span_set_status"),
-            (Some("trace::Span"), "end") => Some("gos_rt_trace_span_end"),
-            (Some("trace::EndedSpan"), "to_otlp_json") => Some("gos_rt_trace_ended_to_otlp_json"),
             (Some("bytes::Builder"), "write") => Some("gos_rt_bytes_builder_write"),
             (Some("bytes::Builder"), "write_char") => Some("gos_rt_bytes_builder_write_char"),
             (Some("bytes::Builder"), "build") => Some("gos_rt_bytes_builder_build"),
@@ -1687,7 +1662,7 @@ impl<'a> Builder<'a> {
                 // copy meta: it is what tags the map as holding blob values,
                 // so the entry takes the share the inserting frame gives back.
                 // A two-word carrier is boxed the same way.
-                if self.is_inline_aggregate_ty(value) || self.map_value_is_carrier(recv) {
+                if self.map_value_is_copied(value) || self.map_value_is_carrier(recv) {
                     let _ = self.ensure_aggr_copy_meta(value);
                 }
                 self.ensure_map_carrier_box_meta(value);
@@ -2646,6 +2621,34 @@ impl<'a> Builder<'a> {
             },
         };
         MethodLowering::Handled(self.lower_expr(&call))
+    }
+
+    /// `text.to_i128()` / `text.to_u128()` on a `String` receiver.
+    pub(super) fn lower_str_to_wide_method(
+        &mut self,
+        receiver: &HirExpr,
+        method: &Ident,
+        args: &[HirExpr],
+        span: Span,
+    ) -> MethodLowering {
+        let unsigned = match method.name.as_str() {
+            "to_i128" => false,
+            "to_u128" => true,
+            _ => return MethodLowering::Pass,
+        };
+        if !args.is_empty()
+            || !matches!(
+                self.tcx.kind_of(self.peel_ref_ty(receiver.ty)),
+                TyKind::String
+            )
+            || self.user_impl_method_exists(receiver.ty, receiver, &method.name)
+        {
+            return MethodLowering::Pass;
+        }
+        let Some(text) = self.lower_expr(receiver) else {
+            return MethodLowering::Handled(None);
+        };
+        MethodLowering::Handled(Some(self.lower_str_to_wide(text, unsigned, span)))
     }
 
     /// `n.max(m)` / `n.min(m)` / `n.clamp(lo, hi)` on a numeric receiver.

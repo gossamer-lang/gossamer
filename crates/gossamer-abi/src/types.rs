@@ -143,6 +143,10 @@ pub enum Ownership {
     /// spells the return as `-> *mut GosVec`, and a drift test holds every
     /// such shim to either this or a listed reason it aliases.
     MintsVec,
+    /// The `Result` carrier it answers holds a payload the caller owns: a
+    /// value built for this call that no argument, global, or container
+    /// still reaches, so taking the payload out is a move rather than a copy.
+    MintsResult,
     /// It gives up the share its first argument holds: a release, free, or
     /// drop. The ownership checks read this rather than a list of their own,
     /// so a new release entry is seen everywhere at once.
@@ -163,6 +167,13 @@ impl RuntimeEntry {
     #[must_use]
     pub const fn mints_vec(&self) -> bool {
         matches!(self.ownership, Ownership::MintsVec)
+    }
+
+    /// Whether the `Result` this symbol answers carries a payload the caller
+    /// owns.
+    #[must_use]
+    pub const fn mints_result(&self) -> bool {
+        matches!(self.ownership, Ownership::MintsResult)
     }
 
     /// Whether the call gives up the share its first argument holds.

@@ -36,6 +36,7 @@ mod native;
 mod render;
 mod smol_str;
 mod type_tag;
+pub mod wide;
 
 pub use channel::{
     Channel, RecvOutcome, SelectWaiter, SendOutcome, deadlock_error, wake_all_channel_waiters,
@@ -206,14 +207,24 @@ impl Drop for PackedBytes {
     }
 }
 
-/// Shared JSON tree plus a stable view into one node of that tree.
+/// What a JSON handle reads: a tree the program built, or a parsed document
+/// read where it lies, its text and tape, as native code holds one.
+#[derive(Debug)]
+enum JsonDoc {
+    Tree(gossamer_std::json::Value),
+    Parsed(gossamer_std::json::ParsedTape),
+}
+
+/// A shared JSON document plus a view of one node of it.
 ///
-/// `json::get` / `json::at` can return a child object or array by cloning this
-/// lightweight handle instead of deep-cloning the selected subtree. Scalars are
-/// still projected into ordinary interpreter values at the query boundary.
+/// `json::get` / `json::at` answer a child object or array as a handle on the
+/// same document instead of a copy of the subtree. Scalars are projected into
+/// ordinary interpreter values at the query boundary.
 #[derive(Debug, Clone)]
 pub struct JsonInner {
-    tree: Arc<gossamer_std::json::Value>,
+    doc: Arc<JsonDoc>,
+    /// The viewed node: its address in a tree, or its node in a parsed
+    /// document.
     view: usize,
 }
 
@@ -221,34 +232,91 @@ impl JsonInner {
     /// Owns `value` as a new canonical JSON tree and views its root.
     #[must_use]
     pub fn new(value: gossamer_std::json::Value) -> Self {
-        let tree = Arc::new(value);
-        let view = Arc::as_ptr(&tree) as usize;
-        Self { tree, view }
+        let doc = Arc::new(JsonDoc::Tree(value));
+        let view = match &*doc {
+            JsonDoc::Tree(root) => std::ptr::from_ref(root) as usize,
+            JsonDoc::Parsed(_) => 0,
+        };
+        Self { doc, view }
     }
 
-    /// Borrows the JSON node viewed by this handle.
+    /// Owns the parsed document `doc` and views its root.
     #[must_use]
-    pub fn as_value(&self) -> &gossamer_std::json::Value {
-        // SAFETY: `view` is either the stable address of `tree`'s root from
-        // `new`, or the address of a child borrowed from the same tree by
-        // `child`. The `Arc` keeps the tree allocation alive for this handle.
-        unsafe { &*(self.view as *const gossamer_std::json::Value) }
-    }
-
-    /// Builds a handle viewing `child`, which must be borrowed from this
-    /// handle's tree.
-    #[must_use]
-    pub fn child(&self, child: &gossamer_std::json::Value) -> Self {
+    pub fn parsed(doc: gossamer_std::json::ParsedTape) -> Self {
         Self {
-            tree: Arc::clone(&self.tree),
-            view: std::ptr::from_ref(child) as usize,
+            doc: Arc::new(JsonDoc::Parsed(doc)),
+            view: 0,
         }
     }
 
-    /// Clones the viewed JSON node for APIs that genuinely need an owned DOM.
+    /// Borrows the node viewed by this handle.
+    #[must_use]
+    pub fn get(&self) -> gossamer_std::json::ValueRef<'_> {
+        match &*self.doc {
+            // SAFETY: `view` is the address of the tree's root from `new`, or
+            // of a node of the same tree a read of it answered (`child`). The
+            // `Arc` keeps the tree alive, and nothing writes it.
+            JsonDoc::Tree(_) => gossamer_std::json::ValueRef::Value(unsafe {
+                &*(self.view as *const gossamer_std::json::Value)
+            }),
+            JsonDoc::Parsed(doc) => {
+                gossamer_std::json::ValueRef::Tape(doc, u32::try_from(self.view).unwrap_or(0))
+            }
+        }
+    }
+
+    /// The viewed node as a tree, borrowed when the document is one.
+    #[must_use]
+    pub fn as_value(&self) -> std::borrow::Cow<'_, gossamer_std::json::Value> {
+        self.get().as_value()
+    }
+
+    /// A handle viewing `child`, which a read of this handle's node answered.
+    #[must_use]
+    pub fn child(&self, child: gossamer_std::json::ValueRef<'_>) -> Self {
+        let view = match child {
+            gossamer_std::json::ValueRef::Value(node) => std::ptr::from_ref(node) as usize,
+            gossamer_std::json::ValueRef::Tape(_, node) => node as usize,
+        };
+        Self {
+            doc: Arc::clone(&self.doc),
+            view,
+        }
+    }
+
+    /// The viewed node as a tree of its own.
     #[must_use]
     pub fn to_owned_value(&self) -> gossamer_std::json::Value {
-        self.as_value().clone()
+        self.get().to_value()
+    }
+}
+
+/// One step from a value to a place inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureStep {
+    /// `.name` of a struct.
+    Field(&'static str),
+    /// `[n]` of an array, `Vec`, or tuple.
+    Index(usize),
+    /// `.n` of a tuple or tuple struct.
+    Tuple(usize),
+}
+
+/// The place [`Value::CapturePlace`] names: a captured binding's cell and the
+/// steps from the cell's value to the place.
+#[derive(Debug)]
+pub struct CapturePlace {
+    /// The captured binding's cell.
+    pub cell: Arc<Mutex<Value>>,
+    /// The steps from the cell's value to the place.
+    pub steps: Arc<[CaptureStep]>,
+}
+
+impl CapturePlace {
+    /// A copy of the value at the place.
+    #[must_use]
+    pub fn read(&self) -> Value {
+        crate::vm::capture_place::read(&self.cell.lock(), &self.steps).unwrap_or(Value::Void)
     }
 }
 
@@ -468,11 +536,22 @@ pub enum Value {
     /// but formats as an unsigned decimal value. Used exclusively for
     /// `x as u64` casts to preserve unsigned display semantics.
     Uint(u64),
+    /// An `i128` outside `i64` or a `u128` above `u64::MAX` that does not fit
+    /// 120 bits; a 128-bit value that fits a word is an [`Self::Int`] /
+    /// [`Self::Uint`], and one that fits 120 bits is a [`Self::WideInline`].
+    Wide(Arc<wide::WideInt>),
+    /// A 128-bit value in `-2^119 .. 2^119` that does not fit a word, held
+    /// inline as the low 15 bytes of its two's complement, little-endian. The
+    /// bytes have no alignment, so they sit beside the tag: the value
+    /// allocates nothing and `Value` stays two words.
+    WideInline([u8; 15]),
     /// Non-owning weak reference produced by `x.downgrade()`. Observes
     /// the liveness of the referent's `Arc` without keeping it alive;
     /// `w.upgrade()` yields `Some` while a strong reference survives and
-    /// `None` once the last one is dropped.
-    Weak(WeakValue),
+    /// `None` once the last one is dropped. Shared behind one pointer, so a
+    /// copy is a count bump and the variant leaves the tag's neighbouring
+    /// bytes to [`Self::WideInline`].
+    Weak(Arc<WeakValue>),
     /// Write-back cell carrying a `&mut Vec<T>` / `&mut [T]` call
     /// argument. The caller wraps the aggregate at the call site,
     /// the callee unwraps it at frame entry and stores the final
@@ -496,6 +575,11 @@ pub enum Value {
     /// brackets every instruction that names the binding with the
     /// matching capture-cell load / store.
     CaptureCell(Arc<Mutex<Value>>),
+    /// A place inside a captured binding's cell, which a `&mut` argument
+    /// naming that place crosses as: the callee reads and writes the place
+    /// where every closure sharing the cell sees it. Handled, like
+    /// [`Self::CaptureCell`], only by the capture-cell instructions.
+    CapturePlace(Arc<CapturePlace>),
     /// Poisoned / uninitialised sentinel.
     Void,
 }
@@ -631,9 +715,15 @@ impl Value {
             Self::Opaque(_) => "opaque".to_string(),
             Self::Map(_) | Self::IntMap(_) | Self::StrIntMap(_) => "Map".to_string(),
             Self::Uint(_) => "u64".to_string(),
+            Self::Wide(wide) => match **wide {
+                wide::WideInt::I(_) => "i128".to_string(),
+                wide::WideInt::U(_) => "u128".to_string(),
+            },
+            Self::WideInline(..) => "i128".to_string(),
             Self::Weak(_) => "Weak".to_string(),
             Self::MutCell(cell) => cell.lock().type_name(),
             Self::CaptureCell(cell) => cell.lock().type_name(),
+            Self::CapturePlace(place) => place.read().type_name(),
             Self::Void => "uninitialized value".to_string(),
         }
     }
@@ -801,10 +891,9 @@ pub enum WeakValue {
     Tuple(std::sync::Weak<Vec<Value>>),
     /// Weak reference to a [`Value::NativeEnum`] node, observed through the
     /// runtime's intrusive weak count. Boxed so this variant is a single
-    /// niche-bearing pointer like the others, keeping `WeakValue` (and thus the
-    /// inline `Value::Weak`) within the 16-byte hot-`Value` budget. Kept inline
-    /// in `Value` (not `Arc`-wrapped) so each `Value` clone/drop maps 1:1 to the
-    /// intrusive weak retain/release below.
+    /// pointer like the others. The intrusive weak share is taken once, when
+    /// the `WeakValue` is built, and given back when it drops, however many
+    /// `Value::Weak` copies share it.
     NativeEnum(Box<NativeEnumWeakRef>),
     /// Downgrade of a value with no observable allocation; never upgrades.
     Dead,
@@ -967,6 +1056,10 @@ pub enum MapKey {
     /// above `i64::MAX` prints as its own decimal; a live map keys by
     /// [`MapKey::Int`] whatever width the source named.
     Uint(u64),
+    /// A 128-bit key wider than a word; a 128-bit key that fits one is an
+    /// [`MapKey::Int`]. Boxed, as [`Self::Agg`] is, so the rare wide key does
+    /// not widen every key.
+    Wide(Box<wide::WideInt>),
     /// `char` key.
     Char(char),
     /// `f64` key, held as the value's bit pattern so two keys compare and
@@ -1028,6 +1121,9 @@ impl MapKey {
             // slot word, so the same key finds the same entry whichever
             // representation carried it in.
             Value::Uint(n) => Self::Int(*n as i64),
+            Value::Wide(_) | Value::WideInline(..) => {
+                Self::Wide(Box::new(v.wide_int().unwrap_or(wide::WideInt::I(0))))
+            }
             Value::Char(c) => Self::Char(*c),
             // Key floats by their bit pattern - matches the compiled tier,
             // which hashes the raw 8 bytes.
@@ -1143,6 +1239,10 @@ impl MapKey {
             Self::Bool(b) => Value::Bool(*b),
             Self::Int(n) => Value::Int(*n),
             Self::Uint(n) => Value::Uint(*n),
+            Self::Wide(wide) => match **wide {
+                wide::WideInt::I(n) => Value::from_i128(n),
+                wide::WideInt::U(n) => Value::from_u128(n),
+            },
             Self::Char(c) => Value::Char(*c),
             Self::Float(bits) => Value::Float(f64::from_bits(bits.0)),
             Self::Str(s) => Value::String(s.clone()),
@@ -1778,6 +1878,10 @@ impl Value {
     /// Inline scalars encode directly; heap objects are stored in the
     /// global side table and the returned word carries their handle.
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one exhaustive table keeps every variant's encoding explicit"
+    )]
     pub fn to_raw(&self) -> GossamerValue {
         match self {
             Self::NativeEnum(o) => native_enum_to_variant(o).to_raw(),
@@ -1786,6 +1890,7 @@ impl Value {
             // is the only meaningful payload.
             Self::MutCell(c) => c.lock().to_raw(),
             Self::CaptureCell(c) => c.lock().to_raw(),
+            Self::CapturePlace(place) => place.read().to_raw(),
             Self::Unit => from_singleton(SINGLETON_UNIT),
             Self::Bool(false) => from_singleton(SINGLETON_FALSE),
             Self::Bool(true) => from_singleton(SINGLETON_TRUE),
@@ -1797,6 +1902,12 @@ impl Value {
                     from_heap_handle(id)
                 }
             }
+            Self::Wide(wide) => {
+                from_heap_handle(register_heap(RegistryEntry::Wide(Arc::clone(wide))))
+            }
+            Self::WideInline(..) => from_heap_handle(register_heap(RegistryEntry::Wide(Arc::new(
+                self.wide_int().unwrap_or(wide::WideInt::I(0)),
+            )))),
             Self::Float(f) => from_f64(*f),
             Self::Char(c) => {
                 let payload = ((*c as u64) << 2) | 3;
@@ -1920,6 +2031,7 @@ impl Value {
                 let id = to_heap_handle(raw);
                 match take_heap(id) {
                     Some(RegistryEntry::Int(n)) => Self::Int(n),
+                    Some(RegistryEntry::Wide(wide)) => Self::Wide(wide),
                     Some(RegistryEntry::String(s)) => Self::String(s),
                     Some(RegistryEntry::Tuple(t)) => Self::Tuple(t),
                     Some(RegistryEntry::Array(a)) => Self::Array(a),
@@ -1962,29 +2074,93 @@ pub struct Closure {
     pub capture_values: Vec<Value>,
 }
 
-/// Replaces any `MutCell` argument with a clone of its inner value.
-/// Builtins and natives have no parameter table, so they receive the
-/// plain aggregate; user functions keep the cell for write-back.
+/// Replaces any `MutCell` argument, or captured binding's cell or place, with
+/// a clone of the value it holds. Builtins and natives have no parameter
+/// table, so they receive the plain aggregate; user functions keep the cell
+/// for write-back.
 pub(crate) fn unwrap_mut_cells(mut args: Vec<Value>) -> Vec<Value> {
     for arg in &mut args {
-        if let Value::MutCell(cell) = arg {
-            let inner = cell.lock().clone();
-            *arg = inner;
+        match arg {
+            Value::MutCell(cell) => {
+                let inner = cell.lock().clone();
+                *arg = inner;
+            }
+            Value::CaptureCell(cell) => {
+                let inner = cell.lock().clone();
+                *arg = inner;
+            }
+            Value::CapturePlace(place) => *arg = place.read(),
+            _ => {}
         }
     }
     args
 }
 
-/// Same as [`unwrap_mut_cells`], except for the builtins whose contract
-/// is to write through a `&mut` argument rather than answer a new value.
-/// Those receive the cell itself, so the mutation the compiled tiers make
-/// through the caller's pointer is the mutation the VM makes too.
-pub(crate) fn unwrap_mut_cells_unless_writer(name: &str, args: Vec<Value>) -> Vec<Value> {
-    if builtin_writes_through_mut_ref(name) {
-        args
-    } else {
-        unwrap_mut_cells(args)
+/// Calls the builtin `name` through `builtin` on `args`, answering what it
+/// answers and the arguments, for reuse. A builtin whose contract is to
+/// write through a `&mut` argument rather than answer a new value receives
+/// the write-back cell itself, so the mutation the compiled tiers make
+/// through the caller's pointer is the mutation the VM makes too; a captured
+/// binding's place crosses to one as a cell of its own, whose final value is
+/// stored back into the place. Every other builtin takes the plain values.
+#[inline]
+pub(crate) fn call_builtin(
+    name: &str,
+    args: Vec<Value>,
+    builtin: impl FnOnce(&[Value]) -> RuntimeResult<Value>,
+) -> (RuntimeResult<Value>, Vec<Value>) {
+    let holds_cell = args.iter().any(|arg| {
+        matches!(
+            arg,
+            Value::MutCell(_) | Value::CaptureCell(_) | Value::CapturePlace(_)
+        )
+    });
+    if !holds_cell {
+        let answer = builtin(&args);
+        return (answer, args);
     }
+    call_builtin_with_cells(name, args, builtin)
+}
+
+/// [`call_builtin`] for arguments holding a write-back cell or a captured
+/// binding's cell or place.
+#[inline(never)]
+fn call_builtin_with_cells(
+    name: &str,
+    args: Vec<Value>,
+    builtin: impl FnOnce(&[Value]) -> RuntimeResult<Value>,
+) -> (RuntimeResult<Value>, Vec<Value>) {
+    if !builtin_writes_through_mut_ref(name) {
+        let args = unwrap_mut_cells(args);
+        let answer = builtin(&args);
+        return (answer, args);
+    }
+    let mut args = args;
+    let mut lent: Vec<(Arc<ThreadConfinedCell>, Value)> = Vec::new();
+    for index in 0..args.len() {
+        let held = match crate::vm::capture_place::target(&args[index]) {
+            Some((cell, steps)) => crate::vm::capture_place::read(&cell.lock(), steps),
+            None => continue,
+        };
+        let held = match held {
+            Ok(held) => held,
+            Err(err) => return (Err(err), args),
+        };
+        let lent_cell = Arc::new(ThreadConfinedCell::new(held));
+        let place = std::mem::replace(&mut args[index], Value::MutCell(Arc::clone(&lent_cell)));
+        lent.push((lent_cell, place));
+    }
+    let mut answer = builtin(&args);
+    for (lent_cell, place) in lent {
+        let written = std::mem::replace(&mut *lent_cell.lock(), Value::Unit);
+        if let Some((cell, steps)) = crate::vm::capture_place::target(&place)
+            && let Err(err) = crate::vm::capture_place::put(&mut cell.lock(), steps, written)
+            && answer.is_ok()
+        {
+            answer = Err(err);
+        }
+    }
+    (answer, args)
 }
 
 /// Whether the builtin `name` mutates through a `&mut` parameter.
@@ -2098,11 +2274,9 @@ impl RuntimeError {
             | Self::Panic(_)
             | Self::MatchFailure
             | Self::Unsupported(_)
-            | Self::Foreign { .. } => true,
-            Self::StackOverflow(_)
-            | Self::ComptimeDenied(_)
-            | Self::WouldNeverWake(_)
-            | Self::Exit(_) => false,
+            | Self::Foreign { .. }
+            | Self::Exit(_) => true,
+            Self::StackOverflow(_) | Self::ComptimeDenied(_) | Self::WouldNeverWake(_) => false,
             #[cfg(feature = "fuel")]
             Self::FuelExhausted => false,
         }

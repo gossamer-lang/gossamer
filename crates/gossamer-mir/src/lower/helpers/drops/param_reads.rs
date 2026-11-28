@@ -24,7 +24,12 @@ use super::*;
 ///
 /// Conservative by construction - every use the walk does not recognise as a
 /// plain read answers `false`, and the parameter keeps its own share.
-pub(super) fn param_fields_only_read(body: &Body, p: Local, rc_fields: &AggFieldPaths) -> bool {
+pub(super) fn param_fields_only_read(
+    body: &Body,
+    p: Local,
+    rc_fields: &AggFieldPaths,
+    callees: &crate::opt::CalleeParams,
+) -> bool {
     use crate::ir::{Operand, Projection, Rvalue, StatementKind, Terminator};
 
     // True when a place rooted in `p` can reach one of its heap-managed
@@ -230,10 +235,15 @@ pub(super) fn param_fields_only_read(body: &Body, p: Local, rc_fields: &AggField
                 }
                 let keeps = keeps_args(callee);
                 let hands_over = !user_callee(callee);
-                if args
-                    .iter()
-                    .any(|op| (hands_over && copies_whole(op)) || (keeps && reads(op)))
-                {
+                // A `&mut` parameter writes the frame's own slots, releasing
+                // the field values it replaces.
+                let writes = |n: usize, op: &Operand| {
+                    matches!(op, Operand::Copy(pl) if pl.local == p || carries.contains(&pl.local.0))
+                        && callees.takes_mut(callee, n)
+                };
+                if args.iter().enumerate().any(|(n, op)| {
+                    (hands_over && copies_whole(op)) || (keeps && reads(op)) || writes(n, op)
+                }) {
                     return false;
                 }
             }
@@ -561,7 +571,11 @@ enum LentDef {
 /// return slot would leave the caller freeing its own table when the answer
 /// dies. The return copies it instead, whether the table is a parameter, a
 /// field of one, or a binding copied from either.
-pub(crate) fn copy_returned_lent_tables(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+pub(crate) fn copy_returned_lent_tables(
+    body: &mut Body,
+    tcx: &gossamer_types::TyCtxt,
+    user_fn_names: &std::collections::HashSet<String>,
+) {
     use gossamer_types::TyKind;
     let n_locals = body.locals.len();
     let arity = body.arity as usize;
@@ -582,7 +596,7 @@ pub(crate) fn copy_returned_lent_tables(body: &mut Body, tcx: &gossamer_types::T
     // element a container still owns, the payload of a carrier the frame does
     // not own (a `get` on a container, a carrier parameter), or another such
     // local.
-    let owned_carrier = frame_owned_carriers(body);
+    let owned_carrier = frame_owned_carriers(body, user_fn_names);
     let lends_payload = |carrier: Option<&Operand>| {
         matches!(carrier, Some(Operand::Copy(c))
             if !(c.projection.is_empty()

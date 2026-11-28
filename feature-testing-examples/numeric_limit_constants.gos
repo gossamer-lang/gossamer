@@ -12,10 +12,11 @@ fn main() {
     println("{} {} {}", u64::MIN, u64::MAX, u64::BITS)
     println("{} {}", usize::MIN, usize::MAX)
 
-    // SPEC 3.1: the one signed division that overflows wraps.
+    // SPEC 3.1: the one signed division that overflows panics, and
+    // `checked_div` answers `None` for it.
     let min = i64::MIN
     let neg = -1
-    println("{}", min / neg == i64::MIN)
+    println("{}", min.checked_div(neg).is_none())
     // A float too large for the target saturates at its limit.
     println("{}", 1e20 as% i64 == i64::MAX)
     let byte: u8 = u8::MAX

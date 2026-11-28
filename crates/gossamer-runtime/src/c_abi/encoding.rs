@@ -235,31 +235,96 @@ pub unsafe extern "C" fn gos_rt_html_unescape(s: *const c_char) -> *mut c_char {
     })
 }
 
-/// `html::template::render_json(source, json_data)` - renders the
-/// context-aware HTML template `source` against a JSON-encoded data
-/// context, returning `Result<String, errors::Error>`. The `GosResult`
-/// disc is 0 for `Ok` (the rendered text), 1 for `Err` (the parse /
-/// data error message). Calls the leaf `gossamer-template` engine
-/// directly, the same code the VM tier reaches through
-/// `gossamer_std::html::template`.
+fn template_string(answer: Result<String, String>) -> i128 {
+    match answer {
+        Ok(text) => {
+            let p = alloc_cstring(text.as_bytes());
+            super::result::gos_rt_result_new(0, p as i64)
+        }
+        Err(e) => err_result(&e),
+    }
+}
+
+/// `__gos_template_new_raw(source, html, strict) -> Result<i64, Error>`: the
+/// id of `source` parsed as a text template, or an HTML one when `html` is 1.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_html_template_render_json(
+pub unsafe extern "C" fn gos_rt_template_new_raw(
     source: *const c_char,
-    json_data: *const c_char,
+    html: i64,
+    strict: i64,
 ) -> i128 {
     ffi_entry!({
         // SAFETY: `source` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
         let source = unsafe { cstr_to_str(source) };
-        // SAFETY: `json_data` is this shim's argument, as `cstr_to_str` requires (C-ABI
-        // contract).
-        let json_data = unsafe { cstr_to_str(json_data) };
-        match gossamer_template::html::render_json(source, json_data) {
-            Ok(text) => {
-                let p = alloc_cstring(text.as_bytes());
-                super::result::gos_rt_result_new(0, p as i64)
-            }
-            Err(e) => err_result(&format!("{e}")),
+        match crate::templates::new_template(source, html != 0, strict != 0) {
+            Ok(id) => super::result::gos_rt_result_new(0, id),
+            Err(e) => err_result(&e),
         }
+    })
+}
+
+/// `__gos_template_render_raw(id, json) -> Result<String, Error>`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_template_render_raw(id: i64, json: *const c_char) -> i128 {
+    ffi_entry!({
+        // SAFETY: `json` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let json = unsafe { cstr_to_str(json) };
+        template_string(crate::templates::render_template(id, json))
+    })
+}
+
+/// `__gos_template_render_source_raw(source, html, json) -> Result<String, Error>`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_template_render_source_raw(
+    source: *const c_char,
+    html: i64,
+    json: *const c_char,
+) -> i128 {
+    ffi_entry!({
+        // SAFETY: `source` and `json` are this shim's arguments, as
+        // `cstr_to_str` requires (C-ABI contract).
+        let (source, json) = unsafe { (cstr_to_str(source), cstr_to_str(json)) };
+        template_string(crate::templates::render_source(source, html != 0, json))
+    })
+}
+
+/// `__gos_template_release_raw(id) -> Result<(), Error>`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_template_release_raw(id: i64) -> i128 {
+    ffi_entry!({
+        crate::templates::release_template(id);
+        super::result::gos_rt_result_new(0, 0)
+    })
+}
+
+/// A `Result<String, Error>` carrier for an answer of the mail leaves.
+fn mail_result(answer: Result<String, String>) -> i128 {
+    match answer {
+        Ok(text) => {
+            let p = alloc_cstring(text.as_bytes());
+            super::result::gos_rt_result_new(0, p as i64)
+        }
+        Err(e) => err_result(&e),
+    }
+}
+
+/// `mail::parse_address` leaf: the mailbox as `mail::Address` JSON.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_mail_address_raw(text: *const c_char) -> i128 {
+    ffi_entry!({
+        // SAFETY: `text` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let text = unsafe { cstr_to_str(text) };
+        mail_result(crate::mail_address::address_json(text))
+    })
+}
+
+/// `mail::parse_address_list` leaf: the mailboxes as `mail::Address` JSON.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_mail_address_list_raw(text: *const c_char) -> i128 {
+    ffi_entry!({
+        // SAFETY: `text` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let text = unsafe { cstr_to_str(text) };
+        mail_result(crate::mail_address::address_list_json(text))
     })
 }
 

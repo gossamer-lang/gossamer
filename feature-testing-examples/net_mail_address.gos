@@ -1,0 +1,51 @@
+// `mail::parse_address` and `mail::parse_address_list` read RFC 5322
+// addresses, and an `Address` writes the form a header field carries: a
+// display name quoted when it needs to be and RFC 2047-encoded when it is not
+// printable ASCII, a local part quoted when it is no dot-atom. Reading a
+// written address gives the same address back.
+use std::net::mail
+
+fn show(text: String) {
+    match mail::parse_address(text) {
+        Ok(a) => println(f"[{a.name}] [{a.email}] -> {a}")
+        Err(e) => println(f"error: {e}")
+    }
+}
+
+fn main() {
+    show("ann@example.com")
+    show("Ann Lee <ann@example.com>")
+    show("\"Lee, Ann\" <ann@example.com>")
+    show("ann@example.com (Ann Lee)")
+    show("J. Q. Public <jq@example.com>")
+    show("<\"ann lee\"@example.com>")
+    show("=?UTF-8?Q?Ren=C3=A9e_Fox?= <renee@example.com>")
+    show("=?utf-8?b?w4lsw6lvbm9yZQ==?= <e@example.com>")
+    show("=?ISO-8859-1?Q?Andr=E9?= <andre@example.com>")
+    show("solo: one@example.com;")
+
+    let written = #[
+        mail::Address { name: "Ann Lee", email: "ann@example.com" }
+        mail::Address { name: "Lee, Ann \"The Pen\"", email: "ann@example.com" }
+        mail::Address { name: "Zoë Ünal", email: "zoe@example.com" }
+        mail::Address { name: "", email: "first last@example.com" }
+        mail::Address { name: "東京 オフィス 東京 オフィス 東京 オフィス 東京", email: "tokyo@example.com" }
+    ]
+    for address in written {
+        let text = f"{address}"
+        let back = mail::parse_address(text)
+        let same = match back {
+            Ok(b) => b.name == address.name && b.email == address.email
+            Err(_) => false
+        }
+        println(f"{text} round trip {same}")
+    }
+
+    let list = mail::parse_address_list("Ann <a@x.org>, ops: b@x.org, c@x.org;, , d@x.org, nobody:;").unwrap_or(#[])
+    println(f"list: {list.map(|a| a.email)} first name {list[0].name}")
+
+    for bad in #["", "ann", "ann@", "Ann <ann@example.com", "a@x.org b@x.org", "a@x.org, b@x.org", "team: a@x.org, b@x.org;", "a..b@x.org", "=?koi8-r?q?x?= <a@x.org>"] {
+        show(bad)
+    }
+    println(f"list errors: {mail::parse_address_list("a@x.org b@x.org").is_err()} {mail::parse_address_list("ops: a@x.org").is_err()}")
+}

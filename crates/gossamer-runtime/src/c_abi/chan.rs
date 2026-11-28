@@ -644,7 +644,6 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_try_send(c: *mut GosChan, val: *cons
     });
     if outcome == CLOSED_SEND {
         super::panic::panic_text("send on closed channel");
-        return 0;
     }
     outcome
 }
@@ -1209,7 +1208,6 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_close(c: *mut GosChan) -> i32 {
         Some(true) => 0,
         Some(false) => {
             super::panic::panic_text("close of closed channel");
-            0
         }
     }
 }

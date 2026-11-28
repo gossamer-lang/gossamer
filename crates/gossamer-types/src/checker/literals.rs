@@ -80,15 +80,21 @@ pub(super) fn int_assoc_const(segments: &[&str]) -> Option<(IntTy, i128)> {
         "i16" => IntTy::I16,
         "i32" => IntTy::I32,
         "i64" => IntTy::I64,
+        "i128" => IntTy::I128,
         "isize" => IntTy::Isize,
         "u8" => IntTy::U8,
         "u16" => IntTy::U16,
         "u32" => IntTy::U32,
         "u64" => IntTy::U64,
+        "u128" => IntTy::U128,
         "usize" => IntTy::Usize,
         _ => return None,
     };
     let value = match (ty, segments[1]) {
+        (IntTy::I128, "MIN") => i128::MIN,
+        (IntTy::I128, "MAX") => i128::MAX,
+        // `u128::MAX` is past what an `i128` holds.
+        (IntTy::U128, "MIN") => 0,
         (IntTy::I8, "MIN") => i128::from(i8::MIN),
         (IntTy::I8, "MAX") => i128::from(i8::MAX),
         (IntTy::I16, "MIN") => i128::from(i16::MIN),

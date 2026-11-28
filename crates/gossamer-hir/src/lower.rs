@@ -95,10 +95,21 @@ pub fn lower_source_file(
     // any other.
     crate::serde::generate_serde_bodies(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     crate::carrier::desugar_carrier_combinators(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
+    // After the serde bodies, so the fields their walks read are rewritten
+    // too.
+    crate::drop_types::desugar_drop_types(
+        &mut program,
+        &mut *lowerer.tcx,
+        &mut lowerer.ids,
+        &lowerer.module_type_names,
+    );
     // After the serde bodies, so the fields their walks read count as read.
     crate::dir_listing::drop_unread_dir_metadata(&mut program, lowerer.tcx);
     crate::par::desugar_parallel_adapters(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     crate::fuse::fuse_iter_pipelines(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
+    // Before capture cells, so a binding a closure captures and writes is
+    // released through its cell.
+    crate::cleanup_points::insert_cleanup_points(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     // After fusing, so a pipeline spliced into a loop writes its bindings
     // directly rather than through a cell.
     crate::capture_cells::insert_capture_cells(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
@@ -690,6 +701,15 @@ fn struct_literal_positional_index(name: &str) -> Option<usize> {
 /// by `lower_path_expr`'s imported-binding expansion. One declaration
 /// can bind several names (`use m::{a, b as c}`), so entries carry the
 /// bound spelling (alias when present) alongside the full segments.
+/// `Ty::item` for `[Ty, item, ..]` written after the `collections` module
+/// when `Ty` is a prelude collection, which its module path names as well.
+fn prelude_collection_path(rest: &[Ident]) -> Option<Vec<Ident>> {
+    let [ty, _, ..] = rest else {
+        return None;
+    };
+    gossamer_resolve::is_prelude_type(&ty.name).then(|| rest.to_vec())
+}
+
 fn collect_import_targets(
     uses: &[gossamer_ast::UseDecl],
 ) -> std::collections::HashMap<NodeId, Vec<(String, Vec<Ident>)>> {
@@ -758,6 +778,7 @@ mod map_index;
 mod mutex_guard;
 mod patterns;
 mod simd;
+mod template_render;
 mod try_op;
 mod window_place;
 
@@ -864,10 +885,7 @@ impl Lowerer<'_> {
         }
         let name = self.tcx.def_name(*def)?;
         let (module, tail) = name.rsplit_once("::")?;
-        let typed_family = matches!(
-            module,
-            "sync" | "metrics" | "trace" | "rand" | "bufio" | "context"
-        );
+        let typed_family = matches!(module, "sync" | "metrics" | "rand" | "bufio" | "context");
         (typed_family && tail == owner.name).then(|| method.clone())
     }
 
@@ -1240,6 +1258,9 @@ impl Lowerer<'_> {
         if let Some(wrapped) = self.lower_call_with_entry_args(expr) {
             return wrapped;
         }
+        if let Some(rendered) = self.lower_template_render(expr) {
+            return rendered;
+        }
         let lowered = self.lower_expr_plain(expr);
         if matches!(
             expr.kind,
@@ -1449,6 +1470,34 @@ impl Lowerer<'_> {
                 }
                 if let Some(desugared) = self.desugar_or_insert_value(expr) {
                     return desugared.kind;
+                }
+                // `it.join(sep)` on an iterator joins what it yields: the
+                // elements are collected first, and a sequence joins them.
+                if name.name == "join"
+                    && let [separator] = args.as_slice()
+                    && let receiver_ty = self.ty_of(receiver.id)
+                    && let gossamer_types::TyKind::Iterator(elem) =
+                        self.tcx.kind_of(receiver_ty).clone()
+                {
+                    let span = expr.span;
+                    let vec_ty = self.tcx.intern(gossamer_types::TyKind::Vec(elem));
+                    let collected = HirExpr {
+                        id: self.fresh(),
+                        span,
+                        ty: vec_ty,
+                        kind: HirExprKind::MethodCall {
+                            receiver: Box::new(self.lower_expr(receiver)),
+                            name: Ident::new("collect"),
+                            args: Vec::new(),
+                            owner: None,
+                        },
+                    };
+                    return HirExprKind::MethodCall {
+                        receiver: Box::new(collected),
+                        name: name.clone(),
+                        args: vec![self.lower_expr(separator)],
+                        owner: None,
+                    };
                 }
                 if name.name == "try_into"
                     && args.is_empty()
@@ -1823,6 +1872,7 @@ impl Lowerer<'_> {
             TyKind::Int(IntTy::I8) => IntTy::U8,
             TyKind::Int(IntTy::I16) => IntTy::U16,
             TyKind::Int(IntTy::I32) => IntTy::U32,
+            TyKind::Int(IntTy::I128) => IntTy::U128,
             _ => return,
         };
         let target = self.tcx.int_ty(unsigned);
@@ -2624,6 +2674,54 @@ impl Lowerer<'_> {
         }
     }
 
+    /// The spelling every tier's dispatch reads for a path through a standard
+    /// module a `use` binds: the module's full path for a module below the top
+    /// level whose short spelling names nothing (`subtle::constant_time_eq`
+    /// after `use std::crypto::subtle`),
+    /// and the bare prelude type for a prelude collection named through its
+    /// module (`collections::Map::new` after `use std::collections`).
+    fn imported_std_module_path(&self, node: NodeId, segments: &[Ident]) -> Option<Vec<Ident>> {
+        let Some(Resolution::Import { use_id }) = self.resolutions.get(node) else {
+            return None;
+        };
+        let (_, full) = self
+            .import_targets
+            .get(&use_id)?
+            .iter()
+            .find(|(bound, _)| *bound == segments[0].name)?;
+        let names: Vec<&str> = full.iter().map(|s| s.name.as_str()).collect();
+        let ["std", module @ ..] = names.as_slice() else {
+            return None;
+        };
+        if let ["collections"] = module {
+            return prelude_collection_path(&segments[1..]);
+        }
+        let path = module.join("::");
+        if module.len() < 2 || !gossamer_resolve::STDLIB_MODULE_PATHS.contains(&path.as_str()) {
+            return None;
+        }
+        let written = segments
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join("::");
+        if gossamer_resolve::is_stdlib_qualified(&written) {
+            return None;
+        }
+        let respelled: Vec<Ident> = full
+            .iter()
+            .skip(1)
+            .cloned()
+            .chain(segments[1..].iter().cloned())
+            .collect();
+        let qualified = respelled
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join("::");
+        gossamer_resolve::is_stdlib_qualified(&qualified).then_some(respelled)
+    }
+
     /// Module-qualified spelling of a `Type::assoc` path whose `Type` came from
     /// a `use`, which is the key the impl's body is registered under.
     /// Rewrites `Alias::Variant` and `Alias::assoc` to the aliased type's
@@ -2815,6 +2913,17 @@ impl Lowerer<'_> {
             && let Some(target) = self.imported_assoc_path(node, &segments)
         {
             segments = target;
+        }
+        // A path through a standard module names its item by the spelling the
+        // dispatch tables key on: a nested module's full path (the short head
+        // alone can name more than one module), a prelude collection's bare
+        // name.
+        if !anchored
+            && !qualified_spelling
+            && segments.len() > 1
+            && let Some(full) = self.imported_std_module_path(node, &segments)
+        {
+            segments = full;
         }
         // A path headed by a `use "id" as alias` binding names items
         // registered under the dependency module's real name, so the

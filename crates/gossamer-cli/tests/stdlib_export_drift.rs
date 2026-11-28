@@ -18,10 +18,78 @@ const SOURCE_VISIBLE_VIA_REWRITE: &[&str] = &[
     "bufio::Reader",
     "bufio::Writer",
     "collections::BitSet",
+    "encoding::json::Decoder",
+    "json::Decoder",
+    // `ECDH_WRAPPERS` / `MLKEM_WRAPPERS` / `SHARED_SECRET_WRAPPERS`: key
+    // agreement and encapsulation answering a `SharedSecret` written in
+    // Gossamer over the runtime's leaves.
+    "crypto::ecdh::SharedSecret",
+    "crypto::ecdh::p256",
+    "crypto::ecdh::p256_keypair",
+    "crypto::ecdh::p384",
+    "crypto::ecdh::p384_keypair",
+    "crypto::ecdh::x25519",
+    "crypto::ecdh::x25519_keypair",
+    "crypto::mlkem::SharedSecret",
+    "crypto::mlkem::decapsulate_1024",
+    "crypto::mlkem::decapsulate_768",
+    "crypto::mlkem::encapsulate_1024",
+    "crypto::mlkem::encapsulate_768",
+    "crypto::mlkem::keypair_1024",
+    "crypto::mlkem::keypair_768",
+    "ecdh::SharedSecret",
+    "ecdh::p256",
+    "ecdh::p256_keypair",
+    "ecdh::p384",
+    "ecdh::p384_keypair",
+    "ecdh::x25519",
+    "ecdh::x25519_keypair",
+    "mlkem::SharedSecret",
+    "mlkem::decapsulate_1024",
+    "mlkem::decapsulate_768",
+    "mlkem::encapsulate_1024",
+    "mlkem::encapsulate_768",
+    "mlkem::keypair_1024",
+    "mlkem::keypair_768",
+    // `X509_WRAPPERS`: certificate extensions, a struct written in Gossamer
+    // over the runtime's JSON leaf.
+    "crypto::x509::Extension",
+    "crypto::x509::extensions",
+    "crypto::x509::issue",
+    "crypto::x509::self_signed",
+    "x509::Extension",
+    "x509::extensions",
+    "x509::issue",
+    "x509::self_signed",
+    // `NETIP_PREFIX_WRAPPERS`: an IP prefix written in Gossamer over the
+    // runtime's address arithmetic.
+    "net::netip::Prefix",
+    "netip::Prefix",
+    // `TEMPLATE_WRAPPERS`: parsed templates and the missing-key choice,
+    // written in Gossamer over the runtime's template registry.
+    "html::template::MissingKey",
+    "html::template::Template",
+    "html::template::render",
+    "text::template::MissingKey",
+    "text::template::Template",
+    "text::template::render",
+    // `IMAGE_WRAPPERS`: an image value and its colour, written in Gossamer
+    // over the runtime's codec leaves.
+    "image::Image",
+    "image::Rgba",
+    "image::decode",
+    "image::set_max_pixels",
+    // `MAIL_WRAPPERS`: types and functions written in Gossamer over the
+    // runtime parser's JSON leaves.
+    "mail::Address",
+    "mail::parse_address",
+    "mail::parse_address_list",
+    "net::mail::Address",
+    "net::mail::parse_address",
+    "net::mail::parse_address_list",
     "collections::IndexMap",
-    "exec::spawn_piped",
     "math::Decimal",
-    "os::exec::spawn_piped",
+    "math::Rational",
     "path::Path",
     "path::Path::as_str",
     "path::Path::extension",
@@ -64,13 +132,41 @@ const SOURCE_VISIBLE_VIA_REWRITE: &[&str] = &[
     "time::Time::utc",
     "time::add_date",
     "time::format_in",
+    "time::parse",
     "zip::read_limited",
     // `FS_TEMP_DIR_WRAPPERS`: the `parent` default over the
-    // `__gos_fs_temp_dir_raw` leaf.
+    // `__gos_fs_temp_dir_raw` and `__gos_fs_temp_file_raw` leaves.
     "fs::temp_dir",
+    "fs::temp_file",
+    // `NET_DNS_WRAPPERS`: records folded from the runtime's flat DNS fields.
+    "net::lookup_mx",
+    "net::lookup_txt",
+    "net::lookup_srv",
+    "net::lookup_cname",
+    "net::lookup_addr",
+    "net::Mx",
+    "net::Srv",
+    // `TLS_SERVER_CONFIG_WRAPPERS`: a drop type over the runtime's registry.
+    "tls::ServerConfig",
+    "tls::ServerConfig::new",
+    "tls::ServerConfig::add_sni",
+    "tls::ServerConfig::reload",
+    // `rewrite_serve_tls_config`: spelled `http::__serve_tls_live`.
+    "http::serve_tls_config",
+    // `Time::format`, written in Gossamer over a strftime leaf.
+    "time::Time::format",
+    // `FS_ADMIN_WRAPPERS`: written in Gossamer over the runtime's leaves.
+    "fs::chown",
+    "fs::disk_space",
+    "fs::DiskSpace",
     // `JSON_ENTRIES_WRAPPERS`: an object's members over `json::keys` / `get`.
     "encoding::json::entries",
     "json::entries",
+    // `JSON_DUPLICATE_KEYS_WRAPPERS`: the policy enum, under both modules.
+    "encoding::json::DuplicateKeys",
+    "encoding::yaml::DuplicateKeys",
+    "json::DuplicateKeys",
+    "yaml::DuplicateKeys",
     // A typed serde call: the call's own stub, written by the HIR serde pass.
     "encoding::json::decode",
     "encoding::json::from_value",
@@ -92,6 +188,39 @@ const SOURCE_VISIBLE_VIA_REWRITE: &[&str] = &[
     "result::is_ok_and",
     "result::map_or",
     "result::map_or_else",
+    "fs::TempDir",
+    "fs::TempFile",
+    "math::Complex",
+    "math::comb",
+    "math::erf",
+    "math::erfc",
+    "math::factorial",
+    "math::gamma",
+    "math::lgamma",
+    "math::mean",
+    "math::median",
+    "math::perm",
+    "math::pstdev",
+    "math::pvariance",
+    "math::quantiles",
+    "math::stdev",
+    "math::variance",
+    "strings::shell_join",
+    "strings::shell_quote",
+    "strings::shell_split",
+    "sync::Permit",
+    "sync::Semaphore",
+    "time::Ticker",
+    "math::rand::range",
+    "math::rand::range_f64",
+    "math::rand::chance",
+    "math::rand::choose",
+    "math::rand::shuffle",
+    "math::rand::sample",
+    "math::rand::weighted",
+    "math::rand::normal",
+    "math::rand::exponential",
+    "math::rand::from_os",
 ];
 
 #[test]
@@ -242,19 +371,45 @@ fn registry_members_match_manifest() {
 /// run). The resolver never sees these names - the rewrite fires before
 /// resolution - so the three-segment phantom gate cannot reject them.
 const MANIFEST_IMPL_VIA_REWRITE: &[&str] = &[
+    // `MAIL_WRAPPERS`: Gossamer wrappers decoding the JSON the runtime
+    // parser's `__gos_*_raw` leaves answer.
+    "net::mail::parse_address",
+    "net::mail::parse_address_list",
+    // `ECDH_WRAPPERS` / `MLKEM_WRAPPERS`: wrap the runtime leaves' bytes in a
+    // `SharedSecret`.
+    "crypto::ecdh::p256",
+    "crypto::ecdh::p256_keypair",
+    "crypto::ecdh::p384",
+    "crypto::ecdh::p384_keypair",
+    "crypto::ecdh::x25519",
+    "crypto::ecdh::x25519_keypair",
+    "crypto::mlkem::decapsulate_1024",
+    "crypto::mlkem::decapsulate_768",
+    "crypto::mlkem::encapsulate_1024",
+    "crypto::mlkem::encapsulate_768",
+    "crypto::mlkem::keypair_1024",
+    "crypto::mlkem::keypair_768",
+    // `X509_WRAPPERS`: issuance takes `extensions:` through Gossamer
+    // wrappers over the `__gos_x509_*_raw` leaves.
+    "crypto::x509::extensions",
+    "crypto::x509::issue",
+    "crypto::x509::self_signed",
+    // `TEMPLATE_WRAPPERS`: `render` encodes its data at the call (HIR
+    // `template_render`) for the wrappers over the template registry.
+    "html::template::render",
+    "text::template::render",
+    // `IMAGE_WRAPPERS`: an `Image` value over the `__gos_image_*_raw` codec,
+    // fill, and resample leaves.
+    "image::decode",
+    "image::set_max_pixels",
     // `TAR_WRAPPERS` / `ZIP_WRAPPERS`: injected Gossamer wrappers over the
     // `__gos_*_read_raw` leaf each tier implements.
     "archive::tar::read_limited",
     "archive::zip::read_limited",
     // `Parser::rewrite_errors_newf` desugars to `errors::new(format!(..))`.
     "errors::newf",
-    // `rewrite_stdlib_struct_surface` maps these to injected
-    // `__gos_http_*` wrappers (HTTP_SECURITY_WRAPPERS).
-    "http::csrf::extract_token",
-    "http::csrf::origin_allowed",
-    "http::csrf::check",
-    "http::csrf::attach_cookie",
-    "http::session::with_session",
+    // `rewrite_stdlib_struct_surface` maps this to an injected
+    // `__gos_http_*` wrapper (HTTP_SECURITY_WRAPPERS).
     "http::multipart::parse",
     // `rewrite_stdlib_struct_surface` maps the public SQL facade to
     // injected `__gos_sql_*` wrappers. Those wrappers reach the same
@@ -264,8 +419,22 @@ const MANIFEST_IMPL_VIA_REWRITE: &[&str] = &[
     "database::sql::open",
     "database::sql::migrate_up",
     // `FS_TEMP_DIR_WRAPPERS`: the `parent` default argument over the
-    // runtime's `__gos_fs_temp_dir_raw` leaf.
+    // runtime's `__gos_fs_temp_dir_raw` and `__gos_fs_temp_file_raw` leaves.
     "fs::temp_dir",
+    "fs::temp_file",
+    // `rewrite_serve_tls_config`: spelled `http::__serve_tls_live` with the
+    // configuration's registry id.
+    "http::serve_tls_config",
+    // `NET_DNS_WRAPPERS`: the `server` default over the runtime's DNS leaf.
+    "net::lookup_mx",
+    "net::lookup_txt",
+    "net::lookup_srv",
+    "net::lookup_cname",
+    "net::lookup_addr",
+    // `FS_ADMIN_WRAPPERS`: optional ids and a struct answer over the runtime's
+    // `__gos_fs_chown_raw` / `__gos_fs_disk_space_raw` leaves.
+    "fs::chown",
+    "fs::disk_space",
     // `JSON_ENTRIES_WRAPPERS`: an object's members over `json::keys` / `get`.
     "encoding::json::entries",
     // A typed serde call: the call's own stub, written by the HIR serde pass.
@@ -288,6 +457,7 @@ const MANIFEST_IMPL_VIA_REWRITE: &[&str] = &[
     // source representation into the registered raw runtime leaves.
     "time::add_date",
     "time::format_in",
+    "time::parse",
     // `TIME_TIMER_WRAPPERS`: a goroutine that sleeps then sends, so the
     // deadline composes with `select` and `while let` like any channel.
     "time::after",
@@ -295,6 +465,33 @@ const MANIFEST_IMPL_VIA_REWRITE: &[&str] = &[
     // combinators over `cohort` + `spawn`, written as the desugar the block
     // compiles to so the callable's own value is the wrapper's.
     "sync::shield",
+    "math::rand::range",
+    "math::rand::range_f64",
+    "math::rand::chance",
+    "math::rand::choose",
+    "math::rand::shuffle",
+    "math::rand::sample",
+    "math::rand::weighted",
+    "math::rand::normal",
+    "math::rand::exponential",
+    "math::rand::from_os",
+    "strings::shell_split",
+    "strings::shell_quote",
+    "strings::shell_join",
+    "math::mean",
+    "math::median",
+    "math::variance",
+    "math::stdev",
+    "math::pvariance",
+    "math::pstdev",
+    "math::quantiles",
+    "math::erf",
+    "math::erfc",
+    "math::gamma",
+    "math::lgamma",
+    "math::factorial",
+    "math::comb",
+    "math::perm",
     "sync::with_timeout",
     // `FFI_WRAPPERS`, `FD_WRAPPERS`, and `TERM_WRAPPERS`: Gossamer source over
     // the foreign-call surface and the runtime's `__gos_fd_wait_raw` leaf.
@@ -330,11 +527,11 @@ const MANIFEST_IMPL_VIA_REWRITE: &[&str] = &[
     "term::enter_raw",
     "term::is_terminal",
     "term::read_input",
+    "term::read_password",
     "term::resized",
     "term::size",
     // `rewrite_stdlib_struct_surface` maps `spawn_piped` to the injected
     // `process::Command` wrapper source (PROCESS_COMMAND_WRAPPERS).
-    "os::exec::spawn_piped",
     "process::spawn_piped",
 ];
 

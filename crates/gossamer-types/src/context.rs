@@ -97,6 +97,10 @@ pub struct TyCtxt {
     primitives: Primitives,
     #[serde(serialize_with = "gossamer_ast::ordered::map")]
     struct_fields: HashMap<gossamer_resolve::DefId, Vec<Ty>>,
+    /// The structs with an `impl Drop`, which are shared handles whose
+    /// `drop` runs when the last reference goes.
+    #[serde(serialize_with = "gossamer_ast::ordered::set")]
+    drop_types: std::collections::HashSet<gossamer_resolve::DefId>,
     /// Per-variant field types of a user enum, in declaration (discriminant)
     /// order - variant `i` at index `i`, unit variants an empty vec. Populated
     /// by the typechecker; consumed by MIR to build the structural-equality
@@ -671,9 +675,14 @@ impl TyCtxt {
         self.enum_variant_tys = variants;
     }
 
-    /// Whether a value of `ty` is two words held by value: an `Option`, a
-    /// `Result`, or an inline user enum. Storage that holds one in place
-    /// gives it both words.
+    /// Whether `ty` is `i128` / `u128`, held in two words.
+    #[must_use]
+    pub fn is_wide_int(&self, ty: Ty) -> bool {
+        matches!(self.kind_of(ty), TyKind::Int(it) if it.is_wide())
+    }
+
+    /// Whether `ty` is an `Option` / `Result` / inline enum, held by value in
+    /// two words, a discriminant and a payload.
     #[must_use]
     pub fn is_two_word_value(&self, ty: Ty) -> bool {
         matches!(
@@ -851,6 +860,9 @@ impl TyCtxt {
     pub fn elem_is_addressed_aggregate(&self, ty: Ty) -> bool {
         match self.kind_of(ty) {
             TyKind::Tuple(_) | TyKind::Array { .. } | TyKind::Simd { .. } => true,
+            // A 128-bit integer spans two slots wherever it is stored, as a
+            // two-word tuple does.
+            TyKind::Int(it) if it.is_wide() => true,
             TyKind::Adt { def, substs } => {
                 let (def, substs) = (*def, substs.clone());
                 let user_struct =
@@ -1545,6 +1557,7 @@ impl TyCtxt {
             }
             TyKind::Bool => 1,
             TyKind::Char => 4,
+            TyKind::Int(IntTy::I128 | IntTy::U128) => 16,
             TyKind::Int(_) | TyKind::Float(_) | TyKind::String => 8,
             _ => 8,
         }
@@ -1567,6 +1580,7 @@ impl TyCtxt {
             TyKind::Int(IntTy::I32 | IntTy::U32) | TyKind::Char | TyKind::Float(FloatTy::F32) => {
                 Some(4)
             }
+            TyKind::Int(IntTy::I128 | IntTy::U128) => Some(16),
             TyKind::Tuple(_) | TyKind::Array { .. } | TyKind::Adt { .. } => None,
             _ => Some(8),
         }
@@ -2005,7 +2019,8 @@ impl TyCtxt {
     /// the sockets `net::TcpStream` through `net::UnixListener` (12 to 16),
     /// `bytes::Builder` (27), `sync::Map` (34),
     /// `sync::RwLock` (35), `rand::Rng` (42), `fs::File` (44),
-    /// `fs::OpenOptions` (45), `sync::Shared` (46), `regex::Pattern` (26), the band from
+    /// `fs::OpenOptions` (45), `sync::Shared` (46), `runtime::Guard` (49),
+    /// `regex::Pattern` (26), the band from
     /// `sync::Mutex` (50) through `sync::AtomicBool` (57), and
     /// `http::websocket::Conn` (62), `bytes::Buffer` (63), and
     /// `io::MemoryStream` (64).
@@ -2016,8 +2031,93 @@ impl TyCtxt {
             Some(TyKind::Adt { def, .. }) => {
                 matches!(
                     u32::MAX - def.local,
-                    11..=16 | 26 | 27 | 34 | 35 | 42 | 44..=46 | 50..=57 | 62..=64
+                    11..=16 | 26 | 27 | 34 | 35 | 42 | 44..=46 | 49 | 50..=57 | 62..=64
                 )
+            }
+            _ => false,
+        }
+    }
+
+    /// Records that the struct `def` has an `impl Drop`.
+    pub fn register_drop_type(&mut self, def: gossamer_resolve::DefId) {
+        self.drop_types.insert(def);
+    }
+
+    /// Whether the program names a type whose release runs a cleanup: a
+    /// `runtime::Guard`, or a struct with an `impl Drop`.
+    #[must_use]
+    pub fn has_cleanup_types(&self) -> bool {
+        !self.drop_types.is_empty()
+            || self
+                .kinds
+                .iter()
+                .any(|kind| matches!(kind, TyKind::Adt { def, .. } if def.local == u32::MAX - 49))
+    }
+
+    /// Whether `def` is a struct with an `impl Drop`.
+    #[must_use]
+    pub fn is_drop_type(&self, def: gossamer_resolve::DefId) -> bool {
+        self.drop_types.contains(&def)
+    }
+
+    /// Returns true when a binding of `ty` lives to the end of the block that
+    /// binds it rather than to its last use: a value that holds a
+    /// `runtime::Guard` or a value of a type with `impl Drop`, directly or
+    /// through a collection, an `Option`, a tuple, or a field, whose release
+    /// runs a cleanup the program relies on running at scope end.
+    #[must_use]
+    pub fn is_scope_bound(&self, ty: Ty) -> bool {
+        self.holds_cleanup(ty, &mut Vec::new())
+    }
+
+    fn holds_cleanup(&self, ty: Ty, seen: &mut Vec<Ty>) -> bool {
+        if seen.contains(&ty) {
+            return false;
+        }
+        let Some(kind) = self.kind(ty) else {
+            return false;
+        };
+        match kind {
+            TyKind::Adt { def, substs } => {
+                if def.local == u32::MAX - 49 || self.drop_types.contains(def) {
+                    return true;
+                }
+                seen.push(ty);
+                let held = substs
+                    .types()
+                    .into_iter()
+                    .any(|arg| self.holds_cleanup(arg, seen))
+                    || self
+                        .struct_fields
+                        .get(def)
+                        .into_iter()
+                        .flatten()
+                        .chain(
+                            self.enum_variant_tys
+                                .get(def)
+                                .into_iter()
+                                .flatten()
+                                .flatten(),
+                        )
+                        .any(|field| self.holds_cleanup(*field, seen));
+                seen.pop();
+                held
+            }
+            TyKind::Tuple(elems) => {
+                let elems = elems.clone();
+                elems.into_iter().any(|elem| self.holds_cleanup(elem, seen))
+            }
+            TyKind::Array { elem, .. } | TyKind::Slice(elem) | TyKind::Vec(elem) => {
+                let elem = *elem;
+                self.holds_cleanup(elem, seen)
+            }
+            TyKind::HashMap { key, value, .. } => {
+                let (key, value) = (*key, *value);
+                self.holds_cleanup(key, seen) || self.holds_cleanup(value, seen)
+            }
+            TyKind::Nominal { repr, .. } => {
+                let repr = *repr;
+                self.holds_cleanup(repr, seen)
             }
             _ => false,
         }

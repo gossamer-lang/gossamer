@@ -463,7 +463,7 @@ impl Visitor for Walker<'_> {
                 return;
             }
             ExprKind::Call { callee, args } => {
-                // The prelude `spawn`, not a module's own (`exec::spawn`).
+                // The prelude `spawn`, not a module's own (`process::spawn`).
                 if let ExprKind::Path(path) = &callee.kind
                     && let [seg] = path.segments.as_slice()
                     && seg.name.name == "spawn"

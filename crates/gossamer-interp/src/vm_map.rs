@@ -27,6 +27,13 @@ impl KeyOrder {
     pub fn cmp(self, a: &MapKey, b: &MapKey) -> Ordering {
         match (self, a, b) {
             (Self::Unsigned, MapKey::Int(x), MapKey::Int(y)) => (*x as u64).cmp(&(*y as u64)),
+            (Self::Natural | Self::Unsigned, MapKey::Wide(_), _)
+            | (Self::Natural | Self::Unsigned, _, MapKey::Wide(_))
+                if let Some(order) =
+                    crate::value::wide::compare_keys(a, b, matches!(self, Self::Unsigned)) =>
+            {
+                order
+            }
             (Self::User(comparator), _, _) => {
                 crate::vm::user_order::order(comparator, a, b).unwrap_or_else(|| a.cmp(b))
             }
@@ -256,7 +263,7 @@ impl VmMap {
     pub fn sorted(&self) -> Vec<(&MapKey, &Value)> {
         let mut entries: Vec<(&MapKey, &Value)> = self.iter().collect();
         if let Self::Hash(_) = self {
-            entries.sort_by(|a, b| a.0.cmp(b.0));
+            entries.sort_by(|a, b| KeyOrder::Natural.cmp(a.0, b.0));
         }
         entries
     }

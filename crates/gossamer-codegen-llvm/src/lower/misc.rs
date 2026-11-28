@@ -76,7 +76,7 @@ use gossamer_types::{FloatTy, IntTy, Ty, TyCtxt, TyKind};
 
 impl<'a> Lowerer<'a> {
     /// The runtime entry allocating a counted copy laid out by `meta_symbol`.
-    fn rc_alloc_entry(&self, moved: bool, meta_symbol: Option<&str>) -> &'static str {
+    pub(crate) fn rc_alloc_entry(&self, moved: bool, meta_symbol: Option<&str>) -> &'static str {
         gossamer_abi::rc::rc_alloc_entry_for(moved, meta_symbol, |sym| self.tcx.rc_meta(sym))
     }
 
@@ -85,7 +85,7 @@ impl<'a> Lowerer<'a> {
     /// tried inline: with instrumentation quiet and room in the open region's
     /// slab, the copy is bumped off the program's per-thread block, headerless,
     /// exactly as the entry's own fast path would, and only a miss calls it.
-    fn emit_rc_alloc(
+    pub(crate) fn emit_rc_alloc(
         &mut self,
         allocator: &'static str,
         bytes: u64,
@@ -836,7 +836,7 @@ impl<'a> Lowerer<'a> {
         if carrier && !boxed_carrier {
             return None;
         }
-        if !boxed_carrier && !is_aggregate(self.tcx, local_ty) {
+        if !boxed_carrier && !is_aggregate(self.tcx, local_ty) && !self.tcx.is_wide_int(local_ty) {
             return None;
         }
         let slots = slot_count(self.tcx, local_ty)?;
@@ -960,6 +960,9 @@ impl<'a> Lowerer<'a> {
                     Some(TyKind::Float(FloatTy::F32)) => ConcatKind::F32(method == "fmt"),
                     Some(TyKind::Float(_)) => ConcatKind::Float,
                     Some(TyKind::String | TyKind::Ref { .. }) => ConcatKind::StrPtr,
+                    Some(TyKind::Int(int_ty)) if int_ty.is_wide() => {
+                        ConcatKind::Wide(*int_ty == gossamer_types::IntTy::U128)
+                    }
                     Some(TyKind::Int(int_ty)) => {
                         if p.projection.is_empty()
                             && let Some(kind) = self.set_handle_print_kind(p.local, 0, method)
@@ -1072,6 +1075,9 @@ impl<'a> Lowerer<'a> {
                             // as the empty sequence the word printer renders.
                             None | Some(TyKind::Var(_)) => ConcatKind::VecI64,
                             Some(TyKind::Int(IntTy::U64 | IntTy::Usize)) => ConcatKind::VecUint,
+                            Some(TyKind::Int(int_ty)) if int_ty.is_wide() => self
+                                .value_descriptor(elem, method)
+                                .map_or(ConcatKind::Unsupported, ConcatKind::VecDesc),
                             Some(TyKind::Int(_)) => ConcatKind::VecI64,
                             Some(TyKind::Float(FloatTy::F32)) => self
                                 .value_descriptor(elem, method)
@@ -1609,6 +1615,9 @@ impl<'a> Lowerer<'a> {
             // negative the same bits spell. The VM boxes the payload as its
             // `Uint` value for the same reason.
             Some(TyKind::Int(IntTy::U64 | IntTy::Usize)) => Some(1),
+            // A 128-bit payload is boxed, so it renders through its
+            // descriptor, which reads the box.
+            Some(TyKind::Int(int_ty)) if int_ty.is_wide() => None,
             Some(TyKind::Int(_)) => Some(0),
             Some(TyKind::Float(FloatTy::F32)) => Some(gossamer_abi::TUPLE_TAG_F32),
             Some(TyKind::Float(_)) => Some(2),
@@ -1852,6 +1861,8 @@ impl<'a> Lowerer<'a> {
             // A `u64` / `usize` slot spans the whole unsigned range, so it
             // reads as unsigned wherever a tag stream names it.
             Some(TyKind::Int(IntTy::U64 | IntTy::Usize)) => Some(1),
+            Some(TyKind::Int(IntTy::I128)) => Some(gossamer_abi::TUPLE_TAG_I128),
+            Some(TyKind::Int(IntTy::U128)) => Some(gossamer_abi::TUPLE_TAG_U128),
             // Every other integer's slot holds its value widened to a word -
             // sign-extended when signed, zero-extended when not - so the
             // signed word is the value itself.
@@ -1891,7 +1902,7 @@ impl<'a> Lowerer<'a> {
     /// `i64::MAX` as a negative; those take the descriptor path instead.
     pub(crate) fn is_signed_word_int(&self, ty: Ty) -> bool {
         matches!(self.tcx.kind(self.unwrap_ref(ty)), Some(TyKind::Int(int_ty))
-            if !matches!(int_ty, IntTy::U64 | IntTy::Usize))
+            if !matches!(int_ty, IntTy::U64 | IntTy::Usize) && !int_ty.is_wide())
     }
 
     /// True when a `HashMap` key/value type is one `gos_rt_map_format`
@@ -1900,8 +1911,8 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn map_kv_supported(&self, ty: Ty) -> bool {
         matches!(
             self.tcx.kind(self.unwrap_ref(ty)),
-            Some(TyKind::Int(_) | TyKind::String)
-        )
+            Some(TyKind::Int(int_ty)) if !int_ty.is_wide()
+        ) || matches!(self.tcx.kind(self.unwrap_ref(ty)), Some(TyKind::String))
     }
 
     /// Sign- or zero-extends a value to `i64` for the Int print

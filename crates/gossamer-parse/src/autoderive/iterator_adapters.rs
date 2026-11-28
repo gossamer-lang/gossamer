@@ -495,20 +495,28 @@ struct UserIterator {
     defined: HashSet<String>,
 }
 
-/// Source for the adapter structs and every declared iterator's methods, or
-/// an empty string when the program declares no iterator.
-pub(crate) fn synthesize_iterator_adapters(parsed: &SourceFile, source: &str) -> String {
-    let flat = super::flatten_items_with_modules(&parsed.items);
+/// Source for the adapter structs and the methods of every iterator the
+/// trees declare, or an empty string when they declare none. Each tree comes
+/// with the text its spans index: the program's own source, and the stdlib
+/// wrapper source, whose iterators take the same adapters.
+pub(crate) fn synthesize_iterator_adapters(trees: &[(&SourceFile, &str)]) -> String {
+    let flats: Vec<_> = trees
+        .iter()
+        .map(|(parsed, source)| (super::flatten_items_with_modules(&parsed.items), *source))
+        .collect();
     // A program that declares its own `trait Iterator` names that trait in
     // every `impl Iterator`, and the adapters implement the built-in one.
-    if flat.iter().any(
+    if flats.iter().flat_map(|(flat, _)| flat).any(
         |(_, item)| matches!(&item.kind, ItemKind::Trait(decl) if decl.name.name == "Iterator"),
     ) {
         return String::new();
     }
-    let iterators: Vec<UserIterator> = flat
+    let iterators: Vec<UserIterator> = flats
         .iter()
-        .filter_map(|(module, item)| user_iterator(module, item, &flat, source))
+        .flat_map(|(flat, source)| {
+            flat.iter()
+                .filter_map(|(module, item)| user_iterator(module, item, flat, source))
+        })
         .collect();
     if iterators.is_empty() {
         return String::new();
@@ -791,6 +799,8 @@ fn splice_into(target: &mut Vec<Item>, carried: Vec<Item>) {
 const COLLECT_RESULT: &str = "__gos_collect_result";
 /// Name of the function `collect` into an `Option<Vec<T>>` becomes.
 const COLLECT_OPTION: &str = "__gos_collect_option";
+/// Name of the function `collect` into a `String` becomes.
+const COLLECT_STRING: &str = "__gos_collect_string";
 
 /// The two collectors a fallible `collect` reaches. Each stops pulling at the
 /// first `Err` or `None`, so the stages behind it run no further.
@@ -804,6 +814,13 @@ fn __gos_collect_result<I: Iterator<Item = Result<T, E>>, T, E>(mut it: I) -> Re
         }
     }
     Ok(out)
+}
+fn __gos_collect_string<I: Iterator<Item = T>, T>(mut it: I) -> String {
+    let mut out = String::new()
+    while let Some(item) = it.next() {
+        out += item.to_string()
+    }
+    out
 }
 fn __gos_collect_option<I: Iterator<Item = Option<T>>, T>(mut it: I) -> Option<Vec<T>> {
     let mut out = #[]
@@ -819,18 +836,22 @@ fn __gos_collect_option<I: Iterator<Item = Option<T>>, T>(mut it: I) -> Option<V
 
 /// Source for the fallible collectors, when the program may reach one.
 pub(crate) fn synthesize_collect_helpers(source: &str) -> String {
-    if source.contains("collect") && (source.contains("Result") || source.contains("Option")) {
+    if source.contains("collect")
+        && (source.contains("Result") || source.contains("Option") || source.contains("String"))
+    {
         COLLECT_HELPERS.to_string()
     } else {
         String::new()
     }
 }
 
-/// Which fallible collection a type names.
+/// Which fallible collection a type names, or `String`, which collects the
+/// text of each element.
 #[derive(Clone, Copy)]
 enum Fallible {
     Result,
     Option,
+    Text,
 }
 
 impl Fallible {
@@ -838,6 +859,7 @@ impl Fallible {
         match self {
             Self::Result => COLLECT_RESULT,
             Self::Option => COLLECT_OPTION,
+            Self::Text => COLLECT_STRING,
         }
     }
 }
@@ -852,6 +874,9 @@ fn fallible_shape(ty: &gossamer_ast::Type, needs_vec: bool) -> Option<Fallible> 
     let shape = match last.name.name.as_str() {
         "Result" => Fallible::Result,
         "Option" => Fallible::Option,
+        "String" if path.segments.len() == 1 && last.generics.is_empty() => {
+            return Some(Fallible::Text);
+        }
         _ => return None,
     };
     let Some(gossamer_ast::GenericArg::Type(first)) = last.generics.first() else {

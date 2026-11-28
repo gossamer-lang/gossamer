@@ -11,8 +11,41 @@ impl<'tcx> FnBuilder<'tcx> {
         args: &[HirExpr],
         owner: Option<&Ident>,
     ) -> RuntimeResult<Reg> {
+        // `(*r).m(..)` names the place `r` refers to, as `r.m(..)` does: a
+        // method reaches through the reference itself, so a write the method
+        // makes lands where the reference points.
+        if let HirExprKind::Unary {
+            op: HirUnaryOp::Deref,
+            operand,
+        } = &receiver.kind
+            && matches!(self.tcx.kind(operand.ty), Some(TyKind::Ref { .. }))
+        {
+            return self.compile_method_call(operand, name, args, owner);
+        }
         if name.name == "downgrade" && args.is_empty() {
             return self.compile_downgrade(receiver);
+        }
+        if let [rhs] = args
+            && let Some(op) = match name.name.as_str() {
+                "__gos_wrapping_add" => Some(crate::value::wide::WideOp::Add),
+                "__gos_wrapping_sub" => Some(crate::value::wide::WideOp::Sub),
+                "__gos_wrapping_mul" => Some(crate::value::wide::WideOp::Mul),
+                _ => None,
+            }
+            && let Some(unsigned) = self.wide_int_ty(self.static_ty(receiver))
+        {
+            let lhs = self.compile_expr(receiver)?;
+            let rhs = self.compile_expr(rhs)?;
+            let dst = self.alloc_reg();
+            self.emit(Op::WideArith {
+                dst,
+                lhs,
+                rhs,
+                op,
+                unsigned,
+                wrapping: true,
+            });
+            return Ok(dst);
         }
         // Keep explicit wrapping arithmetic on the unboxed integer register
         // path. Routing these methods through generic dynamic dispatch makes
@@ -344,6 +377,30 @@ impl<'tcx> FnBuilder<'tcx> {
         if let Some(reg) = self.try_compile_described_method(receiver, &name.name, args)? {
             return Ok(reg);
         }
+        // A field's or element's Vec is shortened where it lives: read into a
+        // register first, it would be shared, and every pop would copy it.
+        // A `&mut Vec` receiver is the Vec it names: `pop` reaches through
+        // the reference.
+        let receiver_kind = {
+            let mut kind = self.tcx.kind(receiver.ty).cloned();
+            while let Some(TyKind::Ref { inner, .. }) = kind {
+                kind = self.tcx.kind(inner).cloned();
+            }
+            kind
+        };
+        if name.name == "pop"
+            && args.is_empty()
+            && !matches!(receiver.kind, HirExprKind::Path { .. })
+            && matches!(receiver_kind, Some(TyKind::Vec(_)))
+            && let Some((root, path)) = self.compile_place_path(receiver, 1)?
+        {
+            let dst = self.alloc_reg();
+            let idx = u16::try_from(self.wide_ops.len()).expect("wide_ops index overflow");
+            self.wide_ops
+                .push(crate::bytecode::WideOp::PlaceVecPop { dst, root, path });
+            self.emit(Op::Wide { idx });
+            return Ok(dst);
+        }
         let receiver_reg = self.compile_expr(receiver)?;
         // A rendering method answers the text `{}` answers, and a `Vec`
         // and a fixed array share one runtime representation; the
@@ -389,7 +446,7 @@ impl<'tcx> FnBuilder<'tcx> {
         if name.name == "pop"
             && args.is_empty()
             && matches!(
-                self.tcx.kind(receiver.ty),
+                receiver_kind,
                 None | Some(TyKind::Vec(_) | TyKind::Slice(_) | TyKind::Var(_))
             )
         {
@@ -1021,6 +1078,44 @@ impl<'tcx> FnBuilder<'tcx> {
             .next_reg
             .checked_add(argc)
             .expect("register overflow reserving mut-self method args");
+        // A receiver inside a binding closures capture crosses as that place,
+        // so the method's writes reach the binding while it runs and a
+        // closure it calls reads them.
+        if let Some(callee) = callee_reg
+            && let Some(receiver_place) = self.capture_place_arg(place)
+        {
+            let mut takes = CallTakes {
+                cell_args: true,
+                ..CallTakes::default()
+            };
+            let pending = self.lower_args(args, true, None, &mut takes, |this, _, arg| {
+                let reg = this.compile_expr(arg)?;
+                Ok(this.stored_value_reg(arg, reg))
+            })?;
+            let arg_regs = self.finish_args(args, pending, &mut takes)?;
+            self.emit(Op::Move {
+                dst: args_start,
+                src: receiver_place,
+            });
+            for (i, r) in arg_regs.iter().enumerate() {
+                let slot = args_start
+                    .checked_add(u16::try_from(i + 1).expect("argc overflow"))
+                    .expect("register overflow");
+                self.emit(Op::Move { dst: slot, src: *r });
+            }
+            let dst = self.alloc_reg();
+            let cache_idx = self.alloc_cache_idx();
+            let call = self.emit(Op::Call {
+                dst,
+                callee,
+                args: args_start,
+                argc,
+                cache_idx,
+                may_have_cells: true,
+            });
+            self.emit_write_backs(call, &takes.cells, &takes.places, &takes.windows)?;
+            return Ok(Some(dst));
+        }
         // A receiver that is a local of its own is moved from its home
         // register; reading it into a fresh one first would leave the home a
         // share, and the callee's first write would copy the whole value.
@@ -1048,7 +1143,10 @@ impl<'tcx> FnBuilder<'tcx> {
         // path gives it: a `&mut self` method may take an out-parameter
         // (`conn.next_row(&mut stream)`), and passing that by value would
         // leave every mutation on a copy.
-        let mut takes = CallTakes::default();
+        let mut takes = CallTakes {
+            cell_args: callee_reg.is_some(),
+            ..CallTakes::default()
+        };
         // A program method's by-value parameter is a value of its own, as a
         // free function's is: a table the caller still reaches crosses as a
         // copy, so the method's writes, and what it hands back, leave the

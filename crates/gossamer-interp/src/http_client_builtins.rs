@@ -82,7 +82,7 @@ fn client_field_of(inner: &crate::value::StructInner) -> Option<&Value> {
 
 pub(crate) fn builtin_http_client_new(_args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::struct_(
-        "Client",
+        "http::Client",
         crate::value::empty_struct_fields(),
     ))
 }
@@ -264,7 +264,7 @@ pub(crate) fn builtin_http_client_builder_build(args: &[Value]) -> RuntimeResult
             Err(e) => return Ok(crate::builtins::err_variant(e)),
         }
     }
-    Ok(Value::struct_("Client", fields))
+    Ok(Value::struct_("http::Client", fields))
 }
 
 /// Reads the redirect/timeout policy off a `Client` receiver. A
@@ -273,7 +273,7 @@ pub(crate) fn builtin_http_client_builder_build(args: &[Value]) -> RuntimeResult
 fn client_config(receiver: Option<&Value>) -> (u32, u64) {
     let (mut max_redirects, mut timeout_ms) = (DEFAULT_MAX_REDIRECTS, DEFAULT_TIMEOUT_MS);
     if let Some(Value::Struct(inner)) = receiver {
-        if inner.name == "Client" {
+        if inner.name == "http::Client" {
             if let Some(n) = int_field(inner, "max_redirects") {
                 max_redirects = clamp_max_redirects(n);
             }
@@ -292,7 +292,7 @@ fn client_config(receiver: Option<&Value>) -> (u32, u64) {
 /// from the receiver's policy (redirects / timeout / proxy).
 fn client_for_request(receiver: Option<&Value>) -> Result<StdClient, String> {
     if let Some(Value::Struct(inner)) = receiver
-        && inner.name == "Client"
+        && inner.name == "http::Client"
         && let Some(client) = client_field_of(inner).and_then(client_of_field)
     {
         return Ok(client);
@@ -327,7 +327,9 @@ fn configured_std_client(
 /// built with the cookie jar enabled.
 fn client_id_of(receiver: Option<&Value>) -> Option<Value> {
     match receiver {
-        Some(Value::Struct(inner)) if inner.name == "Client" => client_field_of(inner).cloned(),
+        Some(Value::Struct(inner)) if inner.name == "http::Client" => {
+            client_field_of(inner).cloned()
+        }
         _ => None,
     }
 }
@@ -344,7 +346,7 @@ fn expect_request<'a>(
     label: &str,
 ) -> RuntimeResult<&'a crate::value::StructInner> {
     match args.first() {
-        Some(Value::Struct(inner)) if inner.name == "Request" => Ok(inner),
+        Some(Value::Struct(inner)) if inner.name == "http::Request" => Ok(inner),
         _ => Err(RuntimeError::Type(format!("{label}: expected Request"))),
     }
 }
@@ -352,7 +354,7 @@ fn expect_request<'a>(
 /// `Request::header(name, value) -> Request` - returns a new Request
 /// with the pair appended to its `headers` array-of-tuples field.
 pub(crate) fn builtin_http_request_header(args: &[Value]) -> RuntimeResult<Value> {
-    let inner = expect_request(args, "Request::header")?;
+    let inner = expect_request(args, "http::Request::header")?;
     let name = args.get(1).and_then(as_str).unwrap_or("");
     let value = args.get(2).and_then(as_str).unwrap_or("");
     let pair = Value::Tuple(Arc::from(vec![
@@ -370,13 +372,13 @@ pub(crate) fn builtin_http_request_header(args: &[Value]) -> RuntimeResult<Value
     } else {
         fields.push(("headers", Value::Array(Arc::new(vec![pair]))));
     }
-    Ok(Value::struct_("Request", fields))
+    Ok(Value::struct_("http::Request", fields))
 }
 
 /// `Request::body(text) -> Request` - returns a new Request whose
 /// `body` field holds the given string.
 pub(crate) fn builtin_http_request_body(args: &[Value]) -> RuntimeResult<Value> {
-    let inner = expect_request(args, "Request::body")?;
+    let inner = expect_request(args, "http::Request::body")?;
     let body = args.get(1).and_then(as_str).unwrap_or("");
     let body_value = Value::String(SmolStr::from(body.to_string()));
     let mut fields = inner.fields.to_vec();
@@ -385,11 +387,11 @@ pub(crate) fn builtin_http_request_body(args: &[Value]) -> RuntimeResult<Value> 
     } else {
         fields.push(("body", body_value));
     }
-    Ok(Value::struct_("Request", fields))
+    Ok(Value::struct_("http::Request", fields))
 }
 
 pub(crate) fn builtin_http_request_send(args: &[Value]) -> RuntimeResult<Value> {
-    let inner = expect_request(args, "Request::send")?;
+    let inner = expect_request(args, "http::Request::send")?;
     let field = |name: &str| {
         inner
             .fields
@@ -433,19 +435,27 @@ pub(crate) fn builtin_http_response_bytes(args: &[Value]) -> RuntimeResult<Value
             "Response::bytes: expected Response".to_string(),
         ));
     };
-    if inner.name != "Response" {
+    if inner.name != "http::Response" {
         return Err(RuntimeError::Type(
             "Response::bytes: expected Response".to_string(),
         ));
     }
-    let body = inner
-        .fields
-        .iter()
-        .find(|(ident, _)| (**ident) == "body")
-        .and_then(|(_, v)| as_str(v))
-        .unwrap_or_default();
-    let bytes: Vec<Value> = body.bytes().map(|b| Value::Int(i64::from(b))).collect();
-    Ok(crate::builtins::ok_variant(Value::Array(Arc::new(bytes))))
+    // The body's bytes as sent, the same value the `raw_bytes` field holds.
+    let field = |name: &str| {
+        inner
+            .fields
+            .iter()
+            .find(|(ident, _)| (**ident) == name)
+            .map(|(_, v)| v.clone())
+    };
+    if let Some(raw) = field("raw_bytes") {
+        return Ok(raw);
+    }
+    let body = field("body");
+    let text = body.as_ref().and_then(as_str).unwrap_or_default();
+    Ok(Value::Array(Arc::new(
+        text.bytes().map(|b| Value::Int(i64::from(b))).collect(),
+    )))
 }
 
 // ------------------------------------------------------------------
@@ -629,7 +639,7 @@ fn lift_response(resp: gossamer_std::http::Response) -> Value {
             .collect()
     };
     fields.push(("headers", Value::Array(Arc::new(headers))));
-    Value::struct_("Response", fields)
+    Value::struct_("http::Response", fields)
 }
 
 /// `(name, value)` header tuple in the lifted `Response.headers` shape.
@@ -895,7 +905,7 @@ fn pending_request_for(method: &str, url: &str, client: Option<Value>) -> Value 
     if let Some(client) = client {
         fields.push(("__client", client));
     }
-    Value::struct_("Request", fields)
+    Value::struct_("http::Request", fields)
 }
 
 pub(crate) fn builtin_http_client_post(args: &[Value]) -> RuntimeResult<Value> {
@@ -1222,7 +1232,7 @@ mod tests {
         let Value::Struct(inner) = &client else {
             panic!("build must produce a Client struct");
         };
-        assert_eq!(inner.name, "Client");
+        assert_eq!(inner.name, "http::Client");
         assert_eq!(int_field_of(&client, "max_redirects"), Some(0));
         assert_eq!(int_field_of(&client, "timeout_ms"), Some(5000));
     }

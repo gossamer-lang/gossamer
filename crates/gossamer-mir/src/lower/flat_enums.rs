@@ -121,6 +121,8 @@ fn layout_of(tcx: &TyCtxt, variants: Vec<Vec<Ty>>, word: Ty, float: Ty) -> FlatE
 /// and anything else as itself.
 fn storage_ty(tcx: &TyCtxt, ty: Ty, word: Ty, float: Ty) -> Ty {
     match tcx.kind_of(ty) {
+        // A 128-bit integer spans two words, so it takes a region of its own type.
+        TyKind::Int(int_ty) if int_ty.is_wide() => ty,
         TyKind::Int(_) | TyKind::Bool | TyKind::Char => word,
         TyKind::Float(_) => float,
         _ if is_unit_only_enum(tcx, ty) => word,

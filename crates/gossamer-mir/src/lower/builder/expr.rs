@@ -945,6 +945,22 @@ impl<'a> Builder<'a> {
         span: Span,
     ) -> Option<Local> {
         use gossamer_types::TyKind;
+        // `-170141183460469231731687303715884105728` is the constant
+        // `i128::MIN`: its magnitude alone is no `i128`, so it is never
+        // negated at run time.
+        if matches!(op, HirUnaryOp::Neg)
+            && matches!(self.tcx.kind_of(ty), TyKind::Int(it) if it.is_wide())
+            && let HirExprKind::Literal(HirLiteral::Int(text)) = &operand.kind
+            && let Some(magnitude) = crate::lower::helpers::parse_int(text)
+        {
+            let local = self.fresh(ty);
+            self.emit_assign(
+                Place::local(local),
+                Rvalue::Use(Operand::Const(ConstValue::Int(magnitude.wrapping_neg()))),
+                span,
+            );
+            return Some(local);
+        }
         let runtime_projected_field = match &operand.kind {
             HirExprKind::Field { receiver, .. } => {
                 let runtime_kind = self
@@ -2018,9 +2034,8 @@ impl<'a> Builder<'a> {
         let bin_op = lower_binop(op);
         // Integer divide / modulo guards. The compiled tiers lower
         // these to raw `sdiv`/`srem`, which trap (SIGFPE on x86) on a
-        // zero divisor and on the signed `MIN / -1` overflow. Match
-        // the VM: a zero divisor is a clean panic; `MIN / -1` wraps to
-        // `MIN` and `MIN % -1` to 0. Floats follow IEEE (`x / 0.0` is
+        // zero divisor and on the signed `MIN / -1` overflow. Both are a
+        // clean panic, as on the VM. Floats follow IEEE (`x / 0.0` is
         // ±inf), so only integer operands are guarded.
         let int_ty: Option<gossamer_types::IntTy> = if matches!(bin_op, BinOp::Div | BinOp::Rem) {
             match self.tcx.kind_of(ty) {
@@ -2069,12 +2084,12 @@ impl<'a> Builder<'a> {
             });
             self.set_current(ok);
         }
-        // Signed `MIN / -1`: the wrapped result the VM produces (`MIN` for
-        // `/`, `0` for `%`) instead of a trapping `sdiv`. Only the widths that
-        // overflow the i64 runtime representation trap, so only `i64`/`isize`
-        // (and the rejected `i128`) take this guard. A narrower `MIN / -1`
-        // cannot trap at i64 width; its quotient is narrowed back below.
+        // Signed `MIN / -1` and `MIN % -1` panic on every tier, as an
+        // overflowing `+` does: the quotient does not fit the type.
         let signed_min: Option<i128> = match int_ty {
+            Some(gossamer_types::IntTy::I8) => Some(i128::from(i8::MIN)),
+            Some(gossamer_types::IntTy::I16) => Some(i128::from(i16::MIN)),
+            Some(gossamer_types::IntTy::I32) => Some(i128::from(i32::MIN)),
             Some(gossamer_types::IntTy::I64 | gossamer_types::IntTy::Isize) => {
                 Some(i128::from(i64::MIN))
             }
@@ -2083,108 +2098,46 @@ impl<'a> Builder<'a> {
         };
         if let Some(min_val) = signed_min.filter(|_| divisor_maybe_neg1) {
             let bool_ty = self.tcx.bool_ty();
-            let is_min = self.fresh(bool_ty);
+            let not_min = self.fresh(bool_ty);
             self.emit_assign(
-                Place::local(is_min),
+                Place::local(not_min),
                 Rvalue::BinaryOp {
-                    op: BinOp::Eq,
+                    op: BinOp::Ne,
                     lhs: Operand::Copy(Place::local(lhs_local)),
                     rhs: Operand::Const(ConstValue::Int(min_val)),
                 },
                 span,
             );
-            let is_neg1 = self.fresh(bool_ty);
+            let not_neg1 = self.fresh(bool_ty);
             self.emit_assign(
-                Place::local(is_neg1),
+                Place::local(not_neg1),
                 Rvalue::BinaryOp {
-                    op: BinOp::Eq,
+                    op: BinOp::Ne,
                     lhs: Operand::Copy(Place::local(rhs_local)),
                     rhs: Operand::Const(ConstValue::Int(-1)),
                 },
                 span,
             );
-            let ovf = self.fresh(bool_ty);
+            let fits = self.fresh(bool_ty);
             self.emit_assign(
-                Place::local(ovf),
+                Place::local(fits),
                 Rvalue::BinaryOp {
-                    op: BinOp::BitAnd,
-                    lhs: Operand::Copy(Place::local(is_min)),
-                    rhs: Operand::Copy(Place::local(is_neg1)),
+                    op: BinOp::BitOr,
+                    lhs: Operand::Copy(Place::local(not_min)),
+                    rhs: Operand::Copy(Place::local(not_neg1)),
                 },
                 span,
             );
-            let result = self.fresh(ty);
-            let ovf_block = self.new_block(span);
-            let normal_block = self.new_block(span);
-            let join = self.new_block(span);
-            self.terminate(Terminator::SwitchInt {
-                discriminant: Operand::Copy(Place::local(ovf)),
-                arms: vec![(0, normal_block)],
-                default: ovf_block,
+            let ok = self.new_block(span);
+            self.terminate(Terminator::Assert {
+                cond: Operand::Copy(Place::local(fits)),
+                expected: true,
+                msg: AssertMessage::DivideOverflow {
+                    rem: matches!(bin_op, BinOp::Rem),
+                },
+                target: ok,
             });
-            // Overflow arm: the wrapped result (MIN for `/`, 0 for `%`).
-            self.set_current(ovf_block);
-            let wrapped = if matches!(bin_op, BinOp::Rem) {
-                0
-            } else {
-                min_val
-            };
-            self.emit_assign(
-                Place::local(result),
-                Rvalue::Use(Operand::Const(ConstValue::Int(wrapped))),
-                span,
-            );
-            self.terminate(Terminator::Goto { target: join });
-            // Normal arm: the actual division.
-            self.set_current(normal_block);
-            self.emit_assign(
-                Place::local(result),
-                Rvalue::BinaryOp {
-                    op: bin_op,
-                    lhs: Operand::Copy(Place::local(lhs_local)),
-                    rhs: Operand::Copy(Place::local(rhs_local)),
-                },
-                span,
-            );
-            self.terminate(Terminator::Goto { target: join });
-            self.set_current(join);
-            return Some(result);
-        }
-        // A narrow signed `MIN / -1` answers `2^(n-1)` at i64 width, one past
-        // the type's range. The quotient wraps at the declared width, as the
-        // i64 case does, so the wide result is narrowed back.
-        if matches!(bin_op, BinOp::Div)
-            && divisor_maybe_neg1
-            && matches!(
-                int_ty,
-                Some(
-                    gossamer_types::IntTy::I8
-                        | gossamer_types::IntTy::I16
-                        | gossamer_types::IntTy::I32
-                )
-            )
-        {
-            let wide_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-            let wide = self.fresh(wide_ty);
-            self.emit_assign(
-                Place::local(wide),
-                Rvalue::BinaryOp {
-                    op: bin_op,
-                    lhs: Operand::Copy(Place::local(lhs_local)),
-                    rhs: Operand::Copy(Place::local(rhs_local)),
-                },
-                span,
-            );
-            let local = self.fresh(ty);
-            self.emit_assign(
-                Place::local(local),
-                Rvalue::Cast {
-                    operand: Operand::Copy(Place::local(wide)),
-                    target: ty,
-                },
-                span,
-            );
-            return Some(local);
+            self.set_current(ok);
         }
         // A shift amount outside `0..BITS` of the shifted type panics on
         // every tier, as an overflowing `+` does. A literal amount in range
@@ -2192,7 +2145,11 @@ impl<'a> Builder<'a> {
         if matches!(bin_op, BinOp::Shl | BinOp::Shr)
             && let gossamer_types::TyKind::Int(int_ty) = self.tcx.kind_of(ty)
         {
-            let bits = i128::from(narrow_int_width(*int_ty).unwrap_or(64));
+            let bits = if int_ty.is_wide() {
+                128
+            } else {
+                i128::from(narrow_int_width(*int_ty).unwrap_or(64))
+            };
             let in_range = |expr: &HirExpr| match &expr.kind {
                 HirExprKind::Literal(lit @ HirLiteral::Int(_)) => matches!(
                     literal_to_const(lit),
@@ -2348,7 +2305,9 @@ impl<'a> Builder<'a> {
                 // block, the way `gos_rt_vec_push` takes one.
                 let setter = if self.is_inline_slot_block(elem_ty) {
                     "gos_rt_vec_set_slots"
-                } else if crate::lower::carrier_ref::is_two_word_carrier(self.tcx, elem_ty) {
+                } else if crate::lower::carrier_ref::is_two_word_carrier(self.tcx, elem_ty)
+                    || self.tcx.is_wide_int(elem_ty)
+                {
                     "gos_rt_vec_set_i128"
                 } else {
                     "gos_rt_vec_set_i64"
@@ -2533,6 +2492,8 @@ impl<'a> Builder<'a> {
                 // orders and renders as unsigned rather than as the signed
                 // word its bits spell.
                 TyKind::Int(IntTy::U64 | IntTy::Usize) => return Some(1),
+                TyKind::Int(IntTy::I128) => return Some(gossamer_abi::TUPLE_TAG_I128),
+                TyKind::Int(IntTy::U128) => return Some(gossamer_abi::TUPLE_TAG_U128),
                 TyKind::Int(_) => return Some(0),
                 TyKind::Float(_) => return Some(2),
                 TyKind::Bool => return Some(3),
@@ -2769,6 +2730,8 @@ impl<'a> Builder<'a> {
             }
         }
         match self.tcx.kind_of(peeled) {
+            TyKind::Int(IntTy::I128) => Some(vec![gossamer_abi::TUPLE_TAG_I128]),
+            TyKind::Int(IntTy::U128) => Some(vec![gossamer_abi::TUPLE_TAG_U128]),
             // An unsigned integer orders as one: a narrow one stored at its
             // own width widens without a sign.
             TyKind::Int(IntTy::U8 | IntTy::U16 | IntTy::U32 | IntTy::U64 | IntTy::Usize) => {
@@ -2999,6 +2962,12 @@ impl<'a> Builder<'a> {
             TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize)
         ) {
             return Some((1, vec![1]));
+        }
+        // A 128-bit integer orders through its two-slot tag.
+        if let TyKind::Int(int_ty) = self.tcx.kind_of(peeled)
+            && int_ty.is_wide()
+        {
+            return Some((1, vec![self.scalar_cmp_tag(peeled)?]));
         }
         // A packed struct is one descriptor entry, however many slots it spans.
         if let Some(stream) = self.packed_ordering_stream(peeled) {
@@ -4351,6 +4320,17 @@ impl<'a> Builder<'a> {
         matches!(&expr.kind, HirExprKind::Path { def: Some(def), .. } if self.mut_statics.contains_key(def))
     }
 
+    /// Whether `struct_name` names the standard `http::Response` or
+    /// `http::Request` handle rather than a struct the program declares.
+    pub(crate) fn is_std_http_handle(&self, struct_name: &str) -> bool {
+        matches!(struct_name, "http::Response" | "http::Request")
+            || matches!(struct_name, "Response" | "Request")
+                && !self
+                    .struct_defs
+                    .iter()
+                    .any(|(def, name)| name == struct_name && def.local < u32::MAX - 16)
+    }
+
     pub(crate) fn lower_place_expr(&mut self, expr: &HirExpr) -> Option<Place> {
         match &expr.kind {
             HirExprKind::Path { segments, .. } => Some(Place::local(self.path_local(segments)?)),
@@ -4368,6 +4348,12 @@ impl<'a> Builder<'a> {
                 let struct_name = self
                     .struct_name_from_expr(receiver)
                     .or_else(|| self.local_struct.get(&base.local).cloned())?;
+                // An `http::Response` / `http::Request` is an opaque runtime
+                // handle whose fields its helpers compute, so a field of one
+                // has no place in it; the value lowering reads it.
+                if self.is_std_http_handle(&struct_name) {
+                    return None;
+                }
                 let order = self.structs.get(&struct_name)?;
                 let idx = u32::try_from(order.iter().position(|f| f == &name.name)?).ok()?;
                 base.projection.push(crate::ir::Projection::Field(idx));
@@ -4455,11 +4441,14 @@ impl<'a> Builder<'a> {
                             .values()
                             .any(|struct_name| struct_name == &name)
                     });
+                    // A runtime handle (an atomic, a mutex, a context) is one
+                    // word the element holds, read as a value; its place is
+                    // the element itself, not an address to walk fields from.
                     let elem_aggregate = matches!(
                         self.tcx.kind_of(elem),
                         gossamer_types::TyKind::Tuple(_) | gossamer_types::TyKind::Adt { .. }
-                    ) && (self.type_slot_bytes(elem) >= 8
-                        || elem_is_user_struct);
+                    ) && !self.tcx.is_managed_handle(elem)
+                        && (self.type_slot_bytes(elem) >= 8 || elem_is_user_struct);
                     if elem_aggregate {
                         // Materialise the element address with
                         // `gos_rt_vec_get_ptr` and bind it to a
@@ -4902,8 +4891,9 @@ impl<'a> Builder<'a> {
                 );
             } else {
                 let next = self.new_block(span);
+                // A string range takes byte offsets, as `substring` does.
                 let len_callee = if base_is_string {
-                    "gos_rt_str_len"
+                    "gos_rt_str_byte_len"
                 } else {
                     "gos_rt_len"
                 };
@@ -5177,6 +5167,10 @@ impl<'a> Builder<'a> {
                 // An error element is a counted cell that renders and is owned
                 // by its type; the element read itself is a borrow of the slot.
                 TyKind::DynError => elem_unwrapped,
+                // A channel end, a join handle, or another counted runtime
+                // handle is owned by its type too: the read is a borrow of the
+                // slot, and a binding or a return of it takes a share.
+                _ if self.tcx.is_managed_handle(elem_unwrapped) => elem_unwrapped,
                 _ => match self.tcx.kind_of(ty) {
                     TyKind::Int(_) | TyKind::String | TyKind::Bool | TyKind::Float(_) => ty,
                     _ => self.tcx.int_ty(gossamer_types::IntTy::I64),

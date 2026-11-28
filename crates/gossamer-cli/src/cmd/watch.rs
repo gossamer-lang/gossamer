@@ -12,9 +12,9 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-#[cfg(unix)]
-use gossamer_std::exec;
 use gossamer_std::fs::{Event, Watcher};
+#[cfg(unix)]
+use gossamer_std::process as child_process;
 use gossamer_std::signal::{self, Notifier, sigs};
 
 use crate::paths::{resolve_entry_arg, stderr_supports_colour};
@@ -280,7 +280,7 @@ fn stop_child(child: &mut Child, grace: Duration, status: &Status) -> Result<()>
 
 #[cfg(unix)]
 fn request_shutdown(child: &Child) -> Result<()> {
-    if exec::send_group_term(i64::from(child.id())) {
+    if child_process::send_group_term(i64::from(child.id())) {
         Ok(())
     } else {
         Err(anyhow!("could not signal child process group"))

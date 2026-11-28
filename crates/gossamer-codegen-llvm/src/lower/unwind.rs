@@ -120,6 +120,8 @@ impl Lowerer<'_> {
             .map_or(PadEntry::Landing, |plan| plan.entry);
         match entry {
             PadEntry::Landing => {
+                declare_rt(&mut self.runtime_refs, "gos_rt_unwind_exit_if_pending");
+                writeln!(self.out, "  call void @gos_rt_unwind_exit_if_pending()").unwrap();
                 let exception = self.fresh();
                 writeln!(
                     self.out,

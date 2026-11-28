@@ -112,6 +112,33 @@ impl<'tcx> FnBuilder<'tcx> {
             .flatten()
     }
 
+    /// The `&mut` argument for `place` when it lies in a captured binding:
+    /// the binding's cell, or the place inside it. The callee reads and
+    /// writes it where every closure sharing the binding sees it.
+    pub(crate) fn capture_place_arg(&mut self, place: &HirExpr) -> Option<Reg> {
+        let (root, steps) = super::place_steps(place)?;
+        let local = self.lookup_local(root)?;
+        let cell = self.capture_cell_for_local(local)?;
+        if !root.starts_with(super::CAPTURE_CELL_PREFIX)
+            && !self.cell_param_homes.contains(&local.reg)
+        {
+            return None;
+        }
+        self.passes_capture_cells = true;
+        if steps.is_empty() {
+            return Some(cell);
+        }
+        let dst = self.alloc_reg();
+        let idx = u16::try_from(self.wide_ops.len()).expect("wide_ops index overflow");
+        self.wide_ops.push(crate::bytecode::WideOp::CapturePlace {
+            dst,
+            cell,
+            steps: steps.into(),
+        });
+        self.emit(Op::Wide { idx });
+        Some(dst)
+    }
+
     /// Register holding the capture cell that backs the `Value`-file
     /// binding in `home`, when this function stores it in one.
     pub(crate) fn capture_cell_for(&self, home: Reg) -> Option<Reg> {
@@ -481,6 +508,8 @@ impl<'tcx> FnBuilder<'tcx> {
                 | Op::CheckedSubI64 { dst_i, .. }
                 | Op::MulI64 { dst_i, .. }
                 | Op::CheckedMulI64 { dst_i, .. }
+                | Op::CheckedDivI64 { dst_i, .. }
+                | Op::CheckedRemI64 { dst_i, .. }
                 | Op::DivI64 { dst_i, .. }
                 | Op::RemI64 { dst_i, .. }
                 | Op::DivU64 { dst_i, .. }

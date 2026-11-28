@@ -1,0 +1,32 @@
+// A program builds an `http::Request` value itself, for a handler under test
+// or a request a library receives some other way: every field reads back as
+// written on every tier, the headers in their written order, and a header
+// reads by index straight off a request or a response, one a function
+// returned or a parameter brought in included.
+use std::http
+
+fn handle(r: http::Request) -> String { f"{r.method} {r.path} q={r.query} {r.headers} body={r.body} raw={r.raw_body.len()} {r.form_value("a")}" }
+
+fn make() -> http::Request {
+    http::Request { method: "PUT", path: "/m", query: "", query_pairs: #[], headers: #[("m", "n")], body: "", raw_body: #[], peer_addr: "" }
+}
+
+fn inspect(r: http::Request) {
+    println(f"{r.method} {r.headers[0].0}")
+    let after = r.path
+    println(after)
+}
+
+fn main() {
+    let headers = #[("host", "x"), ("content-type", "application/x-www-form-urlencoded")]
+    let r = http::Request { method: "POST", path: "/a", query: "k=1", query_pairs: #[], headers: headers, body: "a=hi", raw_body: "a=hi".bytes(), peer_addr: "" }
+    println(handle(r))
+    let bare = http::Request { method: "GET", path: "/", query: "", query_pairs: #[], headers: #[], body: "", raw_body: #[], peer_addr: "" }
+    println(handle(bare))
+    println(f"{r.headers[1].0}={r.headers[1].1}")
+    let response = http::Response::text(201, "").with_header("x-id", "7")
+    println(f"{response.headers[0].0}={response.headers[0].1} {response.status}")
+    let made = make()
+    println(made.headers[0].1)
+    inspect(made)
+}

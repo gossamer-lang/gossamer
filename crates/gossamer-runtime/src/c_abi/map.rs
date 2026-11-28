@@ -1048,7 +1048,6 @@ pub unsafe extern "C-unwind" fn gos_rt_map_get(
             crate::c_abi::panic::panic_text(
                 "map read reached a storage shape this accessor does not handle",
             );
-            return 0;
         };
         if let Some(v) = inner.get(ByteKeyRef::new(k)) {
             // SAFETY: every value in `Bytes` storage is the 8 bytes `gos_rt_map_insert` stored,
@@ -1340,8 +1339,10 @@ unsafe fn encode_skey(key: *const u8, desc: &[u8], out: &mut Vec<u8>) -> Option<
                     unsafe { encode_skey(payload, inner, out) }?;
                 }
             }
-            // SAFETY: `slot` addresses one 8-byte slot of the key.
-            b's' => out.extend_from_slice(unsafe { std::slice::from_raw_parts(slot, 8) }),
+            b's' | b'u' | b'w' | b'i' | b'n' => {
+                // SAFETY: `slot` addresses one 8-byte slot of the key.
+                out.extend_from_slice(unsafe { std::slice::from_raw_parts(slot, 8) });
+            }
             b'S' => {
                 // The string field holds a cstring pointer exposed as an
                 // integer by the flat-slot ABI; recover its provenance.
@@ -4069,106 +4070,9 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
         let inline_ptr = v.cast::<crate::c_abi::vec::InlineVec>();
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let boxed = unsafe { &*v };
-        if !boxed.ptr.is_null() && boxed.cap > 0 {
-            // Deep-free pointer-bearing element payloads BEFORE
-            // reclaiming the backing buffer. Each branch walks the
-            // first `len` slots - slots between `len` and `cap` were
-            // never written and contain the zero-init produced by
-            // `vec![0u8; bytes]` at construction time.
-            // Guarded aggregate elements: release each element's
-            // copy-blob children (set-gated in the walk) before the
-            // buffer goes away.
-            if boxed.elem_kind == vec_elem_kind::AGGR_GUARDED {
-                // SAFETY: the vec being freed holds guarded aggregate elements, as its kind says.
-                unsafe { crate::c_abi::vec::vec_release_guarded_elements(boxed) };
-            }
-            // Owned-slot-children elements (materializer shims): free
-            // each live embedded string / nested vec, including slots a
-            // consumer loop never reached (the early-`break` path).
-            if boxed.elem_kind == vec_elem_kind::AGGR_OWNED {
-                // SAFETY: the vec being freed holds owned-slot aggregate elements, as its kind
-                // says.
-                unsafe { crate::c_abi::vec::vec_release_owned_children(boxed) };
-            }
-            if !matches!(
-                boxed.elem_kind,
-                vec_elem_kind::PRIMITIVE | vec_elem_kind::SIGNED | vec_elem_kind::F32
-            ) && boxed.elem_bytes as usize == 8
-            {
-                let count = boxed.len.max(0) as usize;
-                // `ptr` is non-null and `cap > 0` (checked above); the loop
-                // reads only the `count <= len <= cap` initialised 8-byte slots.
-                let base = boxed.ptr;
-                for i in 0..count {
-                    // Slots hold child pointers exposed as integers by the
-                    // flat-slot ABI in a byte buffer with no 8-byte
-                    // alignment guarantee; read unaligned and recover
-                    // provenance before the dereferencing free.
-                    // SAFETY: slot `i` is below `count`, inside the initialised
-                    // part of the buffer.
-                    let raw = unsafe { crate::c_abi::vec::slot_read_word(base.add(i * 8)) }
-                        .expose_provenance();
-                    if raw == 0 {
-                        continue;
-                    }
-                    let slot: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
-                    match boxed.elem_kind {
-                        vec_elem_kind::STRING => {
-                            // SAFETY: each slot in a STRING-typed vec holds a
-                            // compiler-typed string, so its owner header is
-                            // read directly, as every other release of a
-                            // STRING slot does.
-                            unsafe {
-                                crate::c_abi::string::gos_rt_str_free_typed(slot.cast::<c_char>());
-                            };
-                        }
-                        vec_elem_kind::VEC => {
-                            // SAFETY: a `VEC`-kind vec owns each non-null element.
-                            unsafe { gos_rt_vec_free(slot.cast::<GosVec>()) };
-                        }
-                        vec_elem_kind::MAP => {
-                            // SAFETY: a `MAP`-kind vec owns each non-null element.
-                            unsafe { gos_rt_map_free(slot.cast::<GosMap>()) };
-                        }
-                        vec_elem_kind::ERROR => {
-                            // Each element is a share of an error cell.
-                            // SAFETY: an `ERROR`-kind vec holds a share of each non-null element.
-                            unsafe { crate::c_abi::rc::gos_rt_rc_release(slot) };
-                        }
-                        vec_elem_kind::RC_ENUM => {
-                            // The vec owns each enum-node element (the push
-                            // moved the frame's share in); release cascades
-                            // through the node's own child meta.
-                            // SAFETY: an `RC_ENUM`-kind vec holds a share of each non-null
-                            // element.
-                            unsafe { crate::c_abi::rc::gos_rt_rc_release(slot) };
-                        }
-                        vec_elem_kind::WEAK => {
-                            // SAFETY: a `WEAK`-kind vec holds a weak share of each non-null
-                            // element.
-                            unsafe { crate::c_abi::rc::gos_rt_rc_weak_release(slot) };
-                        }
-                        vec_elem_kind::JSON => {
-                            // Each element is a handle holding a share of the
-                            // document's tree; the tree dies with its last one.
-                            // SAFETY: a `JSON`-kind vec owns each non-null element's handle.
-                            unsafe { crate::c_abi::json::gos_rt_json_free(slot.cast()) };
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            // Reclaim the element buffer only when it is a standalone
-            // (split) allocation; an inline buffer is part of the header
-            // block and goes away with `drop(inline_box)` below.
-            if crate::c_abi::vec::vec_is_split(boxed) {
-                let bytes = (boxed.cap as usize) * (boxed.elem_bytes as usize);
-                // SAFETY: a split vec's buffer came from `alloc_vec_buffer(bytes)`.
-                unsafe {
-                    crate::c_abi::vec::free_vec_buffer(boxed.ptr.as_ptr(), bytes);
-                }
-            }
-        }
+        // SAFETY: this was the header's last reference, and its buffer is
+        // released with it.
+        unsafe { vec_release_buffer(boxed) };
         // Drop any lazily allocated aggregate-owned slot metadata after the
         // deep-free walk and before the header block. Metadata is owned by
         // the header itself, never an address-keyed side table. Pass the
@@ -4189,6 +4093,132 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
             drop(unsafe { Box::from_raw(inline_ptr) });
         }
     });
+}
+
+/// Releases the buffer of `boxed`, a vector giving it up: its share of a
+/// buffer copies still hold, or, as the buffer's last holder, every element's
+/// share and the buffer itself.
+///
+/// # Safety
+///
+/// `boxed` describes a live buffer its caller holds and gives up here; the
+/// header itself is the caller's to free.
+pub(crate) unsafe fn vec_release_buffer(boxed: &GosVec) {
+    // Only a share raises a buffer's holder count, and it marks every header
+    // holding the buffer, so an unmarked header is its buffer's one holder.
+    if crate::c_abi::vec::vec_flags(boxed) & crate::c_abi::vec::VEC_SHARED_FLAG != 0
+        && crate::c_abi::vec::vec_is_split(boxed)
+        && !boxed.ptr.is_null()
+        && !crate::c_abi::vec::vec_is_window(boxed)
+        && !crate::c_abi::vec::vec_is_str_view(boxed)
+    {
+        // A buffer a copy shares outlives this holder: the copy releases the
+        // elements with it. The count's lock orders this holder's reads
+        // before the last holder tears the buffer down.
+        if !crate::c_abi::vec::release_buffer_share(boxed.ptr.as_const_ptr()) {
+            return;
+        }
+    }
+    if !boxed.ptr.is_null() && boxed.cap > 0 {
+        // Deep-free pointer-bearing element payloads BEFORE
+        // reclaiming the backing buffer. Each branch walks the
+        // first `len` slots - slots between `len` and `cap` were
+        // never written and contain the zero-init produced by
+        // `vec![0u8; bytes]` at construction time.
+        // Guarded aggregate elements: release each element's
+        // copy-blob children (set-gated in the walk) before the
+        // buffer goes away.
+        if boxed.elem_kind == vec_elem_kind::AGGR_GUARDED {
+            // SAFETY: the vec being freed holds guarded aggregate elements, as its kind says.
+            unsafe { crate::c_abi::vec::vec_release_guarded_elements(boxed) };
+        }
+        // Owned-slot-children elements (materializer shims): free
+        // each live embedded string / nested vec, including slots a
+        // consumer loop never reached (the early-`break` path).
+        if boxed.elem_kind == vec_elem_kind::AGGR_OWNED {
+            // SAFETY: the vec being freed holds owned-slot aggregate elements, as its kind
+            // says.
+            unsafe { crate::c_abi::vec::vec_release_owned_children(boxed) };
+        }
+        if !matches!(
+            boxed.elem_kind,
+            vec_elem_kind::PRIMITIVE | vec_elem_kind::SIGNED | vec_elem_kind::F32
+        ) && boxed.elem_bytes as usize == 8
+        {
+            let count = boxed.len.max(0) as usize;
+            // `ptr` is non-null and `cap > 0` (checked above); the loop
+            // reads only the `count <= len <= cap` initialised 8-byte slots.
+            let base = boxed.ptr;
+            for i in 0..count {
+                // Slots hold child pointers exposed as integers by the
+                // flat-slot ABI in a byte buffer with no 8-byte
+                // alignment guarantee; read unaligned and recover
+                // provenance before the dereferencing free.
+                // SAFETY: slot `i` is below `count`, inside the initialised
+                // part of the buffer.
+                let raw = unsafe { crate::c_abi::vec::slot_read_word(base.add(i * 8)) }
+                    .expose_provenance();
+                if raw == 0 {
+                    continue;
+                }
+                let slot: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
+                match boxed.elem_kind {
+                    vec_elem_kind::STRING => {
+                        // SAFETY: each slot in a STRING-typed vec holds a
+                        // compiler-typed string, so its owner header is
+                        // read directly, as every other release of a
+                        // STRING slot does.
+                        unsafe {
+                            crate::c_abi::string::gos_rt_str_free_typed(slot.cast::<c_char>());
+                        };
+                    }
+                    vec_elem_kind::VEC => {
+                        // SAFETY: a `VEC`-kind vec owns each non-null element.
+                        unsafe { gos_rt_vec_free(slot.cast::<GosVec>()) };
+                    }
+                    vec_elem_kind::MAP => {
+                        // SAFETY: a `MAP`-kind vec owns each non-null element.
+                        unsafe { gos_rt_map_free(slot.cast::<GosMap>()) };
+                    }
+                    vec_elem_kind::ERROR => {
+                        // Each element is a share of an error cell.
+                        // SAFETY: an `ERROR`-kind vec holds a share of each non-null element.
+                        unsafe { crate::c_abi::rc::gos_rt_rc_release(slot) };
+                    }
+                    vec_elem_kind::RC_ENUM => {
+                        // The vec owns each enum-node element (the push
+                        // moved the frame's share in); release cascades
+                        // through the node's own child meta.
+                        // SAFETY: an `RC_ENUM`-kind vec holds a share of each non-null
+                        // element.
+                        unsafe { crate::c_abi::rc::gos_rt_rc_release(slot) };
+                    }
+                    vec_elem_kind::WEAK => {
+                        // SAFETY: a `WEAK`-kind vec holds a weak share of each non-null
+                        // element.
+                        unsafe { crate::c_abi::rc::gos_rt_rc_weak_release(slot) };
+                    }
+                    vec_elem_kind::JSON => {
+                        // Each element is a handle holding a share of the
+                        // document's tree; the tree dies with its last one.
+                        // SAFETY: a `JSON`-kind vec owns each non-null element's handle.
+                        unsafe { crate::c_abi::json::gos_rt_json_free(slot.cast()) };
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Reclaim the element buffer only when it is a standalone
+        // (split) allocation; an inline buffer is part of the header
+        // block and goes away with `drop(inline_box)` below.
+        if crate::c_abi::vec::vec_is_split(boxed) {
+            let bytes = (boxed.cap as usize) * (boxed.elem_bytes as usize);
+            // SAFETY: a split vec's buffer came from `alloc_vec_buffer(bytes)`.
+            unsafe {
+                crate::c_abi::vec::free_vec_buffer(boxed.ptr.as_ptr(), bytes);
+            }
+        }
+    }
 }
 
 /// Drops a `HashSet` allocated by [`gos_rt_set_new`].
@@ -4989,6 +5019,8 @@ impl<T> RadixRow for (u64, &[u8], T) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_entries_into(m: *const GosMap, out: *mut GosVec) {
     ffi_entry!({
+        // SAFETY: `out` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(out) };
         // SAFETY: `m` and `out` are this shim's arguments, each null or live (C-ABI contract),
         // which the snapshot accepts.
         unsafe { map_entries_ordered(m, out, KeyOrder::Signed) }
@@ -5003,6 +5035,8 @@ pub unsafe extern "C" fn gos_rt_map_entries_into(m: *const GosMap, out: *mut Gos
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_entries_into_u64(m: *const GosMap, out: *mut GosVec) {
     ffi_entry!({
+        // SAFETY: `out` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(out) };
         // SAFETY: `m` and `out` are this shim's arguments, each null or live (C-ABI contract),
         // which the snapshot accepts.
         unsafe { map_entries_ordered(m, out, KeyOrder::Unsigned) }
@@ -5018,7 +5052,6 @@ unsafe fn map_entries_ordered(m: *const GosMap, out: *mut GosVec, order: KeyOrde
         // `Vec`.
         if unsafe { (*out).elem_bytes } != 16 {
             crate::c_abi::panic::panic_text("map entries need a two-word pair slot");
-            return;
         }
         // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
         // `Map`.
@@ -5058,7 +5091,6 @@ unsafe fn map_entries_ordered(m: *const GosMap, out: *mut GosVec, order: KeyOrde
                 crate::c_abi::panic::panic_text(
                     "map read reached a storage shape this accessor does not handle",
                 );
-                return;
             }
         };
         drop(storage);
@@ -5121,7 +5153,6 @@ pub unsafe extern "C-unwind" fn gos_rt_map_select_by_key_into(
         // SAFETY: `out` is a handle from compiled code, checked non-null above and live for the whole call.
         if unsafe { (*out).elem_bytes } != 16 {
             crate::c_abi::panic::panic_text("map entries need a two-word pair slot");
-            return;
         }
         // SAFETY: `env` is this shim's argument, as `env_fn_addr` requires (C-ABI contract).
         let Some(addr) = (unsafe { env_fn_addr(env) }) else {
@@ -5169,7 +5200,6 @@ pub unsafe extern "C-unwind" fn gos_rt_map_select_by_key_into(
                 crate::c_abi::panic::panic_text(
                     "map read reached a storage shape this accessor does not handle",
                 );
-                return;
             }
         };
         drop(storage);
@@ -5270,6 +5300,11 @@ pub unsafe extern "C" fn gos_rt_map_keys_skey(m: *const GosMap) -> *mut GosVec {
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum SkeyField<'a> {
     Word(i64),
+    /// A `u64` / `usize` word, which orders unsigned.
+    Unsigned(u64),
+    /// A 128-bit integer's bits, with a signed value's sign bit flipped so
+    /// the unsigned order of the bits is the value's order.
+    Wide(u128),
     Text(&'a [u8]),
     /// A sequence's elements, widened to whole words so they order by value
     /// the way the interpreter orders the same elements.
@@ -5301,6 +5336,14 @@ fn push_order_fields(fields: Vec<SkeyField<'_>>, out: &mut Vec<u8>) {
             SkeyField::Word(word) => {
                 out.push(0);
                 out.extend_from_slice(&(word as u64 ^ (1u64 << 63)).to_be_bytes());
+            }
+            SkeyField::Unsigned(word) => {
+                out.push(0);
+                out.extend_from_slice(&word.to_be_bytes());
+            }
+            SkeyField::Wide(bits) => {
+                out.push(0);
+                out.extend_from_slice(&bits.to_be_bytes());
             }
             SkeyField::Text(text) => {
                 out.push(1);
@@ -5339,16 +5382,36 @@ fn skey_order_at<'a>(key: &'a [u8], cursor: &mut usize, desc: &[u8]) -> Vec<Skey
     let mut boxed = crate::c_abi::slot_key::desc_boxed(desc).into_iter();
     let slots = crate::c_abi::slot_key::desc_slots(desc);
     let mut fields = Vec::with_capacity(slots.len());
-    for &code in slots {
+    let mut codes = slots.iter().copied();
+    while let Some(code) = codes.next() {
         match code {
-            b's' => {
+            b's' | b'u' => {
                 let Some(word) = key.get(*cursor..*cursor + 8) else {
                     break;
                 };
                 let mut bytes = [0u8; 8];
                 bytes.copy_from_slice(word);
-                fields.push(SkeyField::Word(i64::from_ne_bytes(bytes)));
+                let word = i64::from_ne_bytes(bytes);
+                fields.push(if code == b'u' {
+                    SkeyField::Unsigned(word.cast_unsigned())
+                } else {
+                    SkeyField::Word(word)
+                });
                 *cursor += 8;
+            }
+            // A 128-bit integer: its low word, then its high word, which
+            // `i` marks signed and `n` unsigned.
+            b'w' => {
+                let high = codes.next();
+                let Some(words) = key.get(*cursor..*cursor + 16) else {
+                    break;
+                };
+                let mut bytes = [0u8; 16];
+                bytes.copy_from_slice(words);
+                let bits = u128::from_le_bytes(bytes);
+                let flip = if high == Some(b'i') { 1u128 << 127 } else { 0 };
+                fields.push(SkeyField::Wide(bits ^ flip));
+                *cursor += 16;
             }
             b'S' => {
                 let Some(len_bytes) = key.get(*cursor..*cursor + 8) else {
@@ -5431,7 +5494,7 @@ fn decode_skey_at(key: &[u8], cursor: &mut usize, desc: &[u8], slots: &mut [i64]
     let mut boxed = crate::c_abi::slot_key::desc_boxed(desc).into_iter();
     for (index, &code) in crate::c_abi::slot_key::desc_slots(desc).iter().enumerate() {
         match code {
-            b's' => {
+            b's' | b'u' | b'w' | b'i' | b'n' => {
                 let Some(word) = key.get(*cursor..*cursor + 8) else {
                     return false;
                 };

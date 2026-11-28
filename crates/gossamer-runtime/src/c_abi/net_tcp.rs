@@ -454,17 +454,79 @@ static TLS_CLIENT_CONFIG_INSECURE: LazyLock<Arc<rustls::ClientConfig>> = LazyLoc
 
 /// Builds a client config that validates the server certificate chain
 /// and hostname against `ca_pem` rather than the bundled public roots.
-fn tls_config_ca(ca_pem: &[u8]) -> Result<Arc<rustls::ClientConfig>, String> {
+/// `net::TcpStream::start_tls_identity(h, host, ca_pem, cert_pem, key_pem)
+/// -> Result<TcpStream, Error>`: verifies the server against `ca_pem`, as
+/// [`gos_rt_tcp_start_tls_ca`] does, and presents the client certificate
+/// `cert_pem` signed with `key_pem` to a server that asks for one (mutual
+/// TLS).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_tcp_start_tls_identity(
+    h: i64,
+    host: *const c_char,
+    ca_pem: *const c_char,
+    cert_pem: *const c_char,
+    key_pem: *const c_char,
+) -> i128 {
+    ffi_entry!({
+        // SAFETY: the three PEM strings are this shim's arguments, as
+        // `cstr_to_str` requires (C-ABI contract).
+        let (ca, cert, key) = unsafe {
+            (
+                cstr_to_str(ca_pem),
+                cstr_to_str(cert_pem),
+                cstr_to_str(key_pem),
+            )
+        };
+        let config = match tls_config_identity(ca.as_bytes(), cert.as_bytes(), key.as_bytes()) {
+            Ok(c) => c,
+            Err(e) => return tcp_err(&format!("io: start_tls_identity: {e}")),
+        };
+        // SAFETY: `host` is this shim's argument, null or a live string body (C-ABI contract).
+        unsafe { start_tls_with(h, host, config) }
+    })
+}
+
+/// A client config trusting `ca_pem` and presenting `cert_pem` / `key_pem`.
+fn tls_config_identity(
+    ca_pem: &[u8],
+    cert_pem: &[u8],
+    key_pem: &[u8],
+) -> Result<Arc<rustls::ClientConfig>, String> {
+    use rustls::pki_types::PrivateKeyDer;
+    let roots = ca_roots(ca_pem)?;
+    let certs = CertificateDer::pem_slice_iter(cert_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("parse client certificate: {e}"))?;
+    if certs.is_empty() {
+        return Err("no certificate in client certificate PEM".to_string());
+    }
+    let key =
+        PrivateKeyDer::from_pem_slice(key_pem).map_err(|e| format!("parse client key: {e}"))?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| format!("protocol versions: {e}"))?
+        .with_root_certificates(roots)
+        .with_client_auth_cert(certs, key)
+        .map_err(|e| format!("client identity: {e}"))?;
+    Ok(Arc::new(config))
+}
+
+/// The trust roots a PEM bundle holds, refusing one with none.
+fn ca_roots(ca_pem: &[u8]) -> Result<RootCertStore, String> {
     let mut roots = RootCertStore::empty();
-    let mut added = 0usize;
     for cert in CertificateDer::pem_slice_iter(ca_pem) {
         let cert = cert.map_err(|e| format!("parse CA: {e}"))?;
         roots.add(cert).map_err(|e| format!("add CA: {e}"))?;
-        added += 1;
     }
-    if added == 0 {
+    if roots.is_empty() {
         return Err("no certificates in CA PEM".to_string());
     }
+    Ok(roots)
+}
+
+fn tls_config_ca(ca_pem: &[u8]) -> Result<Arc<rustls::ClientConfig>, String> {
+    let roots = ca_roots(ca_pem)?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -665,6 +727,8 @@ pub extern "C" fn gos_rt_tcp_stream_read(h: i64, max: i64) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tcp_stream_read_into(h: i64, buf: *mut GosVec, max: i64) -> i128 {
     ffi_entry!({
+        // SAFETY: `buf` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(buf) };
         if buf.is_null() {
             return tcp_err("TcpStream::read_into: null buffer");
         }
@@ -909,103 +973,4 @@ pub extern "C" fn gos_rt_tcp_stream_close(h: i64) {
     ffi_entry!({
         retire_stream(key_id(h));
     });
-}
-
-/// `smtp::send(addr, from, to, subject, body)
-/// -> Result<(), errors::Error>` - one message, unauthenticated.
-#[cfg(not(target_arch = "wasm32"))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_smtp_send(
-    addr: *const c_char,
-    from: *const c_char,
-    to: *const c_char,
-    subject: *const c_char,
-    body: *const c_char,
-) -> i128 {
-    ffi_entry!({
-        // SAFETY: the five strings are this shim's arguments, each null or a live string body
-        // (C-ABI contract), which `smtp_send` accepts.
-        unsafe { smtp_send(addr, from, to, subject, body, None) }
-    })
-}
-
-/// `smtp::send_auth(addr, from, to, subject, body, username, password)
-/// -> Result<(), errors::Error>` - the shape a transactional mail provider
-/// takes. Credentials are only ever sent over TLS.
-#[cfg(not(target_arch = "wasm32"))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_smtp_send_auth(
-    addr: *const c_char,
-    from: *const c_char,
-    to: *const c_char,
-    subject: *const c_char,
-    body: *const c_char,
-    username: *const c_char,
-    password: *const c_char,
-) -> i128 {
-    ffi_entry!({
-        // SAFETY: `username` and `password` are this shim's arguments, each null or a live string
-        // body (C-ABI contract), which `cstr_or_empty` accepts.
-        let credentials = unsafe { (cstr_or_empty(username), cstr_or_empty(password)) };
-        // SAFETY: the five strings are this shim's arguments, each null or a live string body
-        // (C-ABI contract), which `smtp_send` accepts.
-        unsafe { smtp_send(addr, from, to, subject, body, Some(credentials)) }
-    })
-}
-
-/// The text of `p`, or empty for null.
-///
-/// # Safety
-/// `p` is null or a live string.
-#[cfg(not(target_arch = "wasm32"))]
-unsafe fn cstr_or_empty(p: *const c_char) -> String {
-    if p.is_null() {
-        String::new()
-    } else {
-        // SAFETY: this `unsafe fn`'s caller passes `p` live or null, which `gos_str_arg_string`
-        // accepts.
-        unsafe { crate::c_abi::gos_str_arg_string(p) }
-    }
-}
-
-/// Sends one message over SMTP to `addr`, logging in with `credentials` when given.
-///
-/// # Safety
-/// Each string argument is null or a live string.
-#[cfg(not(target_arch = "wasm32"))]
-unsafe fn smtp_send(
-    addr: *const c_char,
-    from: *const c_char,
-    to: *const c_char,
-    subject: *const c_char,
-    body: *const c_char,
-    credentials: Option<(String, String)>,
-) -> i128 {
-    // SAFETY: this `unsafe fn`'s caller passes each string null or live, which `cstr_or_empty`
-    // accepts.
-    let (addr, from, to, subject, body) = unsafe {
-        (
-            cstr_or_empty(addr),
-            cstr_or_empty(from),
-            cstr_or_empty(to),
-            cstr_or_empty(subject),
-            cstr_or_empty(body),
-        )
-    };
-    let message = crate::smtp::Message {
-        from: &from,
-        to: &to,
-        subject: &subject,
-        body: &body,
-    };
-    let credentials = credentials
-        .as_ref()
-        .map(|(username, password)| crate::smtp::Credentials { username, password });
-    match crate::smtp::send(&addr, &message, credentials.as_ref()) {
-        Ok(()) => crate::c_abi::result::pack_result(0, 0),
-        Err(message) => {
-            let err = crate::c_abi::errors::error_new_from_bytes(message.as_bytes());
-            crate::c_abi::result::pack_result(1, err as i64)
-        }
-    }
 }

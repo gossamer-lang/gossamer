@@ -1,0 +1,161 @@
+// A type with `impl Drop` is a shared handle: `let b = a` shares one value, a
+// write through either name is seen through both, and `drop` runs exactly
+// once, when the last reference goes, on every tier. An iterator left by
+// `break` releases its state there, as does a value an early `return` or `?`
+// leaves behind.
+use std::errors
+use std::sync::channel
+
+struct Tracker {
+    name: String
+    events: Vec<String>
+    hits: i64 = 0
+}
+
+impl Tracker {
+    fn new(name: String) -> Tracker {
+        Tracker { name: name, events: #[] }
+    }
+
+    fn record(&mut self, event: String) {
+        self.events.push(event)
+        self.hits += 1
+    }
+
+    fn summary(&self) -> String {
+        f"{self.name}: {self.events.len()} events, {self.hits} hits"
+    }
+}
+
+impl Drop for Tracker {
+    fn drop(&mut self) {
+        println(f"drop {self.summary()}")
+    }
+}
+
+struct Countdown {
+    left: i64
+}
+
+impl Iterator for Countdown {
+    type Item = i64
+
+    fn next(&mut self) -> Option<i64> {
+        if self.left == 0 {
+            return None
+        }
+        self.left -= 1
+        Some(self.left)
+    }
+}
+
+impl Drop for Countdown {
+    fn drop(&mut self) {
+        println(f"countdown dropped with {self.left} left")
+    }
+}
+
+fn fails(fail: bool) -> Result<i64, errors::Error> {
+    let mut t = Tracker::new("fallible")
+    t.record("start")
+    if fail {
+        Err(errors::new("boom"))?
+    }
+    t.record("finish")
+    Ok(t.hits)
+}
+
+fn tracking() {
+    let mut t = Tracker::new("main")
+    t.record("one")
+    let mut alias = t
+    alias.record("two")
+    println(t.summary())
+    let Tracker { name, hits, .. } = t
+    println(f"destructured {name} {hits}")
+    println(f"same {t == alias}")
+    println(f"fails {fails(true).is_err()}")
+    println(f"fails {fails(false).unwrap_or(-1)}")
+    for n in (Countdown { left: 5 }) {
+        if n == 2 {
+            println("breaking")
+            break
+        }
+        println(f"n {n}")
+    }
+    println("after loop")
+    let mut list = #[Tracker::new("v0"), Tracker::new("v1")]
+    list[1].record("in vec")
+    let _ = list.remove(0)
+    println("removed v0")
+    let mut m = { "k": Tracker::new("in map") }
+    if let Some(mut entry) = m.get("k") {
+        entry.record("via map")
+    }
+    if let Some(entry) = m.get("k") {
+        println(entry.summary())
+    }
+    let captured = Tracker::new("captured")
+    let show = || println(captured.summary())
+    show()
+    println("end of tracking")
+}
+struct Inner {
+    label: String
+    n: i64
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        println(f"drop inner {self.label} {self.n}")
+    }
+}
+
+struct Outer {
+    inner: Inner
+    tag: String
+}
+
+impl Drop for Outer {
+    fn drop(&mut self) {
+        println(f"drop outer {self.tag}")
+    }
+}
+
+fn nesting() {
+    let mut o = Outer { inner: Inner { label: "x", n: 1 }, tag: "o" }
+    o.inner.n += 41
+    println(f"{o.inner.n}")
+    println(f"{o}")
+    println(f"{o.inner:?}")
+    let tx, rx = channel()
+    let _ = cohort {
+        let worker = spawn(|| {
+            while let Some(item) = rx.recv() {
+                let held: Inner = item
+                println(f"worker has {held.label}")
+            }
+        })
+        tx.send(Inner { label: "sent", n: 0 })
+        tx.close()
+        let _ = worker.join()
+    }
+}
+
+struct Temp: Drop {
+    path: String
+
+    fn drop(&mut self) {
+        println(f"removing {self.path}")
+    }
+}
+
+fn main() {
+    tracking()
+    nesting()
+    {
+        let t = Temp { path: "scratch" }
+        println(f"made {t.path}")
+    }
+    println("end")
+}

@@ -2,182 +2,16 @@
 //! document's tape.
 //!
 //! A parsed document is read where it lies: the walk that checks it records
-//! each value's kind, span, and number in a [`Tape`], and every accessor
+//! each value's kind, span, and number in a [`gossamer_core::json::Tape`], and every accessor
 //! answers from that tape and the document text. Each read answers what the
 //! same read of the document's `serde_json::Value` answers: object members in
 //! key order with the last of equal keys kept, numbers as serde_json holds
 //! them.
 
 use std::borrow::Cow;
-use std::sync::OnceLock;
 
-use gossamer_core::json::{Tape, TapeKind, TapeNode};
-
-/// An object with at most this many members is searched in place; a larger
-/// one through its sorted member index.
-const SCAN_MEMBERS: u32 = 8;
-
-/// The key nodes of an object, in key order, the last of equal keys kept.
-type MemberIndex = OnceLock<Box<[u32]>>;
-
-/// An element below this index is reached by stepping from the first; one at
-/// or past it through the array's element index.
-const SCAN_ELEMENTS: u32 = 8;
-
-/// The element nodes of an array, in document order.
-type ElementIndex = OnceLock<Box<[u32]>>;
-
-/// A parsed document: its text, its tape, and each object's member index and
-/// each array's element index, built on first need.
-pub(crate) struct ParsedTape {
-    text: Box<str>,
-    tape: Tape,
-    /// One slot per object, the table itself made by the first read that
-    /// needs any index.
-    members: OnceLock<Box<[MemberIndex]>>,
-    /// One slot per array, made like `members`.
-    elements: OnceLock<Box<[ElementIndex]>>,
-}
-
-impl ParsedTape {
-    /// The document `text` read into `tape`.
-    pub(crate) fn new(text: &str, tape: Tape) -> Self {
-        Self {
-            text: text.into(),
-            tape,
-            members: OnceLock::new(),
-            elements: OnceLock::new(),
-        }
-    }
-
-    fn node(&self, index: u32) -> TapeNode {
-        self.tape.node(index)
-    }
-
-    /// The text of node `index`.
-    fn span(&self, index: u32) -> &str {
-        let node = self.node(index);
-        &self.text[node.start as usize..node.end() as usize]
-    }
-
-    /// The text of the string at node `index`, escapes resolved.
-    fn string(&self, index: u32) -> Cow<'_, str> {
-        let span = self.span(index);
-        let inner = &span[1..span.len() - 1];
-        match self.node(index).kind() {
-            TapeKind::StrEscaped => Cow::Owned(gossamer_core::json::unescape_string(inner)),
-            _ => Cow::Borrowed(inner),
-        }
-    }
-
-    /// Indices of the elements of the array at `index`, or of the members'
-    /// keys of the object at `index` (each value follows its key).
-    fn children(&self, index: u32) -> Children<'_> {
-        Children {
-            tape: &self.tape,
-            // The first child follows the container's word slot.
-            next: index + 2,
-            left: self.tape.count(index),
-            object: self.node(index).kind() == TapeKind::Object,
-        }
-    }
-
-    /// The key nodes of the object at `index`, in key order, the last of
-    /// equal keys kept.
-    fn members(&self, index: u32) -> &[u32] {
-        let Ok(ordinal) = self.tape.objects.binary_search(&index) else {
-            // Only an object has members.
-            return &[];
-        };
-        let table = self
-            .members
-            .get_or_init(|| self.tape.objects.iter().map(|_| OnceLock::new()).collect());
-        table[ordinal].get_or_init(|| {
-            let mut keyed: Vec<(Cow<'_, str>, u32)> = self
-                .children(index)
-                .map(|key| (self.string(key), key))
-                .collect();
-            // A stable sort leaves equal keys in document order, so the last
-            // of each run is the member a map keeps.
-            keyed.sort_by(|a, b| a.0.cmp(&b.0));
-            keyed
-                .iter()
-                .enumerate()
-                .filter(|&(i, (key, _))| keyed.get(i + 1).is_none_or(|next| next.0 != *key))
-                .map(|(_, &(_, node))| node)
-                .collect()
-        })
-    }
-
-    /// The node of element `at` of the array at `index`, which has more than
-    /// `at` elements.
-    fn element(&self, index: u32, at: u32) -> Option<u32> {
-        if at < SCAN_ELEMENTS {
-            return self.children(index).nth(at as usize);
-        }
-        let ordinal = self.tape.arrays.binary_search(&index).ok()?;
-        let table = self
-            .elements
-            .get_or_init(|| self.tape.arrays.iter().map(|_| OnceLock::new()).collect());
-        table[ordinal]
-            .get_or_init(|| self.children(index).collect())
-            .get(at as usize)
-            .copied()
-    }
-
-    /// The value of the member `key` of the object at `index`.
-    fn member(&self, index: u32, key: &str) -> Option<u32> {
-        if self.tape.count(index) <= SCAN_MEMBERS {
-            // The last of equal keys is the member, so every key is read.
-            let mut found = None;
-            for k in self.children(index) {
-                if self.string(k) == key {
-                    found = Some(k + 1);
-                }
-            }
-            return found;
-        }
-        let members = self.members(index);
-        members
-            .binary_search_by(|&k| self.string(k).as_ref().cmp(key))
-            .ok()
-            .map(|at| members[at] + 1)
-    }
-}
-
-/// The children [`ParsedTape::children`] walks: each element of an array, or
-/// each key of an object, skipping the value after it.
-struct Children<'t> {
-    tape: &'t Tape,
-    next: u32,
-    left: u32,
-    object: bool,
-}
-
-impl Iterator for Children<'_> {
-    type Item = u32;
-
-    // A step is two tape reads; a call per member would cost more than the
-    // step, and every object read walks its members.
-    #[inline]
-    fn next(&mut self) -> Option<u32> {
-        if self.left == 0 {
-            return None;
-        }
-        self.left -= 1;
-        let at = self.next;
-        self.next = self.tape.extent(at);
-        if self.object {
-            self.next = self.tape.extent(self.next);
-        }
-        Some(at)
-    }
-
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.left as usize, Some(self.left as usize))
-    }
-}
+pub(crate) use gossamer_core::json::ParsedTape;
+use gossamer_core::json::TapeKind;
 
 /// A JSON number as serde_json holds it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -262,9 +96,9 @@ impl<'a> JsonRef<'a> {
             Self::Tape(t, i) => {
                 let node = t.node(i);
                 match node.kind() {
-                    TapeKind::Int => Some(Num::Int(t.tape.word(i) as i64)),
-                    TapeKind::Uint => Some(Num::Uint(t.tape.word(i))),
-                    TapeKind::Float => Some(Num::Float(f64::from_bits(t.tape.word(i)))),
+                    TapeKind::Int => Some(Num::Int(t.tape().word(i) as i64)),
+                    TapeKind::Uint => Some(Num::Uint(t.tape().word(i))),
+                    TapeKind::Float => Some(Num::Float(f64::from_bits(t.tape().word(i)))),
                     _ => None,
                 }
             }
@@ -304,8 +138,8 @@ impl<'a> JsonRef<'a> {
             Self::Value(serde_json::Value::String(s)) => s.len(),
             Self::Value(_) => 0,
             Self::Tape(t, i) => match t.node(i).kind() {
-                TapeKind::Array => t.tape.count(i) as usize,
-                TapeKind::Object if t.tape.count(i) <= 1 => t.tape.count(i) as usize,
+                TapeKind::Array => t.tape().count(i) as usize,
+                TapeKind::Object if t.tape().count(i) <= 1 => t.tape().count(i) as usize,
                 TapeKind::Object => t.members(i).len(),
                 TapeKind::Str => t.span(i).len() - 2,
                 TapeKind::StrEscaped => t.string(i).len(),
@@ -331,7 +165,7 @@ impl<'a> JsonRef<'a> {
             Self::Value(v) => v.get(index).map(Self::Value),
             Self::Tape(t, i) if t.node(i).kind() == TapeKind::Array => {
                 let index = u32::try_from(index).ok()?;
-                if index >= t.tape.count(i) {
+                if index >= t.tape().count(i) {
                     return None;
                 }
                 t.element(i, index).map(|at| Self::Tape(t, at))
@@ -407,10 +241,12 @@ impl<'a> JsonRef<'a> {
                     TapeKind::Null => serde_json::Value::Null,
                     TapeKind::True => serde_json::Value::Bool(true),
                     TapeKind::False => serde_json::Value::Bool(false),
-                    TapeKind::Int => serde_json::Value::from(t.tape.word(i) as i64),
-                    TapeKind::Uint => serde_json::Value::from(t.tape.word(i)),
-                    TapeKind::Float => serde_json::Number::from_f64(f64::from_bits(t.tape.word(i)))
-                        .map_or(serde_json::Value::Null, serde_json::Value::Number),
+                    TapeKind::Int => serde_json::Value::from(t.tape().word(i) as i64),
+                    TapeKind::Uint => serde_json::Value::from(t.tape().word(i)),
+                    TapeKind::Float => {
+                        serde_json::Number::from_f64(f64::from_bits(t.tape().word(i)))
+                            .map_or(serde_json::Value::Null, serde_json::Value::Number)
+                    }
                     TapeKind::Str | TapeKind::StrEscaped => {
                         serde_json::Value::String(t.string(i).into_owned())
                     }

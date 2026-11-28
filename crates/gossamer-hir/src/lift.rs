@@ -836,7 +836,7 @@ impl Lifter<'_> {
         for (i, (cap, _)) in captures.iter().enumerate() {
             let cap_ty = capture_types[i];
             let this_offset = offset;
-            offset += if self.tcx.is_two_word_value(cap_ty) {
+            offset += if self.tcx.is_two_word_value(cap_ty) || self.tcx.is_wide_int(cap_ty) {
                 16
             } else {
                 8

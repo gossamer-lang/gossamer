@@ -87,6 +87,28 @@ fn declared_wrapper_names(wrappers: &str) -> impl Iterator<Item = &str> {
 /// `parsed` is the clean tree of `source`, or `None` when it did not parse
 /// cleanly; a tree built by error recovery answers for no import, and the
 /// parse diagnostics are that program's report.
+/// Wrapper sets injected when the program imports one of their names, or
+/// names one of the listed items of the std module they belong to.
+const MODULE_ITEM_WRAPPERS: &[(&str, &[&str], &str)] = &[
+    ("time", &["after"], TIME_TIMER_WRAPPERS),
+    ("image", &["decode", "set_max_pixels", "Image", "Rgba"], IMAGE_WRAPPERS),
+    ("netip", &["Prefix"], NETIP_PREFIX_WRAPPERS),
+    ("mail", &["parse_address", "parse_address_list", "Address"], MAIL_WRAPPERS),
+    ("json", &["Decoder"], JSON_DECODER_WRAPPERS),
+    ("json", &["entries"], JSON_ENTRIES_WRAPPERS),
+    ("tls", &["ServerConfig"], TLS_SERVER_CONFIG_WRAPPERS),
+    (
+        "net",
+        &["lookup_mx", "lookup_txt", "lookup_srv", "lookup_cname", "lookup_addr", "Mx", "Srv"],
+        NET_DNS_WRAPPERS,
+    ),
+    ("fs", &["chown", "disk_space", "DiskSpace"], FS_ADMIN_WRAPPERS),
+    ("sync", &["shield"], SYNC_SHIELD_WRAPPERS),
+    ("sync", &["with_timeout"], SYNC_TIMEOUT_WRAPPERS),
+    ("time", &["Ticker"], TIME_TICKER_WRAPPERS),
+    ("sync", &["Semaphore"], SYNC_SEMAPHORE_WRAPPERS),
+];
+
 fn synthesize_stdlib_wrappers(source: &str, parsed: Option<&SourceFile>) -> String {
     // A wrapper set declares top-level items, so it is injected only for a
     // module the source reached through `use std::...`: a project with its
@@ -113,50 +135,71 @@ fn synthesize_stdlib_wrappers(source: &str, parsed: Option<&SourceFile>) -> Stri
     };
 
     let mut stdlib_wrappers = String::new();
-    if (mentions_path(source, "pem::") && from_std("pem")) || item_imported(PEM_WRAPPERS) {
-        stdlib_wrappers.push_str(PEM_WRAPPERS);
-    }
-    if (mentions_path(source, "x509::") && from_std("x509")) || item_imported(X509_WRAPPERS) {
-        stdlib_wrappers.push_str(X509_WRAPPERS);
-    }
+    let by_path = |modules: &[(&str, &str)], out: &mut String| {
+        for (module, wrappers) in modules {
+            if (mentions_path(source, &format!("{module}::")) && from_std(module))
+                || item_imported(wrappers)
+            {
+                out.push_str(wrappers);
+            }
+        }
+    };
+    by_path(&[("pem", PEM_WRAPPERS), ("x509", X509_WRAPPERS)], &mut stdlib_wrappers);
     system_wrappers(source, &from_std, &item_imported, &mut stdlib_wrappers);
     if source.contains("Http2Config") {
         stdlib_wrappers.push_str(HTTP2_CONFIG_WRAPPERS);
     }
-    if (mentions_path(source, "tar::") && from_std("tar")) || item_imported(TAR_WRAPPERS) {
-        stdlib_wrappers.push_str(TAR_WRAPPERS);
-    }
-    if (mentions_path(source, "zip::") && from_std("zip")) || item_imported(ZIP_WRAPPERS) {
-        stdlib_wrappers.push_str(ZIP_WRAPPERS);
-    }
-    if (mentions_path(source, "sql::") && from_std("sql")) || item_imported(SQL_WRAPPERS) {
-        stdlib_wrappers.push_str(SQL_WRAPPERS);
-    }
+    by_path(
+        &[("tar", TAR_WRAPPERS), ("zip", ZIP_WRAPPERS), ("sql", SQL_WRAPPERS)],
+        &mut stdlib_wrappers,
+    );
     if HTTP_SECURITY_MARKERS.iter().any(|m| source.contains(m)) {
         stdlib_wrappers.push_str(HTTP_SECURITY_WRAPPERS);
     }
-    if item_imported(TIME_TIMER_WRAPPERS)
-        || (mentions_module_item(source, "time", "after") && from_std("time"))
-    {
-        stdlib_wrappers.push_str(TIME_TIMER_WRAPPERS);
+    for (module, items, wrappers) in MODULE_ITEM_WRAPPERS {
+        if item_imported(wrappers)
+            || (items.iter().any(|item| mentions_module_item(source, module, item))
+                && from_std(module))
+        {
+            stdlib_wrappers.push_str(wrappers);
+        }
     }
-    if item_imported(JSON_ENTRIES_WRAPPERS)
-        || (mentions_module_item(source, "json", "entries") && from_std("json"))
-    {
-        stdlib_wrappers.push_str(JSON_ENTRIES_WRAPPERS);
+    // Key agreement and key encapsulation answer the same `SharedSecret`, so
+    // its definition comes in once for either module.
+    let wants_ecdh = item_imported(ECDH_WRAPPERS)
+        || (["x25519_keypair", "x25519", "p256_keypair", "p256", "p384_keypair", "p384"].iter().any(|item| mentions_module_item(source, "ecdh", item))
+            && from_std("ecdh"));
+    let wants_mlkem = item_imported(MLKEM_WRAPPERS)
+        || (["keypair_768", "encapsulate_768", "decapsulate_768", "keypair_1024", "encapsulate_1024", "decapsulate_1024"].iter().any(|item| mentions_module_item(source, "mlkem", item))
+            && from_std("mlkem"));
+    if wants_ecdh || wants_mlkem || item_imported(SHARED_SECRET_WRAPPERS) {
+        stdlib_wrappers.push_str(SHARED_SECRET_WRAPPERS);
     }
-    if item_imported(SYNC_SHIELD_WRAPPERS)
-        || (mentions_module_item(source, "sync", "shield") && from_std("sync"))
-    {
-        stdlib_wrappers.push_str(SYNC_SHIELD_WRAPPERS);
+    if wants_ecdh {
+        stdlib_wrappers.push_str(ECDH_WRAPPERS);
     }
-    if item_imported(SYNC_TIMEOUT_WRAPPERS)
-        || (mentions_module_item(source, "sync", "with_timeout") && from_std("sync"))
+    if wants_mlkem {
+        stdlib_wrappers.push_str(MLKEM_WRAPPERS);
+    }
+    // The two template modules share the leaf name `template`, so both come in
+    // whichever one the program reaches.
+    if item_imported(TEMPLATE_WRAPPERS)
+        || (["text_template", "html_template"].iter().any(|m| from_std(m))
+            && mentions_path(source, "template::"))
+        || (mentions_path(source, "text::template::") && from_std("text"))
+        || (mentions_path(source, "html::template::") && from_std("html"))
     {
-        stdlib_wrappers.push_str(SYNC_TIMEOUT_WRAPPERS);
+        stdlib_wrappers.push_str(TEMPLATE_WRAPPERS);
+    }
+    if item_imported(JSON_DUPLICATE_KEYS_WRAPPERS)
+        || ((source.contains("DuplicateKeys") || source.contains("duplicate_keys"))
+            && (from_std("json") || from_std("yaml")))
+    {
+        stdlib_wrappers.push_str(JSON_DUPLICATE_KEYS_WRAPPERS);
     }
     let wants_time = item_imported(TIME_TIME_WRAPPERS)
-        || (mentions_path(source, "time::Time") && from_std("time"));
+        || ((mentions_path(source, "time::Time") || mentions_module_item(source, "time", "parse"))
+            && from_std("time"));
     if wants_time
         || item_imported(TIME_CIVIL_WRAPPERS)
         || (TIME_CIVIL_MARKERS.iter().any(|marker| source.contains(marker))
@@ -174,14 +217,18 @@ fn synthesize_stdlib_wrappers(source: &str, parsed: Option<&SourceFile>) -> Stri
 /// The standard module each name the wrapper sources call through stands for.
 const WRAPPER_MODULES: &[(&str, &str)] = &[
     ("big", "std::math::big"),
+    ("context", "std::context"),
+    ("crypto", "std::crypto"),
     ("errors", "std::errors"),
     ("fd", "std::os::fd"),
     ("ffi", "std::ffi"),
     ("fs", "std::fs"),
+    ("hex", "std::encoding::hex"),
     ("http", "std::http"),
     ("json", "std::encoding::json"),
     ("path", "std::path"),
     ("process", "std::process"),
+    ("rand", "std::math::rand"),
     ("runtime", "std::runtime"),
     ("signal", "std::os::signal"),
     ("strings", "std::strings"),
@@ -209,7 +256,9 @@ fn wrapper_module_paths(generated: &str, parsed: &SourceFile) -> Vec<&'static st
 fn program_binds(parsed: &SourceFile, name: &str) -> bool {
     use gossamer_ast::{ItemKind, UseTarget};
 
-    let imported = parsed.uses.iter().any(|decl| {
+    // An import inside an inline module binds the name there only, while the
+    // generated source sits at the file root.
+    let imported = parsed.uses.iter().filter(|decl| decl.module.is_empty()).any(|decl| {
         if let Some(entries) = &decl.list {
             return entries.iter().any(|entry| {
                 entry.alias.as_ref().map_or(entry.name.name.as_str(), |alias| alias.name.as_str())
@@ -251,7 +300,16 @@ fn system_wrappers(
     if (source.contains("fs::metadata") && from_std("fs")) || item_imported(FS_METADATA_WRAPPERS) {
         out.push_str(FS_METADATA_WRAPPERS);
     }
-    if (source.contains("fs::temp_dir") && from_std("fs")) || item_imported(FS_TEMP_DIR_WRAPPERS) {
+    // `fs::TempDir` and `fs::TempFile` make theirs through `fs::temp_dir` and
+    // `fs::temp_file`.
+    if ((source.contains("fs::temp_dir")
+        || source.contains("fs::temp_file")
+        || source.contains("fs::TempDir")
+        || source.contains("fs::TempFile"))
+        && from_std("fs"))
+        || item_imported(FS_TEMP_DIR_WRAPPERS)
+        || item_imported(TEMP_PATH_WRAPPERS)
+    {
         out.push_str(FS_TEMP_DIR_WRAPPERS);
     }
     if item_imported(FS_DIR_WRAPPERS)
@@ -262,11 +320,11 @@ fn system_wrappers(
     }
     let wants_command = item_imported(PROCESS_COMMAND_WRAPPERS)
         || (PROCESS_COMMAND_MARKERS.iter().any(|m| source.contains(m))
-            && (from_std("process") || from_std("exec")));
+            && from_std("process"));
     if wants_command
         || item_imported(PROCESS_WRAPPERS)
         || (PROCESS_MARKERS.iter().any(|m| source.contains(m))
-            && (from_std("process") || from_std("exec")))
+            && from_std("process"))
     {
         out.push_str(PROCESS_WRAPPERS);
     }
@@ -297,6 +355,19 @@ fn system_wrappers(
     {
         out.push_str(SIGNAL_WRAPPERS);
     }
+    value_type_wrappers(source, from_std, item_imported, out);
+}
+
+/// The wrapper sets for standard value types and numeric helpers written in
+/// Gossamer: mutex guards, paths, the extra collections, buffered I/O,
+/// decimals, shell quoting, statistics, random helpers, complex numbers, and
+/// self-removing temporary paths.
+fn value_type_wrappers(
+    source: &str,
+    from_std: &impl Fn(&str) -> bool,
+    item_imported: &impl Fn(&str) -> bool,
+    out: &mut String,
+) {
     if source.contains("Mutex") && source.contains("lock") {
         out.push_str(MUTEX_GUARD_WRAPPERS);
     }
@@ -323,12 +394,113 @@ fn system_wrappers(
     {
         out.push_str(BUFIO_READER_WRAPPERS);
     }
+    let rational = (mentions_path(source, "math::Rational") && from_std("math"))
+        || item_imported(RATIONAL_WRAPPERS);
+    // `Rational::from_decimal` reads a `Decimal`, so one brings the other.
     if (mentions_path(source, "math::Decimal") && from_std("math"))
         || item_imported(DECIMAL_WRAPPERS)
+        || rational
     {
         out.push_str(DECIMAL_WRAPPERS);
     }
+    if rational {
+        out.push_str(RATIONAL_WRAPPERS);
+    }
+    let math_calls = |names: &[&str]| {
+        from_std("math") && names.iter().any(|name| mentions_module_item(source, "math", name))
+    };
+    if (from_std("strings")
+        && ["shell_split", "shell_quote", "shell_join"]
+            .iter()
+            .any(|name| mentions_module_item(source, "strings", name)))
+        || item_imported(STRINGS_SHELL_WRAPPERS)
+    {
+        out.push_str(STRINGS_SHELL_WRAPPERS);
+    }
+    if math_calls(&["mean", "median", "variance", "stdev", "pvariance", "pstdev", "quantiles"])
+        || item_imported(MATH_STATS_WRAPPERS)
+    {
+        out.push_str(MATH_STATS_WRAPPERS);
+    }
+    if math_calls(&["erf", "erfc", "gamma", "lgamma", "factorial", "comb", "perm"])
+        || item_imported(MATH_SPECIAL_WRAPPERS)
+    {
+        out.push_str(MATH_SPECIAL_WRAPPERS);
+    }
+    let rand_names = [
+        "range", "range_f64", "chance", "choose", "shuffle", "sample", "weighted", "normal",
+        "exponential", "from_os",
+    ];
+    if (from_std("rand") && rand_names.iter().any(|name| mentions_module_item(source, "rand", name)))
+        || item_imported(MATH_RAND_WRAPPERS)
+    {
+        out.push_str(MATH_RAND_WRAPPERS);
+    }
+    if math_calls(&["Complex"]) || item_imported(MATH_COMPLEX_WRAPPERS) {
+        out.push_str(MATH_COMPLEX_WRAPPERS);
+    }
+    if ((mentions_path(source, "fs::TempDir") || mentions_path(source, "fs::TempFile"))
+        && from_std("fs"))
+        || item_imported(TEMP_PATH_WRAPPERS)
+    {
+        out.push_str(TEMP_PATH_WRAPPERS);
+    }
 }
+
+/// `fs::TempDir` and `fs::TempFile`: a fresh folder or file that removes
+/// itself when the last reference to it goes, as Python's `tempfile` and
+/// Rust's `tempfile` crate do. Each is a drop type, so a copy shares the
+/// one path, an early `return` or `?` still removes it, and `keep()` leaves
+/// it in place and answers its path.
+const TEMP_PATH_WRAPPERS: &str = r"
+struct __gos_fs_TempDir: Drop {
+    path: String
+    kept: bool = false
+
+    fn new(prefix: String, parent: Option<String> = None) -> Result<__gos_fs_TempDir, errors::Error> {
+        let path = fs::temp_dir(prefix, parent: parent)?
+        Ok(__gos_fs_TempDir { path: path })
+    }
+
+    fn path(&self) -> String { self.path }
+
+    fn join(&self, name: String) -> String { path::join(self.path, name) }
+
+    fn keep(&mut self) -> String {
+        self.kept = true
+        self.path
+    }
+
+    fn drop(&mut self) {
+        if !self.kept { let _ = fs::remove_dir_all(self.path) }
+    }
+}
+
+struct __gos_fs_TempFile: Drop {
+    path: String
+    file: fs::File
+    kept: bool = false
+
+    fn new(prefix: String, parent: Option<String> = None) -> Result<__gos_fs_TempFile, errors::Error> {
+        let file, path = fs::temp_file(prefix, parent: parent)?
+        Ok(__gos_fs_TempFile { path: path, file: file })
+    }
+
+    fn path(&self) -> String { self.path }
+
+    fn file(&self) -> fs::File { self.file }
+
+    fn keep(&mut self) -> String {
+        self.kept = true
+        self.path
+    }
+
+    fn drop(&mut self) {
+        let _ = self.file.close()
+        if !self.kept { let _ = fs::remove_file(self.path) }
+    }
+}
+";
 
 /// `math::Decimal`: an exact decimal number, `mantissa / 10^scale`, written
 /// in ordinary Gossamer over `math::big::Int` so it behaves the same on every
@@ -470,6 +642,151 @@ impl Display for __gos_math_Decimal {
         while padded.len() <= self.scale { padded = "0" + padded }
         let point = padded.len() - self.scale
         f"{sign}{padded.substring(0, point)}.{padded.substring(point, padded.len())}"
+    }
+}
+"#;
+
+/// `math::Rational`: an exact ratio of two `math::big::Int`s, written in
+/// ordinary Gossamer like `Decimal`. The value is kept in lowest terms with a
+/// positive denominator, so equal numbers are equal structurally; its parts
+/// grow without bound under arithmetic. A zero denominator panics as integer
+/// division by zero does. The float conversions are runtime leaves: the exact
+/// value of an `f64`, and the nearest `f64`, ties to even.
+const RATIONAL_WRAPPERS: &str = r#"
+struct __gos_math_Rational {
+    __num: big::Int
+    __den: big::Int
+}
+
+fn __gos_math_rational_of(num: big::Int, den: big::Int) -> __gos_math_Rational {
+    let zero = big::int_from_i64(0)
+    if den == zero { panic("divide by zero") }
+    if num == zero { return __gos_math_Rational { __num: zero, __den: big::int_from_i64(1) } }
+    let g = big::int_gcd(num, den)
+    let mut n = num / g
+    let mut d = den / g
+    if d < zero {
+        n = -n
+        d = -d
+    }
+    __gos_math_Rational { __num: n, __den: d }
+}
+
+fn __gos_math_rational_digits(text: String) -> bool {
+    if text.is_empty() { return false }
+    for c in text {
+        if c < '0' || c > '9' { return false }
+    }
+    true
+}
+
+impl __gos_math_Rational {
+    fn new(numerator: big::Int, denominator: big::Int) -> __gos_math_Rational {
+        __gos_math_rational_of(numerator, denominator)
+    }
+
+    fn from_i64(value: i64) -> __gos_math_Rational {
+        __gos_math_Rational { __num: big::int_from_i64(value), __den: big::int_from_i64(1) }
+    }
+
+    fn from_int(value: big::Int) -> __gos_math_Rational {
+        __gos_math_Rational { __num: value, __den: big::int_from_i64(1) }
+    }
+
+    fn from_decimal(value: __gos_math_Decimal) -> __gos_math_Rational {
+        __gos_math_rational_of(value.mantissa, __gos_math_decimal_ten_pow(value.scale))
+    }
+
+    fn from_f64(value: f64) -> Result<__gos_math_Rational, errors::Error> {
+        let num, den = __gos_rational_from_f64_raw(value)?
+        Ok(__gos_math_Rational { __num: big::int_from_str(num)?, __den: big::int_from_str(den)? })
+    }
+
+    fn parse(text: String) -> Result<__gos_math_Rational, errors::Error> {
+        let trimmed = text.trim()
+        let parts = trimmed.split("/")
+        if parts.len() == 1 {
+            return match __gos_math_Decimal::parse(trimmed) {
+                Ok(value) => Ok(__gos_math_Rational::from_decimal(value)),
+                Err(_) => Err(errors::new(f"invalid rational: {text}")),
+            }
+        }
+        let head = parts[0]
+        let unsigned = if head.starts_with("-") || head.starts_with("+") { head.substring(1, head.byte_len()) } else { head }
+        if parts.len() != 2 || !__gos_math_rational_digits(unsigned) || !__gos_math_rational_digits(parts[1]) {
+            return Err(errors::new(f"invalid rational: {text}"))
+        }
+        let den = big::int_from_str(parts[1])?
+        if den == big::int_from_i64(0) {
+            return Err(errors::new(f"invalid rational: {text} has a zero denominator"))
+        }
+        Ok(__gos_math_rational_of(big::int_from_str(head)?, den))
+    }
+
+    fn numerator(&self) -> big::Int { self.__num }
+
+    fn denominator(&self) -> big::Int { self.__den }
+
+    fn to_f64(&self) -> f64 {
+        let text = match __gos_rational_to_f64_raw(big::int_to_str(self.__num), big::int_to_str(self.__den)) {
+            Ok(text) => text,
+            Err(e) => panic(f"rational: a reduced ratio answered {e}"),
+        }
+        if text == "inf" { return f64::INFINITY }
+        if text == "-inf" { return -f64::INFINITY }
+        match text.to_f64() {
+            Some(value) => value,
+            None => panic(f"rational: the runtime answered {text}"),
+        }
+    }
+
+    fn is_zero(&self) -> bool { self.__num == big::int_from_i64(0) }
+
+    fn is_integer(&self) -> bool { self.__den == big::int_from_i64(1) }
+
+    fn abs(&self) -> __gos_math_Rational { __gos_math_Rational { __num: big::int_abs(self.__num), __den: self.__den } }
+
+    fn recip(&self) -> __gos_math_Rational { __gos_math_rational_of(self.__den, self.__num) }
+}
+
+impl Add for __gos_math_Rational {
+    fn add(self, o: __gos_math_Rational) -> __gos_math_Rational {
+        __gos_math_rational_of(self.__num * o.__den + o.__num * self.__den, self.__den * o.__den)
+    }
+}
+
+impl Sub for __gos_math_Rational {
+    fn sub(self, o: __gos_math_Rational) -> __gos_math_Rational {
+        __gos_math_rational_of(self.__num * o.__den - o.__num * self.__den, self.__den * o.__den)
+    }
+}
+
+impl Mul for __gos_math_Rational {
+    fn mul(self, o: __gos_math_Rational) -> __gos_math_Rational {
+        __gos_math_rational_of(self.__num * o.__num, self.__den * o.__den)
+    }
+}
+
+impl Div for __gos_math_Rational {
+    fn div(self, o: __gos_math_Rational) -> __gos_math_Rational {
+        __gos_math_rational_of(self.__num * o.__den, self.__den * o.__num)
+    }
+}
+
+impl Neg for __gos_math_Rational {
+    fn neg(self) -> __gos_math_Rational { __gos_math_Rational { __num: -self.__num, __den: self.__den } }
+}
+
+impl Ord for __gos_math_Rational {
+    fn cmp(&self, other: __gos_math_Rational) -> i64 {
+        big::int_cmp(self.__num * other.__den, other.__num * self.__den)
+    }
+}
+
+impl Display for __gos_math_Rational {
+    fn fmt(&self) -> String {
+        if self.__den == big::int_from_i64(1) { return big::int_to_str(self.__num) }
+        f"{big::int_to_str(self.__num)}/{big::int_to_str(self.__den)}"
     }
 }
 "#;
@@ -682,19 +999,6 @@ impl __gos_collections_BitSet {
 /// already wired and must not drag the wrappers (and their `use`s) into
 /// programs that only touch them.
 const HTTP_SECURITY_MARKERS: &[&str] = &[
-    "csrf::Config",
-    "csrf::config",
-    "csrf::check",
-    "csrf::extract_token",
-    "csrf::attach_cookie",
-    "csrf::origin_allowed",
-    "csrf::RouteAuth",
-    "session::signed",
-    "session::encrypted",
-    "session::with_session",
-    "session::save",
-    "session::load",
-    "session::Store",
     "form::Form",
     "form::parse",
     "multipart::parse",
@@ -745,6 +1049,711 @@ fn __gos_time_after(d: time::Duration) -> Receiver<i64> {
 /// value is the cohort's outcome - has no room for. `on_error` is `Log`
 /// (`1`) for the same reason: `f`'s value is the answer, so a child `f`
 /// spawned is named on stderr where it fails rather than silently dropped.
+/// `std::tls::ServerConfig`: a live TLS server configuration in the
+/// runtime's registry, which `http::serve_tls_config` reads for each
+/// connection, so `reload` and `add_sni` reach the next handshake. Its last
+/// reference gives the registry entry back; a running server keeps the
+/// configuration it holds.
+const TLS_SERVER_CONFIG_WRAPPERS: &str = r#"
+struct __gos_tls_ServerConfig {
+    __id: i64,
+}
+
+impl __gos_tls_ServerConfig {
+    fn new(cert_pem: String, key_pem: String, client_ca: Option<String> = None, client_auth_optional: bool = false) -> Result<__gos_tls_ServerConfig, errors::Error> {
+        let has_ca, ca = match client_ca {
+            Some(pem) => (1, pem),
+            None => (0, ""),
+        }
+        let optional = if client_auth_optional { 1 } else { 0 }
+        let id = __gos_tls_server_config_new_raw(cert_pem, key_pem, has_ca, ca, optional)?
+        Ok(__gos_tls_ServerConfig { __id: id })
+    }
+
+    fn add_sni(&self, host: String, cert_pem: String, key_pem: String) -> Result<(), errors::Error> {
+        __gos_tls_server_config_add_sni_raw(self.__id, host, cert_pem, key_pem)
+    }
+
+    fn reload(&self, cert_pem: String, key_pem: String) -> Result<(), errors::Error> {
+        __gos_tls_server_config_reload_raw(self.__id, cert_pem, key_pem)
+    }
+
+    fn id(&self) -> i64 {
+        self.__id
+    }
+}
+
+impl Drop for __gos_tls_ServerConfig {
+    fn drop(&mut self) {
+        let _ = __gos_tls_server_config_release_raw(self.__id)
+    }
+}
+"#;
+
+/// `std::net` DNS record lookups over the runtime's stub resolver, which
+/// answers each record's text fields flattened; these fold them into records.
+/// `server:` names a nameserver (`host` or `host:port`) in place of the
+/// system's.
+const NET_DNS_WRAPPERS: &str = r#"
+struct __gos_net_Mx {
+    host: String,
+    preference: i64,
+}
+
+struct __gos_net_Srv {
+    target: String,
+    port: i64,
+    priority: i64,
+    weight: i64,
+}
+
+fn __gos_net_dns_number(field: String) -> Result<i64, errors::Error> {
+    match field.to_i64() {
+        Some(n) => Ok(n),
+        None => Err(errors::new(format("dns: `{}` is not a number", field))),
+    }
+}
+
+fn __gos_net_lookup_mx(name: String, server: Option<String> = None) -> Result<Vec<__gos_net_Mx>, errors::Error> {
+    let fields = __gos_net_dns_raw(name, 15, server.unwrap_or(""))?
+    let mut records: Vec<__gos_net_Mx> = Vec::with_capacity(fields.len() / 2)
+    let mut at = 0
+    while at + 1 < fields.len() {
+        records.push(__gos_net_Mx { host: fields[at + 1], preference: __gos_net_dns_number(fields[at])? })
+        at += 2
+    }
+    records.sort_by_key(|r| r.preference)
+    Ok(records)
+}
+
+fn __gos_net_lookup_srv(name: String, server: Option<String> = None) -> Result<Vec<__gos_net_Srv>, errors::Error> {
+    let fields = __gos_net_dns_raw(name, 33, server.unwrap_or(""))?
+    let mut records: Vec<__gos_net_Srv> = Vec::with_capacity(fields.len() / 4)
+    let mut at = 0
+    while at + 3 < fields.len() {
+        records.push(__gos_net_Srv {
+            target: fields[at + 3],
+            port: __gos_net_dns_number(fields[at + 2])?,
+            priority: __gos_net_dns_number(fields[at])?,
+            weight: __gos_net_dns_number(fields[at + 1])?,
+        })
+        at += 4
+    }
+    records.sort_by_key(|r| r.priority)
+    Ok(records)
+}
+
+fn __gos_net_lookup_txt(name: String, server: Option<String> = None) -> Result<Vec<String>, errors::Error> {
+    __gos_net_dns_raw(name, 16, server.unwrap_or(""))
+}
+
+fn __gos_net_lookup_cname(name: String, server: Option<String> = None) -> Result<String, errors::Error> {
+    let fields = __gos_net_dns_raw(name, 5, server.unwrap_or(""))?
+    match fields.first() {
+        Some(target) => Ok(target),
+        None => Err(errors::new(format("dns: {} has no CNAME record", name))),
+    }
+}
+
+fn __gos_net_lookup_addr(ip: String, server: Option<String> = None) -> Result<Vec<String>, errors::Error> {
+    __gos_net_dns_raw(ip, 12, server.unwrap_or(""))
+}
+"#;
+
+/// `std::fs::chown` and `std::fs::disk_space`: an owner change whose two ids
+/// are each optional, and a filesystem's space as a struct, over the
+/// runtime's `gos_rt_fs_chown_raw` / `gos_rt_fs_disk_space_raw` leaves.
+const FS_ADMIN_WRAPPERS: &str = r"
+struct __gos_fs_DiskSpace {
+    total: i64,
+    free: i64,
+    available: i64,
+}
+
+fn __gos_fs_disk_space(path: String) -> Result<__gos_fs_DiskSpace, errors::Error> {
+    let total, free, available = __gos_fs_disk_space_raw(path)?
+    Ok(__gos_fs_DiskSpace { total: total, free: free, available: available })
+}
+
+fn __gos_fs_chown(path: String, uid: Option<i64> = None, gid: Option<i64> = None) -> Result<(), errors::Error> {
+    let set_uid, uid_value = match uid {
+        Some(id) => (1, id),
+        None => (0, 0),
+    }
+    let set_gid, gid_value = match gid {
+        Some(id) => (1, id),
+        None => (0, 0),
+    }
+    __gos_fs_chown_raw(path, set_uid, uid_value, set_gid, gid_value)
+}
+";
+
+/// `std::encoding::json::DuplicateKeys`: what a key an object (or a YAML
+/// mapping) repeats reads as. A call's `duplicate_keys:` argument reaches the
+/// runtime as the policy's index, through `__gos_json_duplicate_index`.
+const JSON_DUPLICATE_KEYS_WRAPPERS: &str = r"
+enum __gos_json_DuplicateKeys {
+    Error,
+    UseFirst,
+    UseLast,
+}
+
+fn __gos_json_duplicate_index(keys: __gos_json_DuplicateKeys) -> i64 {
+    match keys {
+        __gos_json_DuplicateKeys::Error => 0,
+        __gos_json_DuplicateKeys::UseFirst => 1,
+        __gos_json_DuplicateKeys::UseLast => 2,
+    }
+}
+";
+
+/// `std::net::mail`: an RFC 5322 / MIME message read by the runtime's parser
+/// and answered as JSON the typed decode reads into these types, so every
+/// tier parses one way.
+const MAIL_WRAPPERS: &str = r#"
+struct __gos_mail_Address {
+    name: String
+    email: String
+}
+
+impl Display for __gos_mail_Address {
+    fn fmt(&self) -> String {
+        let email = __gos_mail_addr_spec(self.email)
+        if self.name.is_empty() { email } else { f"{__gos_mail_display_name(self.name)} <{email}>" }
+    }
+}
+
+fn __gos_mail_is_alnum(c: char) -> bool {
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+fn __gos_mail_is_atext(c: char) -> bool {
+    __gos_mail_is_alnum(c) || "!#$%&'*+-/=?^_`{|}~".contains(c.to_string())
+}
+
+fn __gos_mail_quote(text: String) -> String {
+    let mut quoted = "\""
+    for c in text {
+        if c == '"' || c == '\\' { quoted += "\\" }
+        quoted += c.to_string()
+    }
+    quoted + "\""
+}
+
+fn __gos_mail_display_name(name: String) -> String {
+    let mut printable = true
+    let mut plain = true
+    for c in name {
+        let code = c as u32
+        if code < 32 || code > 126 {
+            printable = false
+        } else if !(c == ' ' || __gos_mail_is_atext(c)) {
+            plain = false
+        }
+    }
+    if !printable { return __gos_mail_encoded_words(name) }
+    if plain && !name.starts_with(" ") && !name.ends_with(" ") && !name.contains("  ") { return name }
+    __gos_mail_quote(name)
+}
+
+fn __gos_mail_encoded_words(text: String) -> String {
+    let mut words: Vec<String> = #[]
+    let mut payload = ""
+    for c in text {
+        let piece = if __gos_mail_is_alnum(c) || c == '!' || c == '*' || c == '+' || c == '-' || c == '/' {
+            c.to_string()
+        } else if c == ' ' {
+            "_"
+        } else {
+            let mut hex = ""
+            for b in c.to_string().bytes() { hex += f"={b:02x}".to_uppercase() }
+            hex
+        }
+        if payload.byte_len() + piece.byte_len() > 63 {
+            words.push(f"=?utf-8?q?{payload}?=")
+            payload = ""
+        }
+        payload += piece
+    }
+    words.push(f"=?utf-8?q?{payload}?=")
+    words.join(" ")
+}
+
+fn __gos_mail_is_dot_atom(text: String) -> bool {
+    if text.is_empty() || text.starts_with(".") || text.ends_with(".") || text.contains("..") { return false }
+    for c in text {
+        if !(c == '.' || __gos_mail_is_atext(c) || c as u32 > 127) { return false }
+    }
+    true
+}
+
+fn __gos_mail_addr_spec(email: String) -> String {
+    let Some((local, domain)) = email.rsplit_once("@") else { return email }
+    if __gos_mail_is_dot_atom(local) { email } else { f"{__gos_mail_quote(local)}@{domain}" }
+}
+
+fn __gos_mail_parse_address(text: String) -> Result<__gos_mail_Address, errors::Error> {
+    json::decode::<__gos_mail_Address>(__gos_mail_address_raw(text)?)
+}
+
+fn __gos_mail_parse_address_list(text: String) -> Result<Vec<__gos_mail_Address>, errors::Error> {
+    json::decode::<Vec<__gos_mail_Address>>(__gos_mail_address_list_raw(text)?)
+}
+"#;
+
+/// `std::net::netip::Prefix`, after Go's `netip.Prefix`: an address kept as
+/// written and a length, over the runtime's address arithmetic. Addresses go
+/// out lazily, so even an IPv6 /64 iterates.
+const NETIP_PREFIX_WRAPPERS: &str = r#"
+struct __gos_netip_Prefix {
+    __addr: String,
+    __bits: i64,
+}
+
+impl __gos_netip_Prefix {
+    fn parse(text: String) -> Result<__gos_netip_Prefix, errors::Error> {
+        let addr, bits = __gos_netip_prefix_raw(text)?
+        Ok(__gos_netip_Prefix { __addr: addr, __bits: bits })
+    }
+    fn addr(&self) -> String {
+        self.__addr
+    }
+    fn bits(&self) -> i64 {
+        self.__bits
+    }
+    fn is_v4(&self) -> bool {
+        !self.__addr.contains(":")
+    }
+    fn masked(&self) -> __gos_netip_Prefix {
+        __gos_netip_Prefix { __addr: __gos_netip_prefix_at(0, self.__addr, self.__bits), __bits: self.__bits }
+    }
+    fn first(&self) -> String {
+        __gos_netip_prefix_at(1, self.__addr, self.__bits)
+    }
+    fn last(&self) -> String {
+        __gos_netip_prefix_at(2, self.__addr, self.__bits)
+    }
+    fn contains(&self, addr: String) -> bool {
+        match __gos_netip_prefix_contains_raw(self.__addr, self.__bits, addr) {
+            Ok(inside) => inside,
+            Err(_) => false,
+        }
+    }
+    fn overlaps(&self, other: __gos_netip_Prefix) -> bool {
+        match __gos_netip_prefix_overlaps_raw(self.__addr, self.__bits, other.__addr, other.__bits) {
+            Ok(shared) => shared,
+            Err(_) => false,
+        }
+    }
+    fn addresses(&self) -> __gos_netip_PrefixAddresses {
+        __gos_netip_PrefixAddresses { __next: self.first(), __last: self.last(), __done: false }
+    }
+}
+
+impl Display for __gos_netip_Prefix {
+    fn fmt(&self) -> String {
+        f"{self.__addr}/{self.__bits}"
+    }
+}
+
+fn __gos_netip_prefix_at(op: i64, addr: String, bits: i64) -> String {
+    match __gos_netip_prefix_op_raw(op, addr, bits) {
+        Ok(text) => text,
+        Err(e) => panic(f"netip: a parsed prefix answered {e}"),
+    }
+}
+
+struct __gos_netip_PrefixAddresses {
+    __next: String,
+    __last: String,
+    __done: bool,
+}
+
+impl Iterator for __gos_netip_PrefixAddresses {
+    type Item = String
+    fn next(&mut self) -> Option<String> {
+        if self.__done {
+            return None
+        }
+        let current = self.__next
+        if current == self.__last {
+            self.__done = true
+        } else {
+            self.__next = __gos_netip_prefix_at(3, current, 0)
+        }
+        Some(current)
+    }
+}
+"#;
+
+/// `crypto::ecdh::SharedSecret` / `crypto::mlkem::SharedSecret`: the secret a
+/// key agreement or an encapsulation produces. Its main path is a key derived
+/// through HKDF; the bytes themselves come only through `raw_bytes()`, and
+/// printing one shows no bytes.
+const SHARED_SECRET_WRAPPERS: &str = r#"
+struct __gos_crypto_SharedSecret {
+    __bytes: Vec<u8>,
+}
+
+impl __gos_crypto_SharedSecret {
+    fn hkdf_sha256(&self, salt: Vec<u8>, info: Vec<u8>, length: i64) -> Result<Vec<u8>, errors::Error> {
+        crypto::kdf::hkdf_sha256(self.__bytes, salt, info, length)
+    }
+    fn hkdf_sha384(&self, salt: Vec<u8>, info: Vec<u8>, length: i64) -> Result<Vec<u8>, errors::Error> {
+        crypto::kdf::hkdf_sha384(self.__bytes, salt, info, length)
+    }
+    fn raw_bytes(&self) -> Vec<u8> {
+        self.__bytes
+    }
+}
+
+impl Display for __gos_crypto_SharedSecret {
+    fn fmt(&self) -> String {
+        "SharedSecret(..)"
+    }
+}
+
+impl Debug for __gos_crypto_SharedSecret {
+    fn fmt(&self) -> String {
+        "SharedSecret(..)"
+    }
+}
+"#;
+
+/// `crypto::ecdh`: X25519, P-256, and P-384 key agreement over the runtime's
+/// leaves, which refuse a peer key off the curve and an all-zero X25519 result.
+const ECDH_WRAPPERS: &str = r"
+fn __gos_ecdh_x25519_keypair() -> Result<(Vec<u8>, Vec<u8>), errors::Error> {
+    let secret, public = __gos_ecdh_keypair_raw(0)?
+    Ok((secret, public))
+}
+
+fn __gos_ecdh_x25519(secret: Vec<u8>, peer_public: Vec<u8>) -> Result<__gos_crypto_SharedSecret, errors::Error> {
+    Ok(__gos_crypto_SharedSecret { __bytes: __gos_ecdh_agree_raw(0, secret, peer_public)? })
+}
+
+fn __gos_ecdh_p256_keypair() -> Result<(Vec<u8>, Vec<u8>), errors::Error> {
+    let secret, public = __gos_ecdh_keypair_raw(1)?
+    Ok((secret, public))
+}
+
+fn __gos_ecdh_p256(secret: Vec<u8>, peer_public: Vec<u8>) -> Result<__gos_crypto_SharedSecret, errors::Error> {
+    Ok(__gos_crypto_SharedSecret { __bytes: __gos_ecdh_agree_raw(1, secret, peer_public)? })
+}
+
+fn __gos_ecdh_p384_keypair() -> Result<(Vec<u8>, Vec<u8>), errors::Error> {
+    let secret, public = __gos_ecdh_keypair_raw(2)?
+    Ok((secret, public))
+}
+
+fn __gos_ecdh_p384(secret: Vec<u8>, peer_public: Vec<u8>) -> Result<__gos_crypto_SharedSecret, errors::Error> {
+    Ok(__gos_crypto_SharedSecret { __bytes: __gos_ecdh_agree_raw(2, secret, peer_public)? })
+}
+";
+
+/// `crypto::mlkem`: ML-KEM-768 and ML-KEM-1024 (FIPS 203) over the runtime's
+/// leaves. A decapsulation key is its 64-byte seed.
+const MLKEM_WRAPPERS: &str = r"
+fn __gos_mlkem_keypair_768() -> Result<(Vec<u8>, Vec<u8>), errors::Error> {
+    let decapsulation_key, encapsulation_key = __gos_mlkem_keypair_raw(768)?
+    Ok((decapsulation_key, encapsulation_key))
+}
+
+fn __gos_mlkem_encapsulate_768(encapsulation_key: Vec<u8>) -> Result<(Vec<u8>, __gos_crypto_SharedSecret), errors::Error> {
+    let ciphertext, secret = __gos_mlkem_encapsulate_raw(768, encapsulation_key)?
+    Ok((ciphertext, __gos_crypto_SharedSecret { __bytes: secret }))
+}
+
+fn __gos_mlkem_decapsulate_768(decapsulation_key: Vec<u8>, ciphertext: Vec<u8>) -> Result<__gos_crypto_SharedSecret, errors::Error> {
+    Ok(__gos_crypto_SharedSecret { __bytes: __gos_mlkem_decapsulate_raw(768, decapsulation_key, ciphertext)? })
+}
+
+fn __gos_mlkem_keypair_1024() -> Result<(Vec<u8>, Vec<u8>), errors::Error> {
+    let decapsulation_key, encapsulation_key = __gos_mlkem_keypair_raw(1024)?
+    Ok((decapsulation_key, encapsulation_key))
+}
+
+fn __gos_mlkem_encapsulate_1024(encapsulation_key: Vec<u8>) -> Result<(Vec<u8>, __gos_crypto_SharedSecret), errors::Error> {
+    let ciphertext, secret = __gos_mlkem_encapsulate_raw(1024, encapsulation_key)?
+    Ok((ciphertext, __gos_crypto_SharedSecret { __bytes: secret }))
+}
+
+fn __gos_mlkem_decapsulate_1024(decapsulation_key: Vec<u8>, ciphertext: Vec<u8>) -> Result<__gos_crypto_SharedSecret, errors::Error> {
+    Ok(__gos_crypto_SharedSecret { __bytes: __gos_mlkem_decapsulate_raw(1024, decapsulation_key, ciphertext)? })
+}
+";
+
+/// `std::text::template` and `std::html::template`: a `Template` holds an id
+/// into the runtime's registry of parsed templates, so it parses once and
+/// renders any number of times; its last reference gives the entry back.
+/// `t.render(data)` and `template::render(source, data)` encode `data` where
+/// the call is written (HIR `template_render`), reaching the `_parsed` and
+/// `_encoded` functions here with its JSON text.
+const TEMPLATE_WRAPPERS: &str = r"
+enum __gos_template_MissingKey {
+    Error,
+    Empty,
+}
+
+fn __gos_template_strict(missing_key: __gos_template_MissingKey) -> i64 {
+    match missing_key {
+        __gos_template_MissingKey::Error => 1,
+        __gos_template_MissingKey::Empty => 0,
+    }
+}
+
+struct __gos_text_template_Template {
+    __id: i64,
+}
+
+impl __gos_text_template_Template {
+    fn parse(source: String, missing_key: __gos_template_MissingKey = __gos_template_MissingKey::Error) -> Result<__gos_text_template_Template, errors::Error> {
+        let id = __gos_template_new_raw(source, 0, __gos_template_strict(missing_key))?
+        Ok(__gos_text_template_Template { __id: id })
+    }
+}
+
+impl Drop for __gos_text_template_Template {
+    fn drop(&mut self) {
+        let _ = __gos_template_release_raw(self.__id)
+    }
+}
+
+fn __gos_text_template_render_parsed(template: __gos_text_template_Template, data: Result<String, errors::Error>) -> Result<String, errors::Error> {
+    __gos_template_render_raw(template.__id, data?)
+}
+
+fn __gos_text_template_render_encoded(source: String, data: Result<String, errors::Error>) -> Result<String, errors::Error> {
+    __gos_template_render_source_raw(source, 0, data?)
+}
+
+struct __gos_html_template_Template {
+    __id: i64,
+}
+
+impl __gos_html_template_Template {
+    fn parse(source: String, missing_key: __gos_template_MissingKey = __gos_template_MissingKey::Error) -> Result<__gos_html_template_Template, errors::Error> {
+        let id = __gos_template_new_raw(source, 1, __gos_template_strict(missing_key))?
+        Ok(__gos_html_template_Template { __id: id })
+    }
+}
+
+impl Drop for __gos_html_template_Template {
+    fn drop(&mut self) {
+        let _ = __gos_template_release_raw(self.__id)
+    }
+}
+
+fn __gos_html_template_render_parsed(template: __gos_html_template_Template, data: Result<String, errors::Error>) -> Result<String, errors::Error> {
+    __gos_template_render_raw(template.__id, data?)
+}
+
+fn __gos_html_template_render_encoded(source: String, data: Result<String, errors::Error>) -> Result<String, errors::Error> {
+    __gos_template_render_source_raw(source, 1, data?)
+}
+";
+
+/// `std::image`: an `Image` is a value holding its size and RGBA8 bytes, row
+/// by row, so it copies and shares like any struct. The runtime leaves decode,
+/// encode, fill, and resample those bytes, each checking the pixel limit
+/// before it allocates.
+const IMAGE_WRAPPERS: &str = r#"
+struct __gos_image_Rgba {
+    r: u8
+    g: u8
+    b: u8
+    a: u8
+}
+
+struct __gos_image_Image {
+    cols: i64
+    rows: i64
+    rgba: Vec<u8>
+}
+
+impl __gos_image_Image {
+    fn new(width: i64, height: i64) -> Result<__gos_image_Image, errors::Error> {
+        __gos_image_Image::filled(width, height, __gos_image_Rgba { r: 0, g: 0, b: 0, a: 0 })
+    }
+    fn filled(width: i64, height: i64, color: __gos_image_Rgba) -> Result<__gos_image_Image, errors::Error> {
+        let rgba = __gos_image_filled_raw(width, height, color.r as i64, color.g as i64, color.b as i64, color.a as i64)?
+        Ok(__gos_image_Image { cols: width, rows: height, rgba: rgba })
+    }
+    fn from_rgba(width: i64, height: i64, pixels: Vec<u8>) -> Result<__gos_image_Image, errors::Error> {
+        __gos_image_check_raw(width, height, pixels.len())?
+        Ok(__gos_image_Image { cols: width, rows: height, rgba: pixels })
+    }
+    fn width(&self) -> i64 { self.cols }
+    fn height(&self) -> i64 { self.rows }
+    fn pixels(&self) -> Vec<u8> { self.rgba }
+    fn pixel(&self, x: i64, y: i64) -> Option<__gos_image_Rgba> {
+        if x < 0 || y < 0 || x >= self.cols || y >= self.rows { return None }
+        let at = (y * self.cols + x) * 4
+        Some(__gos_image_Rgba { r: self.rgba[at], g: self.rgba[at + 1], b: self.rgba[at + 2], a: self.rgba[at + 3] })
+    }
+    fn set_pixel(&mut self, x: i64, y: i64, color: __gos_image_Rgba) {
+        if x < 0 || y < 0 || x >= self.cols || y >= self.rows {
+            panic(f"Image::set_pixel: ({x}, {y}) is outside a {self.cols}x{self.rows} image")
+        }
+        let at = (y * self.cols + x) * 4
+        self.rgba[at] = color.r
+        self.rgba[at + 1] = color.g
+        self.rgba[at + 2] = color.b
+        self.rgba[at + 3] = color.a
+    }
+    fn resize(&self, width: i64, height: i64) -> Result<__gos_image_Image, errors::Error> {
+        let rgba = __gos_image_resize_raw(self.rgba, self.cols, self.rows, width, height)?
+        Ok(__gos_image_Image { cols: width, rows: height, rgba: rgba })
+    }
+    fn encode_png(&self) -> Result<Vec<u8>, errors::Error> {
+        __gos_image_encode_png_raw(self.rgba, self.cols, self.rows)
+    }
+    fn encode_jpeg(&self, quality: i64 = 90) -> Result<Vec<u8>, errors::Error> {
+        __gos_image_encode_jpeg_raw(self.rgba, self.cols, self.rows, quality)
+    }
+}
+
+fn __gos_image_decode(bytes: Vec<u8>) -> Result<__gos_image_Image, errors::Error> {
+    let width, height, rgba = __gos_image_decode_raw(bytes)?
+    Ok(__gos_image_Image { cols: width, rows: height, rgba: rgba })
+}
+
+fn __gos_image_set_max_pixels(limit: i64) -> Result<(), errors::Error> {
+    __gos_image_set_max_pixels_raw(limit)
+}
+"#;
+
+/// `std::encoding::json::Decoder`: the JSON values of a file one at a time,
+/// separated by whitespace (NDJSON among them), read a chunk at a time so a
+/// stream larger than memory decodes in the space of its largest value. The
+/// scan resumes where the last chunk ended, so a value spanning many chunks is
+/// read once.
+const JSON_DECODER_WRAPPERS: &str = r#"
+struct __gos_json_Decoder {
+    file: fs::File,
+    buf: Vec<u8>,
+    start: i64,
+    pos: i64,
+    kind: i64,
+    depth: i64,
+    in_text: bool,
+    escaped: bool,
+    at_end: bool,
+    dropped: i64,
+    value_at: i64,
+}
+impl __gos_json_Decoder {
+    fn new(file: fs::File) -> __gos_json_Decoder {
+        __gos_json_Decoder {
+            file: file,
+            buf: #[],
+            start: 0,
+            pos: 0,
+            kind: 0,
+            depth: 0,
+            in_text: false,
+            escaped: false,
+            at_end: false,
+            dropped: 0,
+            value_at: 0,
+        }
+    }
+    fn offset(&self) -> i64 { self.value_at }
+    fn fill(&mut self) -> Result<bool, errors::Error> {
+        if self.at_end { return Ok(false) }
+        let chunk = self.file.read(65536)?
+        if chunk.is_empty() {
+            self.at_end = true
+            return Ok(false)
+        }
+        if self.start > 0 {
+            self.buf = self.buf[self.start..self.buf.len()]
+            self.dropped += self.start
+            self.pos -= self.start
+            self.start = 0
+        }
+        for b in chunk { self.buf.push(b) }
+        Ok(true)
+    }
+    fn delimits(b: u8) -> bool {
+        b == 32 || b == 9 || b == 10 || b == 13 || b == 34 || b == 44 || b == 58 ||
+            b == 91 || b == 93 || b == 123 || b == 125
+    }
+    fn scan(&mut self) -> i64 {
+        let len = self.buf.len()
+        while self.pos < len {
+            let b = self.buf[self.pos]
+            self.pos += 1
+            if self.kind == 0 {
+                if b == 32 || b == 9 || b == 10 || b == 13 {
+                    self.start = self.pos
+                } else if b == 34 {
+                    self.kind = 1
+                    self.in_text = true
+                } else if b == 91 || b == 123 {
+                    self.kind = 2
+                    self.depth = 1
+                } else if b == 44 || b == 58 || b == 93 || b == 125 {
+                    return self.pos
+                } else {
+                    self.kind = 3
+                }
+            } else if self.in_text {
+                if self.escaped {
+                    self.escaped = false
+                } else if b == 92 {
+                    self.escaped = true
+                } else if b == 34 {
+                    self.in_text = false
+                    if self.kind == 1 { return self.pos }
+                }
+            } else if self.kind == 3 {
+                if __gos_json_Decoder::delimits(b) {
+                    self.pos -= 1
+                    return self.pos
+                }
+            } else if b == 34 {
+                self.in_text = true
+            } else if b == 91 || b == 123 {
+                self.depth += 1
+            } else if b == 93 || b == 125 {
+                self.depth -= 1
+                if self.depth == 0 { return self.pos }
+            }
+        }
+        if self.kind == 3 && self.at_end { return len }
+        -1
+    }
+    fn next_text(&mut self) -> Result<Option<String>, errors::Error> {
+        loop {
+            let end = self.scan()
+            if end >= 0 {
+                self.value_at = self.dropped + self.start
+                let text = String::from_utf8(self.buf[self.start..end])?
+                self.start = end
+                self.pos = end
+                self.kind = 0
+                return Ok(Some(text))
+            }
+            if !self.fill()? {
+                if self.kind == 0 { return Ok(None) }
+                if self.kind != 3 {
+                    let at = self.dropped + self.start
+                    return Err(errors::new(f"json::Decoder: the input ends inside the value at byte {at}"))
+                }
+            }
+        }
+    }
+    fn next(&mut self) -> Result<Option<json::Value>, errors::Error> {
+        let Some(text) = self.next_text()? else { return Ok(None) }
+        match json::parse(text) {
+            Ok(value) => Ok(Some(value)),
+            Err(e) => Err(errors::wrap(e, f"json::Decoder: the value at byte {self.value_at}")),
+        }
+    }
+}
+"#;
+
 /// `std::encoding::json::entries`: an object's members as `(key, value)`
 /// pairs in key order, written over `keys` and `get` so every tier walks the
 /// object the way those do.
@@ -786,8 +1795,176 @@ fn __gos_sync_with_timeout<T>(f: Fn() -> T, ms: i64) -> Result<T, errors::Error>
 }
 "#;
 
+/// `time::Ticker`: the tick count every `interval`, counted from when the
+/// ticker was made, so the ticks do not drift with the time a receiver takes.
+/// A receiver that falls behind gets the count of the latest tick at once, as
+/// Go's ticker drops the ticks no one waited for. `recv` waits for the next
+/// tick itself; `channel` starts the one goroutine that sends the ticks, for
+/// `select`, after which `recv` reads that channel too. The ticker stops when
+/// its last reference goes or at `stop()`, and a waiting receiver, or the
+/// goroutine, wakes at once to end.
+const TIME_TICKER_WRAPPERS: &str = r#"
+/// Milliseconds from `waited` until the tick due `due` nanoseconds after the
+/// ticker's start, rounded up so a wait never ends before its tick.
+fn __gos_time_ticker_ms_until(due: i64, waited: i64) -> i64 {
+    (due - waited + 999999) / 1000000
+}
+
+fn __gos_time_ticker_run(ticks: Sender<i64>, live: context::Context, start: i64, every_ns: i64) {
+    let mut count = 0
+    loop {
+        let next = (count + 1) * every_ns
+        let waited = time::monotonic_nanos() - start
+        if next > waited {
+            if !time::sleep_ctx(live, __gos_time_ticker_ms_until(next, waited)) { break }
+        }
+        if live.is_cancelled() { break }
+        count = (time::monotonic_nanos() - start) / every_ns
+        let _ = ticks.try_send(count)
+    }
+    ticks.close()
+}
+
+fn __gos_time_ticker_feed(ticks: Sender<i64>, live: context::Context, start: i64, every_ns: i64) {
+    spawn(|| __gos_time_ticker_run(ticks, live, start, every_ns))
+}
+
+struct __gos_time_Ticker: Drop {
+    start: i64
+    every_ns: i64
+    live: context::Context
+    /// The count `recv` answered last.
+    delivered: sync::AtomicI64
+    /// 1 once `channel` has started the goroutine that sends the ticks.
+    feeding: sync::AtomicI64
+    ticks: Receiver<i64>
+    sender: Sender<i64>
+
+    fn new(interval: time::Duration) -> __gos_time_Ticker {
+        let every_ns = interval.as_nanos()
+        if every_ns <= 0 { panic(f"time::Ticker::new: the interval is {every_ns} ns; a ticker needs a positive one") }
+        let tx, rx = channel(1)
+        __gos_time_Ticker {
+            start: time::monotonic_nanos(),
+            every_ns: every_ns,
+            live: context::Context::with_cancel(context::Context::background()),
+            delivered: sync::AtomicI64::new(0),
+            feeding: sync::AtomicI64::new(0),
+            ticks: rx,
+            sender: tx,
+        }
+    }
+
+    fn recv(&self) -> Option<i64> {
+        if self.feeding.load() != 0 { return self.ticks.recv() }
+        if self.live.is_cancelled() { return None }
+        let due = (self.delivered.load() + 1) * self.every_ns
+        let waited = time::monotonic_nanos() - self.start
+        if due > waited {
+            if !time::sleep_ctx(self.live, __gos_time_ticker_ms_until(due, waited)) { return None }
+        }
+        if self.live.is_cancelled() { return None }
+        let count = (time::monotonic_nanos() - self.start) / self.every_ns
+        self.delivered.store(count)
+        Some(count)
+    }
+
+    fn channel(&self) -> Receiver<i64> {
+        if self.feeding.compare_exchange(0, 1) {
+            __gos_time_ticker_feed(self.sender, self.live, self.start, self.every_ns)
+        }
+        self.ticks
+    }
+
+    fn stop(&self) {
+        self.live.cancel()
+        if self.feeding.compare_exchange(0, 1) { self.sender.close() }
+    }
+
+    fn drop(&mut self) { self.stop() }
+}
+"#;
+
+/// `sync::Semaphore`: a weighted counting semaphore. Its permits are tokens
+/// in a channel the semaphore fills when it is made; `acquire(n)` takes `n`
+/// of them, one acquirer at a time so two weighted waits cannot split the
+/// pool between them, and answers a `Permit` that puts them back when its
+/// last reference goes. A wait a cancelled cohort ends answers a permit for
+/// the tokens it took.
+const SYNC_SEMAPHORE_WRAPPERS: &str = r#"
+struct __gos_sync_Permit: Drop {
+    tokens: Sender<i64>
+    weight: i64
+
+    fn weight(&self) -> i64 { self.weight }
+
+    fn drop(&mut self) {
+        let mut given = 0
+        while given < self.weight {
+            self.tokens.send(1)
+            given += 1
+        }
+    }
+}
+
+struct __gos_sync_Semaphore {
+    tokens: Sender<i64>
+    pool: Receiver<i64>
+    turn: Sender<i64>
+    waiting: Receiver<i64>
+    size: i64
+
+    fn new(permits: i64) -> __gos_sync_Semaphore {
+        if permits < 1 { panic(f"sync::Semaphore::new: {permits} permits; a semaphore holds at least one") }
+        let tokens, pool = channel(permits)
+        let mut filled = 0
+        while filled < permits {
+            tokens.send(1)
+            filled += 1
+        }
+        let turn, waiting = channel(1)
+        turn.send(1)
+        __gos_sync_Semaphore { tokens: tokens, pool: pool, turn: turn, waiting: waiting, size: permits }
+    }
+
+    fn size(&self) -> i64 { self.size }
+
+    fn acquire(&self, weight: i64 = 1) -> __gos_sync_Permit {
+        if weight < 0 || weight > self.size {
+            panic(f"sync::Semaphore::acquire: weight {weight} is outside 0..={self.size}")
+        }
+        let _ = self.waiting.recv()
+        let mut taken = 0
+        while taken < weight {
+            match self.pool.recv() {
+                Some(_) => taken += 1,
+                None => break,
+            }
+        }
+        self.turn.send(1)
+        __gos_sync_Permit { tokens: self.tokens, weight: taken }
+    }
+
+    fn try_acquire(&self, weight: i64 = 1) -> Option<__gos_sync_Permit> {
+        if weight < 0 || weight > self.size { return None }
+        let _ = self.waiting.recv()
+        let mut taken = 0
+        while taken < weight {
+            match self.pool.try_recv() {
+                Some(_) => taken += 1,
+                None => break,
+            }
+        }
+        self.turn.send(1)
+        let permit = __gos_sync_Permit { tokens: self.tokens, weight: taken }
+        if taken < weight { return None }
+        Some(permit)
+    }
+}
+"#;
+
 const TIME_CIVIL_WRAPPERS: &str = r#"
-struct __gos_time_CivilTime { year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64, nanosecond: i64, offset_seconds: i64, weekday: i64 }
+struct __gos_time_CivilTime { year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64, nanosecond: i64 = 0, offset_seconds: i64 = 0, weekday: i64 = 0 }
 enum __gos_time_CivilResolution { Unique(i64), Gap, Fold(i64, i64) }
 struct __gos_time_Location { spec: String }
 impl __gos_time_Location {
@@ -981,6 +2158,18 @@ impl __gos_time_Time {
     fn format_rfc3339(&self) -> Result<String, errors::Error> {
         __gos_time_format_rfc3339_raw(self.unix_ns, self.location.spec)
     }
+    fn format(&self, layout: String) -> Result<String, errors::Error> {
+        __gos_time_strftime_raw(self.unix_ns, self.location.spec, layout)
+    }
+}
+fn __gos_time_parse(layout: String, text: String, location: Option<__gos_time_Location> = None) -> Result<__gos_time_Time, errors::Error> {
+    __gos_time_register_zones_raw(__gos_time_zone_data())?
+    let spec = match location {
+        Some(at) => at.spec,
+        None => "",
+    }
+    let ns, at = __gos_time_strptime_raw(layout, text, spec)?
+    Ok(__gos_time_Time { unix_ns: ns, location: __gos_time_Location { spec: at } })
 }
 impl Add<time::Duration> for __gos_time_Time {
     fn add(self, d: time::Duration) -> __gos_time_Time {
@@ -1023,6 +2212,31 @@ fn __gos_x509_parse_pem(s: String) -> Result<__gos_x509_CertInfo, errors::Error>
     let subject, issuer, serial, nb, na, san, sha = __gos_x509_parse_pem_raw(s)?
     Ok(__gos_x509_CertInfo { subject: subject, issuer: issuer, serial: serial, not_before_unix: nb, not_after_unix: na, san_dns: san, sha256: sha })
 }
+struct __gos_x509_Extension { oid: String, critical: bool, value: Vec<u8> }
+struct __gos_x509_ExtensionWire { oid: String, critical: bool, value: String }
+fn __gos_x509_extensions_text(extensions: Vec<__gos_x509_Extension>) -> Result<String, errors::Error> {
+    let mut wire: Vec<__gos_x509_ExtensionWire> = #[]
+    for ext in extensions {
+        wire.push(__gos_x509_ExtensionWire { oid: ext.oid, critical: ext.critical, value: hex::encode(ext.value) })
+    }
+    json::encode(wire)
+}
+fn __gos_x509_self_signed(common_name: String, dns_names: Vec<String>, days: i64 = 365, is_ca: bool = false, client: bool = false, extensions: Vec<__gos_x509_Extension> = #[]) -> Result<(String, String), errors::Error> {
+    let cert, key = __gos_x509_self_signed_raw(common_name, dns_names, days, is_ca, client, __gos_x509_extensions_text(extensions)?)?
+    Ok((cert, key))
+}
+fn __gos_x509_issue(ca_cert_pem: String, ca_key_pem: String, common_name: String, dns_names: Vec<String>, days: i64 = 365, is_ca: bool = false, client: bool = false, extensions: Vec<__gos_x509_Extension> = #[]) -> Result<(String, String), errors::Error> {
+    let cert, key = __gos_x509_issue_raw(ca_cert_pem, ca_key_pem, common_name, dns_names, days, is_ca, client, __gos_x509_extensions_text(extensions)?)?
+    Ok((cert, key))
+}
+fn __gos_x509_extensions(cert_pem: String) -> Result<Vec<__gos_x509_Extension>, errors::Error> {
+    let wire = json::decode::<Vec<__gos_x509_ExtensionWire>>(__gos_x509_extensions_raw(cert_pem)?)?
+    let mut out: Vec<__gos_x509_Extension> = #[]
+    for w in wire {
+        out.push(__gos_x509_Extension { oid: w.oid, critical: w.critical, value: hex::decode(w.value)? })
+    }
+    Ok(out)
+}
 ";
 
 /// Real-struct + wrapper source for `std::fs::metadata`. Folds the
@@ -1038,12 +2252,17 @@ fn __gos_fs_metadata(path: String) -> Result<__gos_fs_Metadata, errors::Error> {
 }
 ";
 
-/// `std::fs::temp_dir`, whose `parent` defaults to the system temporary
-/// root. The leaf reads an empty parent as that root, as Go's `os.MkdirTemp`
-/// reads an empty directory.
+/// `std::fs::temp_dir` and `std::fs::temp_file`, whose `parent` defaults to
+/// the system temporary root. The leaves read an empty parent as that root,
+/// as Go's `os.MkdirTemp` and `os.CreateTemp` read an empty directory.
 const FS_TEMP_DIR_WRAPPERS: &str = r#"
 fn __gos_fs_temp_dir(prefix: String, parent: Option<String> = None) -> Result<String, errors::Error> {
     __gos_fs_temp_dir_raw(prefix, parent.unwrap_or(""))
+}
+
+fn __gos_fs_temp_file(prefix: String, parent: Option<String> = None) -> Result<(fs::File, String), errors::Error> {
+    let file, path = __gos_fs_temp_file_raw(prefix, parent.unwrap_or(""))?
+    Ok((file, path))
 }
 "#;
 
@@ -1601,6 +2820,68 @@ fn __gos_term_resized<D: __gos_fd_Descriptor>(fd: D = __gos_term_STDOUT) -> bool
     previous >= 0 && previous != packed
 }
 
+// A terminal reads the line with echo, line editing, and signal keys off, and
+// the mode comes back at every exit of the call, so Ctrl-C answers an `Err`
+// rather than ending the program with echo still off. Input that is not a
+// terminal is read up to its next newline, unchanged.
+fn __gos_term_read_password<D: __gos_fd_Descriptor>(prompt: String = "", fd: D = __gos_term_STDIN) -> Result<String, errors::Error> {
+    let raw = fd.raw_descriptor()
+    if raw < 0 {
+        return Err(__gos_fd_no_descriptor("term::read_password"))
+    }
+    eprint(prompt)
+    if !__gos_term_is_terminal_raw(raw) {
+        return __gos_term_read_secret(raw, false)
+    }
+    let mode = __gos_term_enter_quiet_on(raw, fd.keep_open())?
+    defer mode.restore()
+    defer eprintln("")
+    __gos_term_read_secret(raw, true)
+}
+
+fn __gos_term_read_secret(raw: i64, interactive: bool) -> Result<String, errors::Error> {
+    let mut bytes: Vec<u8> = #[]
+    loop {
+        if interactive {
+            let _ = __gos_fd_wait_raw(__gos_term_handle(raw), 0, -1)?
+        }
+        let b = __gos_term_read_byte(raw)?
+        if b < 0 {
+            if bytes.is_empty() {
+                return Err(errors::new("term::read_password: end of input"))
+            }
+            break
+        }
+        if b == 10 || (interactive && b == 13) {
+            break
+        }
+        if interactive && b == 3 {
+            return Err(errors::new("term::read_password: interrupted"))
+        }
+        if interactive && b == 4 {
+            if bytes.is_empty() {
+                return Err(errors::new("term::read_password: end of input"))
+            }
+            continue
+        }
+        if interactive && (b == 127 || b == 8) {
+            while let Some(last) = bytes.pop() {
+                if last & 0xC0 != 0x80 { break }
+            }
+            continue
+        }
+        if interactive && b == 21 {
+            bytes.clear()
+            continue
+        }
+        bytes.push(b as u8)
+    }
+    if bytes.last() == Some(13u8) {
+        let _ = bytes.pop()
+    }
+    String::from_utf8(bytes)
+}
+
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 type __gos_term_Flag = u32
 #[cfg(target_os = "macos")]
@@ -1788,6 +3069,39 @@ fn __gos_term_read_ready(fd: i64) -> Result<Vec<u8>, errors::Error> {
     Ok(buf[0..n as i64])
 }
 
+// The byte read, or -1 at the end of the input. A read a signal interrupts
+// before any byte arrives (EINTR) is made again.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+fn __gos_term_read_byte(fd: i64) -> Result<i64, errors::Error> {
+    let mut buf = #[0u8]
+    loop {
+        let n = unsafe { __gos_term_read(fd as i32, &mut buf, 1) }
+        if n == 1 { return Ok(buf[0] as i64) }
+        if n == 0 { return Ok(-1) }
+        if ffi::last_errno() != 4 {
+            return Err(__gos_term_os_error("read_password"))
+        }
+    }
+}
+
+// Echo, line editing, and signal keys off; output processing stays on.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
+fn __gos_term_enter_quiet_on(fd: i64, held: Fn() -> ()) -> Result<__gos_term_RawMode, errors::Error> {
+    let fd = fd as i32
+    let mut saved = __gos_term_blank_termios()
+    if unsafe { __gos_term_tcgetattr(fd, &mut saved) } != 0 {
+        return Err(__gos_term_os_error("read_password"))
+    }
+    let mut attrs = saved
+    attrs.lflag = attrs.lflag & !__gos_term_LOCAL_RAW_OFF
+    attrs.cc[__gos_term_VMIN] = 1
+    attrs.cc[__gos_term_VTIME] = 0
+    if unsafe { __gos_term_tcsetattr(fd, __gos_term_TCSAFLUSH, &mut attrs) } != 0 {
+        return Err(__gos_term_os_error("read_password"))
+    }
+    Ok(__gos_term_RawMode { fd: fd, saved: saved, held: held })
+}
+
 #[repr(C)]
 #[cfg(windows)]
 struct __gos_term_ConsoleInfo {
@@ -1916,6 +3230,34 @@ fn __gos_term_read_ready(fd: i64) -> Result<Vec<u8>, errors::Error> {
     Ok(buf[0..read[0] as i64])
 }
 
+// The byte read, or -1 at the end of the input (a pipe whose writer closed).
+#[cfg(windows)]
+fn __gos_term_read_byte(fd: i64) -> Result<i64, errors::Error> {
+    let mut buf = #[0u8]
+    let mut read = #[0u32]
+    if unsafe { __gos_term_ReadFile(__gos_term_handle(fd) as% usize, &mut buf, 1, &mut read, 0) } == 0 {
+        if ffi::last_os_error() == 109 { return Ok(-1) }
+        return Err(__gos_term_os_error("read_password"))
+    }
+    if read[0] == 0 { return Ok(-1) }
+    Ok(buf[0] as i64)
+}
+
+// Echo, line input, and Ctrl-C processing off, so Ctrl-C arrives as a byte.
+#[cfg(windows)]
+fn __gos_term_enter_quiet_on(fd: i64, held: Fn() -> ()) -> Result<__gos_term_RawMode, errors::Error> {
+    let input = __gos_term_handle(fd) as% usize
+    let mut input_mode = #[0u32]
+    if unsafe { __gos_term_GetConsoleMode(input, &mut input_mode) } == 0 {
+        return Err(__gos_term_os_error("read_password"))
+    }
+    let quiet = input_mode[0] & !(__gos_term_ENABLE_PROCESSED_INPUT | __gos_term_ENABLE_LINE_INPUT | __gos_term_ENABLE_ECHO_INPUT)
+    if unsafe { __gos_term_SetConsoleMode(input, quiet) } == 0 {
+        return Err(__gos_term_os_error("read_password"))
+    }
+    Ok(__gos_term_RawMode { input: input, input_mode: input_mode[0], output_mode: None, held: held })
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", windows)))]
 struct __gos_term_RawMode {}
 
@@ -1949,6 +3291,16 @@ fn __gos_term_handle(fd: i64) -> i64 {
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", windows)))]
 fn __gos_term_read_ready(fd: i64) -> Result<Vec<u8>, errors::Error> {
     Err(errors::new("term::read_input: this target has no terminal"))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", windows)))]
+fn __gos_term_read_byte(fd: i64) -> Result<i64, errors::Error> {
+    Err(errors::new("term::read_password: this target has no terminal"))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd", windows)))]
+fn __gos_term_enter_quiet_on(fd: i64, held: Fn() -> ()) -> Result<__gos_term_RawMode, errors::Error> {
+    Err(errors::new("term::read_password: this target has no terminal"))
 }
 "#;
 
@@ -2308,21 +3660,13 @@ const PROCESS_COMMAND_MARKERS: &[&str] = &[
     "process::Stdio",
     "process::Child",
     "process::spawn_piped",
-    "exec::Command",
-    "exec::Stdio",
-    "exec::Child",
-    "exec::spawn_piped",
 ];
 
-/// Spellings that reach the `process` wrappers: the `process` module and
-/// its older `exec` / `os::exec` names.
+/// Spellings that reach the `process` wrappers.
 const PROCESS_MARKERS: &[&str] = &[
     "process::run",
     "process::pipeline_run",
     "process::Output",
-    "exec::run",
-    "exec::pipeline_run",
-    "exec::Output",
 ];
 
 /// `http::Http2Config` as a real Gossamer struct, so the tuning fields
@@ -2839,7 +4183,7 @@ impl __gos_sql_Tx {
 /// `std::http::{csrf, session, form, multipart}` surface. Pure
 /// composition over the already-wired csrf / session / cookie / aead /
 /// hmac / hex / url primitives, so it lowers natively on every tier.
-const HTTP_SECURITY_WRAPPERS: &str = r##"
+const HTTP_SECURITY_WRAPPERS: &str = r#"
 // ---- shared helpers ----
 fn __gos_http_header_lookup(headers: [(String, String)], name: String) -> String {
     let target = name.to_lowercase()
@@ -2854,250 +4198,6 @@ fn __gos_http_bytes_to_str(b: [u8]) -> String {
     for x in b { buf.push(x) }
     buf.to_string()
 }
-fn __gos_http_first12(b: [u8]) -> Vec<u8> {
-    let mut out: Vec<u8> = Vec::from([])
-    let mut i = 0
-    while i < 12 {
-        out.push(b[i])
-        i += 1
-    }
-    out
-}
-fn __gos_http_trim_slash(s: String) -> String {
-    let n = s.len()
-    if n > 0 && s.ends_with("/") { s.substring(0, n - 1) } else { s.substring(0, n) }
-}
-fn __gos_http_origin_host(origin: String) -> String {
-    let mut host: String = match origin.split_once("://") {
-        Some((_, r)) => r,
-        None => origin.substring(0, origin.len()),
-    }
-    match host.split_once("/") { Some((h, _)) => host = h, None => {} }
-    match host.split_once("?") { Some((h, _)) => host = h, None => {} }
-    match host.split_once("#") { Some((h, _)) => host = h, None => {} }
-    host
-}
-fn __gos_http_origin_from_referer(referer: String) -> String {
-    match referer.split_once("://") {
-        Some((scheme, _)) => scheme + "://" + &__gos_http_origin_host(referer),
-        None => "",
-    }
-}
-fn __gos_http_origins_equal(a: String, b: String) -> bool {
-    __gos_http_trim_slash(a).to_lowercase() == __gos_http_trim_slash(b).to_lowercase()
-}
-
-// ---- csrf (request/response integrated) ----
-struct __gos_http_csrf_Config {
-    cookie_name: String,
-    header_name: String,
-    form_field: String,
-    key: Vec<u8>,
-    trusted_origins: Vec<String>,
-    secure: bool,
-    same_site: String,
-    max_age_secs: i64,
-    safe_methods: Vec<String>,
-    exempt_prefixes: Vec<String>,
-}
-enum __gos_http_csrf_RouteAuth { BearerOnly, CookieSession, None }
-fn __gos_http_csrf_config(key: Vec<u8>) -> __gos_http_csrf_Config {
-    __gos_http_csrf_Config {
-        cookie_name: "gos_csrf",
-        header_name: "X-CSRF-Token",
-        form_field: "_csrf",
-        key: key,
-        trusted_origins: Vec::from([]),
-        secure: true,
-        same_site: "Lax",
-        max_age_secs: 86400,
-        safe_methods: Vec::from(["GET", "HEAD", "OPTIONS", "TRACE"]),
-        exempt_prefixes: Vec::from([]),
-    }
-}
-fn __gos_http_csrf_is_safe(config: __gos_http_csrf_Config, method: String) -> bool {
-    let m = method.to_lowercase()
-    let mut safe = false
-    for s in config.safe_methods {
-        if s.to_lowercase() == m { safe = true }
-    }
-    safe
-}
-fn __gos_http_csrf_extract_token(r: http::Request, config: __gos_http_csrf_Config) -> Option<String> {
-    let h = __gos_http_header_lookup(r.headers, config.header_name)
-    if h != "" { return Some(h) }
-    let ct = __gos_http_header_lookup(r.headers, "content-type")
-    if ct.to_lowercase().starts_with("application/x-www-form-urlencoded") {
-        let f = r.form_value(config.form_field)
-        if f != "" { return Some(f) }
-    }
-    None
-}
-fn __gos_http_csrf_origin_allowed(r: http::Request, config: __gos_http_csrf_Config) -> bool {
-    let method = r.method()
-    let is_safe = __gos_http_csrf_is_safe(config, method)
-    let origin = __gos_http_header_lookup(r.headers, "origin")
-    let referer = __gos_http_header_lookup(r.headers, "referer")
-    let mut candidate = ""
-    if origin != "" {
-        candidate = origin
-    } else if referer != "" {
-        let o = __gos_http_origin_from_referer(referer)
-        if o == "" { return is_safe }
-        candidate = o
-    } else {
-        return is_safe
-    }
-    if config.trusted_origins.len() > 0 {
-        let mut ok = false
-        for t in config.trusted_origins {
-            if __gos_http_origins_equal(t, candidate) { ok = true }
-        }
-        return ok
-    }
-    let host = __gos_http_header_lookup(r.headers, "host")
-    if host == "" { return false }
-    __gos_http_origin_host(candidate).to_lowercase() == host.to_lowercase()
-}
-fn __gos_http_csrf_check(r: http::Request, route_auth: __gos_http_csrf_RouteAuth, config: __gos_http_csrf_Config) -> Result<(), errors::Error> {
-    match route_auth {
-        __gos_http_csrf_RouteAuth::BearerOnly => return Ok(()),
-        _ => {}
-    }
-    let method = r.method()
-    if __gos_http_csrf_is_safe(config, method) { return Ok(()) }
-    if config.exempt_prefixes.len() > 0 {
-        let path = r.path()
-        for p in config.exempt_prefixes {
-            if path.starts_with(p) { return Ok(()) }
-        }
-    }
-    if !__gos_http_csrf_origin_allowed(r, config) {
-        return Err(errors::new("csrf: origin not allowed"))
-    }
-    let cookie_header = __gos_http_header_lookup(r.headers, "cookie")
-    if cookie_header == "" { return Err(errors::new("csrf: missing cookie header")) }
-    let pairs = http::cookie::parse_cookie_header(cookie_header)
-    let mut cookie_token = ""
-    for (k, v) in pairs {
-        if k == config.cookie_name { cookie_token = v }
-    }
-    if cookie_token == "" { return Err(errors::new("csrf: missing csrf cookie")) }
-    let supplied = match __gos_http_csrf_extract_token(r, config) {
-        Some(t) => t,
-        None => return Err(errors::new("csrf: missing csrf token")),
-    }
-    http::csrf::verify_token(cookie_token, supplied, config.key)
-}
-// A function that returns an `http::Response` must stay strictly
-// straight-line: a branch (`if` / `match`) between the handle param and
-// the `with_header` that mutates it loses the mutation on the compiled
-// tiers, so every conditional that shapes the header string lives in a
-// pure `String` helper and the response builder only concatenates calls.
-fn __gos_http_max_age_attr(max_age_secs: i64) -> String {
-    if max_age_secs > 0 { "; Max-Age=" + &format("{}", max_age_secs) } else { "" }
-}
-fn __gos_http_secure_attr(secure: bool) -> String {
-    if secure { "; Secure" } else { "" }
-}
-fn __gos_http_csrf_cookie_value(token: String, config: __gos_http_csrf_Config) -> String {
-    let bare = http::cookie::serialize(config.cookie_name, token)
-    bare + "; Path=/" + &__gos_http_max_age_attr(config.max_age_secs) +
-        &__gos_http_secure_attr(config.secure) + "; SameSite=" + &config.same_site
-}
-fn __gos_http_csrf_attach_cookie(resp: http::Response, token: String, config: __gos_http_csrf_Config) -> http::Response {
-    let sc = __gos_http_csrf_cookie_value(token, config)
-    resp.with_header("set-cookie", sc)
-}
-
-// ---- session (signed + AES-256-GCM encrypted store) ----
-struct __gos_http_session_Store {
-    key: Vec<u8>,
-    cookie_name: String,
-    encrypted: bool,
-    secure: bool,
-    max_age_secs: i64,
-}
-fn __gos_http_session_signed(key: Vec<u8>) -> __gos_http_session_Store {
-    __gos_http_session_Store { key: key, cookie_name: "gos_session", encrypted: false, secure: true, max_age_secs: 86400 }
-}
-fn __gos_http_session_encrypted(key: Vec<u8>) -> __gos_http_session_Store {
-    __gos_http_session_Store { key: key, cookie_name: "gos_session", encrypted: true, secure: true, max_age_secs: 86400 }
-}
-fn __gos_http_session_seal(key: [u8], data: String) -> Result<String, errors::Error> {
-    let pt = data.as_bytes()
-    let mac = crypto::hmac::sha256_mac(key.to_vec(), pt)
-    let nonce = __gos_http_first12(mac)
-    let empty: Vec<u8> = Vec::from([])
-    let ct = crypto::aead::aes_256_gcm_seal(key.to_vec(), nonce, pt, empty)?
-    Ok(encoding::hex::encode(nonce) + "." + &encoding::hex::encode(ct))
-}
-fn __gos_http_session_open(key: [u8], cookie: String) -> Result<String, errors::Error> {
-    let n, c = match cookie.split_once(".") {
-        Some(p) => p,
-        None => return Err(errors::new("session: bad framing")),
-    }
-    let nonce = encoding::hex::decode(n)?
-    let ct = encoding::hex::decode(c)?
-    let empty: Vec<u8> = Vec::from([])
-    let pt = crypto::aead::aes_256_gcm_open(key.to_vec(), nonce, ct, empty)?
-    Ok(__gos_http_bytes_to_str(pt))
-}
-fn __gos_http_session_encode(store: __gos_http_session_Store, data: String) -> String {
-    if store.encrypted {
-        match __gos_http_session_seal(store.key, data) {
-            Ok(v) => v,
-            Err(_) => "",
-        }
-    } else {
-        http::session::sign(data, store.key)
-    }
-}
-fn __gos_http_session_cookie_value(store: __gos_http_session_Store, data: String) -> String {
-    let cookie_val = __gos_http_session_encode(store, data)
-    let bare = http::cookie::serialize(store.cookie_name, cookie_val)
-    bare + "; Path=/; HttpOnly" + &__gos_http_max_age_attr(store.max_age_secs) +
-        &__gos_http_secure_attr(store.secure) + "; SameSite=Lax"
-}
-// load / save are free functions, not methods: a `&self` method that
-// returns the 2-word `Result` while also taking an opaque-handle arg
-// (`http::Request`) miscompiles the call on the LLVM tier, whereas the
-// free-function form is sound - and `session::load(store, req)` /
-// `session::save(store, resp, data)` is also the data-first spelling.
-fn __gos_http_session_save(store: __gos_http_session_Store, resp: http::Response, data: String) -> http::Response {
-    let sc = __gos_http_session_cookie_value(store, data)
-    resp.with_header("set-cookie", sc)
-}
-fn __gos_http_session_cookie_raw(store: __gos_http_session_Store, r: http::Request) -> String {
-    let cookie_header = __gos_http_header_lookup(r.headers, "cookie")
-    let pairs = http::cookie::parse_cookie_header(cookie_header)
-    let mut raw = ""
-    for (k, v) in pairs {
-        if k == store.cookie_name { raw = v }
-    }
-    raw
-}
-fn __gos_http_session_load(store: __gos_http_session_Store, r: http::Request) -> Result<String, errors::Error> {
-    let raw = __gos_http_session_cookie_raw(store, r)
-    if raw == "" { return Err(errors::new("session: cookie not present")) }
-    if store.encrypted {
-        __gos_http_session_open(store.key, raw)
-    } else {
-        http::session::verify(raw, store.key)
-    }
-}
-fn __gos_http_session_load_or_empty(store: __gos_http_session_Store, r: http::Request) -> String {
-    match __gos_http_session_load(store, r) {
-        Ok(d) => d,
-        Err(_) => "",
-    }
-}
-fn __gos_http_session_with_session(store: __gos_http_session_Store, r: http::Request, resp: http::Response, f: Fn(String) -> String) -> http::Response {
-    let current = __gos_http_session_load_or_empty(store, r)
-    let updated = f(current)
-    __gos_http_session_save(store, resp, updated)
-}
-
 // ---- form (application/x-www-form-urlencoded) ----
 struct __gos_http_form_Form { pairs: Vec<(String, String)> }
 fn __gos_http_form_parse(body: String) -> __gos_http_form_Form {
@@ -3223,4 +4323,4 @@ fn __gos_http_request_form_file(r: http::Request, name: String) -> Option<__gos_
     None
 }
 
-"##;
+"#;

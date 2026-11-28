@@ -47,6 +47,54 @@ impl<'tcx> FnBuilder<'tcx> {
         });
     }
 
+    /// Arithmetic, bit, and shift operators on `i128` / `u128` operands; a
+    /// comparison takes the general path, which orders wide values by
+    /// number.
+    fn try_compile_wide_int_binary(
+        &mut self,
+        op: HirBinaryOp,
+        lhs: &HirExpr,
+        rhs: &HirExpr,
+    ) -> RuntimeResult<Option<Reg>> {
+        use crate::value::wide::WideOp;
+        let wide_op = match op {
+            HirBinaryOp::Add => WideOp::Add,
+            HirBinaryOp::Sub => WideOp::Sub,
+            HirBinaryOp::Mul => WideOp::Mul,
+            HirBinaryOp::Div => WideOp::Div,
+            HirBinaryOp::Rem => WideOp::Rem,
+            HirBinaryOp::BitAnd => WideOp::BitAnd,
+            HirBinaryOp::BitOr => WideOp::BitOr,
+            HirBinaryOp::BitXor => WideOp::BitXor,
+            HirBinaryOp::Shl => WideOp::Shl,
+            HirBinaryOp::Shr => WideOp::Shr,
+            _ => return Ok(None),
+        };
+        // A shift's result has its shifted operand's type; any other
+        // operator's operands share one.
+        let unsigned = if matches!(wide_op, WideOp::Shl | WideOp::Shr) {
+            self.wide_int_ty(self.static_ty(lhs))
+        } else {
+            self.wide_int_ty(self.static_ty(lhs))
+                .or_else(|| self.wide_int_ty(self.static_ty(rhs)))
+        };
+        let Some(unsigned) = unsigned else {
+            return Ok(None);
+        };
+        let lhs_reg = self.compile_expr(lhs)?;
+        let rhs_reg = self.compile_expr(rhs)?;
+        let dst = self.alloc_reg();
+        self.emit(Op::WideArith {
+            dst,
+            lhs: lhs_reg,
+            rhs: rhs_reg,
+            op: wide_op,
+            unsigned,
+            wrapping: false,
+        });
+        Ok(Some(dst))
+    }
+
     fn try_compile_i64_arith_imm(
         &mut self,
         op: HirBinaryOp,
@@ -67,7 +115,7 @@ impl<'tcx> FnBuilder<'tcx> {
         let Ok(imm) = i32::try_from(n) else {
             return Ok(None);
         };
-        if imm == 0 && matches!(kind, ImmArithKind::Div | ImmArithKind::Rem) {
+        if matches!(imm, 0 | -1) && matches!(kind, ImmArithKind::Div | ImmArithKind::Rem) {
             return Ok(None);
         }
         let lhs_tr = self.compile_expr_ex(lhs)?;
@@ -104,6 +152,12 @@ impl<'tcx> FnBuilder<'tcx> {
         lhs: &HirExpr,
         rhs: &HirExpr,
     ) -> RuntimeResult<TypedReg> {
+        if let Some(reg) = self.try_compile_wide_int_binary(op, lhs, rhs)? {
+            return Ok(TypedReg {
+                reg,
+                kind: RegKind::Value,
+            });
+        }
         let result = self.compile_binary_ex_wide(op, lhs, rhs)?;
         // A narrow signed `MIN / -1` answers `2^(n-1)` at i64 width, one past
         // the type's range. The quotient wraps at the declared width, as the
@@ -111,17 +165,16 @@ impl<'tcx> FnBuilder<'tcx> {
         if !matches!(op, HirBinaryOp::Div) {
             return Ok(result);
         }
-        let signed_narrow =
-            [lhs.ty, rhs.ty]
-                .into_iter()
-                .find_map(|ty| match self.tcx.kind(self.unwrap_ref(ty)) {
-                    Some(TyKind::Int(
-                        int_ty @ (gossamer_types::IntTy::I8
-                        | gossamer_types::IntTy::I16
-                        | gossamer_types::IntTy::I32),
-                    )) => super::fast_paths::narrow_int_trunc(*int_ty),
-                    _ => None,
-                });
+        let signed_narrow = [self.static_ty(lhs), self.static_ty(rhs)]
+            .into_iter()
+            .find_map(|ty| match self.tcx.kind(self.unwrap_ref(ty)) {
+                Some(TyKind::Int(
+                    int_ty @ (gossamer_types::IntTy::I8
+                    | gossamer_types::IntTy::I16
+                    | gossamer_types::IntTy::I32),
+                )) => super::fast_paths::narrow_int_trunc(*int_ty),
+                _ => None,
+            });
         let Some((shift, signed)) = signed_narrow else {
             return Ok(result);
         };
@@ -155,8 +208,10 @@ impl<'tcx> FnBuilder<'tcx> {
         if matches!(
             op,
             HirBinaryOp::BitAnd | HirBinaryOp::BitOr | HirBinaryOp::BitXor
-        ) && matches!(self.tcx.kind(self.unwrap_ref(lhs.ty)), Some(TyKind::Bool))
-        {
+        ) && matches!(
+            self.tcx.kind(self.unwrap_ref(self.static_ty(lhs))),
+            Some(TyKind::Bool)
+        ) {
             let reg = self.compile_bool_bitwise(op, lhs, rhs)?;
             return Ok(TypedReg {
                 reg,
@@ -198,8 +253,8 @@ impl<'tcx> FnBuilder<'tcx> {
             return self.emit_binary_f64(op, lhs_f, rhs_f);
         }
         if lk == RegKind::I64 && rk == RegKind::I64 {
-            let lhs_unsigned = self.is_unsigned64_ty(lhs.ty);
-            let rhs_unsigned = self.is_unsigned64_ty(rhs.ty);
+            let lhs_unsigned = self.is_unsigned64_ty(self.static_ty(lhs));
+            let rhs_unsigned = self.is_unsigned64_ty(self.static_ty(rhs));
             if !lhs_unsigned
                 && !rhs_unsigned
                 && let Some(tr) = self.try_compile_i64_arith_imm(op, lhs, rhs)?
@@ -235,9 +290,9 @@ impl<'tcx> FnBuilder<'tcx> {
             // A shift's result carries the shifted operand's type; the count
             // has a type of its own. Every other op takes the pair's.
             let overflow_ty = if matches!(op, HirBinaryOp::Shl | HirBinaryOp::Shr) {
-                int_ty_of(self, lhs.ty)
+                int_ty_of(self, self.static_ty(lhs))
             } else {
-                [lhs.ty, rhs.ty]
+                [self.static_ty(lhs), self.static_ty(rhs)]
                     .into_iter()
                     .find_map(|ty| int_ty_of(self, ty))
             };
@@ -253,8 +308,8 @@ impl<'tcx> FnBuilder<'tcx> {
         // Enums fall through to the structural `Op::Eq` below.
         if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {
             if let Some(sname) = self
-                .struct_eq_dispatch_name(lhs.ty)
-                .or_else(|| self.struct_eq_dispatch_name(rhs.ty))
+                .struct_eq_dispatch_name(self.static_ty(lhs))
+                .or_else(|| self.struct_eq_dispatch_name(self.static_ty(rhs)))
             {
                 return self.compile_struct_eq(&sname, op, lhs, rhs);
             }
@@ -265,7 +320,7 @@ impl<'tcx> FnBuilder<'tcx> {
         // and enums; the checker has confirmed the method exists.
         // An `Option` / `Result` has no `cmp` of its own: it orders by arm and
         // then by payload, which the structural compare below already does.
-        let carrier = [lhs.ty, rhs.ty].into_iter().any(|ty| {
+        let carrier = [self.static_ty(lhs), self.static_ty(rhs)].into_iter().any(|ty| {
             matches!(
                 self.tcx.kind(self.unwrap_ref(ty)),
                 Some(TyKind::Adt { def, .. }) if def.local == u32::MAX || def.local == u32::MAX - 1
@@ -277,8 +332,8 @@ impl<'tcx> FnBuilder<'tcx> {
         ) && !carrier
         {
             if let Some(sname) = self
-                .adt_type_name(lhs.ty)
-                .or_else(|| self.adt_type_name(rhs.ty))
+                .adt_type_name(self.static_ty(lhs))
+                .or_else(|| self.adt_type_name(self.static_ty(rhs)))
             {
                 return self.compile_struct_cmp(&sname, op, lhs, rhs);
             }
@@ -291,8 +346,8 @@ impl<'tcx> FnBuilder<'tcx> {
         // struct-`==` route above.
         if let Some(method) = arith_overload_method(op) {
             if let Some(sname) = self
-                .adt_type_name(lhs.ty)
-                .or_else(|| self.adt_type_name(rhs.ty))
+                .adt_type_name(self.static_ty(lhs))
+                .or_else(|| self.adt_type_name(self.static_ty(rhs)))
             {
                 return self.compile_struct_binop(&sname, method, lhs, rhs);
             }
@@ -527,7 +582,7 @@ impl<'tcx> FnBuilder<'tcx> {
         let kind = self.expr_kind(operand);
         // Negation and complement run at i64 width; a narrower type takes its
         // value back from the wide result.
-        let narrow = match self.tcx.kind(operand.ty) {
+        let narrow = match self.tcx.kind(self.static_ty(operand)) {
             Some(TyKind::Int(int_ty)) => super::fast_paths::narrow_int_trunc(*int_ty),
             _ => None,
         };

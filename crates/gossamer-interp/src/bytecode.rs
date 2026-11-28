@@ -94,6 +94,23 @@ pub enum Op {
     Neg { dst: Reg, operand: Reg },
     /// `dst = !operand` on `Bool`.
     Not { dst: Reg, operand: Reg },
+    /// `dst = lhs op rhs` on `i128` / `u128` values (`unsigned` for `u128`),
+    /// checked at 128 bits, or wrapping there when `wrapping`.
+    WideArith {
+        dst: Reg,
+        lhs: Reg,
+        rhs: Reg,
+        op: crate::value::wide::WideOp,
+        unsigned: bool,
+        wrapping: bool,
+    },
+    /// `dst = -operand` (`neg`) or `dst = !operand` on an `i128` / `u128`.
+    WideUnary {
+        dst: Reg,
+        operand: Reg,
+        neg: bool,
+        unsigned: bool,
+    },
     /// `dst = lhs == rhs`, kind-aware.
     Eq { dst: Reg, lhs: Reg, rhs: Reg },
     /// `dst = lhs != rhs`.
@@ -250,7 +267,7 @@ pub enum Op {
     /// `MethodCall` + IC + Vec-args + builtin-extract chain saves
     /// the receiver clone + per-call buf-init + indirect dispatch.
     /// The handler verifies the receiver is a `Value::Struct`
-    /// named `"Stream"` at runtime and falls back to a regular
+    /// named `"io::Stream"` at runtime and falls back to a regular
     /// `MethodCall`-shaped lookup if not - so emitting this op
     /// for any user-defined `write_byte` is still correct, just
     /// not as fast.
@@ -259,7 +276,7 @@ pub enum Op {
         /// since `write_byte` returns unit).
         dst: Reg,
         /// Register holding the stream value (a
-        /// `Value::struct_("Stream", [(fd)`
+        /// `Value::struct_("io::Stream", [(fd)`
         /// in the steady state).
         stream_reg: Reg,
         /// Register holding the byte (a `Value::Int` in
@@ -1091,6 +1108,22 @@ pub enum Op {
     },
     /// Checked `ints[dst_i] = ints[lhs_i] / ints[rhs_i]`.
     DivI64 { dst_i: Reg, lhs_i: Reg, rhs_i: Reg },
+    /// `ints[dst_i] = ints[lhs_i] / ints[rhs_i]` for a signed type narrower
+    /// than `i64`, panicking on `MIN / -1` of that type.
+    CheckedDivI64 {
+        dst_i: Reg,
+        lhs_i: Reg,
+        rhs_i: Reg,
+        overflow_ty: IntTy,
+    },
+    /// `ints[dst_i] = ints[lhs_i] % ints[rhs_i]` for a signed type narrower
+    /// than `i64`, panicking on `MIN % -1` of that type.
+    CheckedRemI64 {
+        dst_i: Reg,
+        lhs_i: Reg,
+        rhs_i: Reg,
+        overflow_ty: IntTy,
+    },
     /// Checked `ints[dst_i] = ints[lhs_i] % ints[rhs_i]`.
     RemI64 { dst_i: Reg, lhs_i: Reg, rhs_i: Reg },
     /// Checked unsigned `ints[dst_i] = (ints[lhs_i] as u64) / (ints[rhs_i] as u64)`.
@@ -1524,16 +1557,44 @@ pub enum Op {
         /// Register holding the `CaptureCell`.
         cell: Reg,
     },
-    /// `registers[dst] = take(cell.inner)` - moves a capture cell's
-    /// value into the binding's home register for the duration of one
-    /// instruction that may mutate it. Moving keeps the aggregate's
-    /// refcount at one so the mutation happens in place; the matching
-    /// [`Op::CaptureCellSet`] returns the value on the next instruction.
+    /// `registers[dst] = take(cell.inner)` - locks a capture cell and moves
+    /// its value into the binding's home register for the one instruction
+    /// that follows, which runs no program code. Moving keeps the
+    /// aggregate's refcount at one so a mutation happens in place; the lock
+    /// makes a goroutine reading the binding meanwhile wait for the matching
+    /// [`Op::CaptureCellSet`], which returns the value and unlocks.
     CaptureCellTake {
         /// Destination Value register (the binding's home register).
         dst: Reg,
         /// Register holding the `CaptureCell`.
         cell: Reg,
+    },
+    /// `cell.inner[index] = registers[value]` under the cell's lock: an
+    /// [`Op::IndexSet`] on a captured binding, done in place on the cell's
+    /// value while no other goroutine can read or write it.
+    CaptureCellIndexSet {
+        /// Register holding the `CaptureCell`.
+        cell: Reg,
+        /// The binding's home register, cleared first so the copy an
+        /// earlier read left there does not share the value written.
+        home: Reg,
+        /// Register holding the index (or range).
+        index: Reg,
+        /// Register holding the new element.
+        value: Reg,
+    },
+    /// `cell.inner.<field> = registers[value]` under the cell's lock, the
+    /// [`Op::FieldSet`] counterpart of [`Op::CaptureCellIndexSet`].
+    CaptureCellFieldSet {
+        /// Register holding the `CaptureCell`.
+        cell: Reg,
+        /// The binding's home register, cleared as for
+        /// [`Op::CaptureCellIndexSet`].
+        home: Reg,
+        /// Constant-pool index of the field name.
+        name_idx: ConstIdx,
+        /// Register holding the new field value.
+        value: Reg,
     },
     /// `cell.inner = take(registers[src])` - returns the home register's
     /// value to the capture cell, publishing the instruction's mutation
@@ -1857,6 +1918,50 @@ pub enum WideOp {
         /// Register holding the value new elements take.
         fill: Reg,
     },
+    /// `root.path.push(value)` for a Vec reached through `path`, grown in its
+    /// own storage for the same reason as [`Self::PlaceSet`].
+    PlaceVecPush {
+        /// Register holding the root local.
+        root: Reg,
+        /// The steps from the root to the Vec.
+        path: Box<[PlaceStep]>,
+        /// Register holding the pushed value.
+        value: Reg,
+    },
+    /// `root.path.swap(a, b)` for a Vec reached through `path`, done in its
+    /// own storage for the same reason as [`Self::PlaceSet`].
+    PlaceVecSwap {
+        /// Register holding the root local.
+        root: Reg,
+        /// The steps from the root to the Vec.
+        path: Box<[PlaceStep]>,
+        /// Register holding the first index.
+        a: Reg,
+        /// Register holding the second index.
+        b: Reg,
+    },
+    /// `registers[dst] = root.path.pop()` for a Vec reached through `path`,
+    /// shortened in its own storage for the same reason as
+    /// [`Self::PlaceSet`].
+    PlaceVecPop {
+        /// Destination Value register for the `Option` popped.
+        dst: Reg,
+        /// Register holding the root local.
+        root: Reg,
+        /// The steps from the root to the Vec.
+        path: Box<[PlaceStep]>,
+    },
+    /// `registers[dst]` = the place `steps` names inside the captured
+    /// binding `registers[cell]` holds (a capture cell, or a place already),
+    /// the `&mut` argument a call passes for that place.
+    CapturePlace {
+        /// Destination Value register.
+        dst: Reg,
+        /// Register holding the captured binding's cell or place.
+        cell: Reg,
+        /// The steps from the binding to the place.
+        steps: Arc<[crate::value::CaptureStep]>,
+    },
 }
 
 /// One closure literal's compile-time template, referenced by
@@ -2054,6 +2159,18 @@ pub struct FnChunk {
     /// landing pad that runs the deferred expressions pending there. Empty
     /// for chunks with no `defer`.
     pub unwind_table: Vec<UnwindEntry>,
+    /// The body this function runs when a caller passes a captured
+    /// binding's cell for one of [`Self::mut_ref_params`]. There each such
+    /// parameter is that cell, read and written through its lock one
+    /// instruction at a time, so a closure the body calls sees the body's
+    /// writes and the body sees the closure's. Set only in a program some
+    /// call of which passes such a cell.
+    pub cell_variant: std::sync::OnceLock<Arc<FnChunk>>,
+    /// Whether this chunk is a [`Self::cell_variant`] body.
+    pub cell_params: bool,
+    /// Whether a call in this chunk, or in a closure it builds, passes a
+    /// captured binding's cell for a `&mut` parameter.
+    pub passes_capture_cells: bool,
 }
 
 /// One span of a chunk's instructions whose faults land somewhere other than

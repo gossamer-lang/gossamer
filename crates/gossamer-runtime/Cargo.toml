@@ -113,6 +113,8 @@ quick-xml = "0.41"
 # `hmac` natively instead of paying a VM round-trip. (`blake3` moved
 # to the native table - the wasm crypto shims are gated out.)
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
+# SHA-3, the sibling of `sha2`, for `std::crypto::sha3_256` / `sha3_512`.
+sha3 = { version = "0.10", default-features = false, features = ["std"] }
 # Same versions as gossamer-std so the compiled-tier x509 / tar / zip
 # leaf intrinsics produce byte-identical results to the VM tier.
 x509-parser = "0.18"
@@ -129,7 +131,7 @@ web-time = "1"
 # Native-only dependencies. These either link C (mimalloc, zstd,
 # bzip2, ring via rustls), require an OS RNG/signals/sockets/dynamic
 # (getrandom, uuid, signal-hook, mio), or drive the
-# native HTTP/QUIC stack (ureq, h2, tokio, gossamer-http3) - none of
+# native HTTP stack (ureq, h2, tokio) - none of
 # which build for wasm32-unknown-unknown. The compiled-tier shims that
 # use them are gated out of the wasm VM build (see lib.rs / c_abi.rs);
 # native (cfg-not-wasm is always true there) keeps the identical set.
@@ -165,12 +167,33 @@ zstd = "0.14"
 # `libgossamer_runtime.a` self-contained on every platform.
 bzip2 = { version = "0.5", features = ["static"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "fast", "pkcs8", "pem"] }
-p256 = { version = "0.14", default-features = false, features = ["ecdsa", "std", "pem"] }
-# RSA signature verification for the RS256 / RS384 / RS512 JWT family -
-# what Auth0, Okta, Entra ID, Google, Cognito, and Keycloak mint. Same
-# version and provider `rustls` already links, and verification only, so
-# the compiled tier gains no key-generation surface.
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "ecdh", "std", "pem", "pkcs8"] }
+# P-384 signatures (RFC 6979 nonces) and key agreement, mirroring P-256.
+p384 = { version = "0.14", default-features = false, features = ["ecdsa", "ecdh", "std", "pem", "pkcs8"] }
+# Static and ephemeral X25519 key agreement.
+x25519-dalek = { version = "2.0.1", default-features = false, features = ["static_secrets", "zeroize"] }
+# ML-KEM-768 / ML-KEM-1024 (FIPS 203), pinned: its API is pre-1.0.
+ml-kem = { version = "=0.3.4", features = ["getrandom"] }
+# Key containers: PKCS#8 (PBES2 encryption), SEC1, and PKCS#1 imports.
+pkcs8 = { version = "0.11", default-features = false, features = ["std", "pem", "encryption"] }
+sec1 = { version = "0.8", default-features = false, features = ["std", "pem", "der"] }
+pkcs1 = { version = "0.8", default-features = false, features = ["std", "pem"] }
+# One-element DER checks for custom certificate extensions.
+der = { version = "0.8", default-features = false, features = ["std"] }
+hmac = "0.12"
+# The OS random source in the form `rsa` 0.10 key generation takes.
+getrandom04 = { package = "getrandom", version = "0.4", default-features = false, features = ["sys_rng"] }
+# HKDF for `crypto::kdf`, on the same version and provider `rustls`
+# already links.
 ring = "0.17"
+# RSA-OAEP encryption, which `ring` does not offer. 0.10.0 is the first
+# release with the constant-time fixes RUSTSEC-2023-0071 names.
+rsa = { version = "0.10.0", default-features = false, features = ["std", "encoding", "getrandom"] }
+# Certificate and CSR generation for `std::crypto::x509`, on the same `ring`
+# provider; `x509-parser` reads a CA certificate and a CSR back in.
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "x509-parser"] }
+# Certificate validity times, in the type rcgen takes them as.
+time = { version = "0.3", default-features = false, features = ["std"] }
 signal-hook = { workspace = true }
 crossbeam-deque = { workspace = true }
 mio = { workspace = true }
@@ -183,7 +206,12 @@ socket2 = "0.6"
 # for parity with `gos`.
 ureq = { workspace = true, features = ["cookies"] }
 png = { workspace = true }
-jpeg-decoder = "0.3"
+# JPEG decoding for `std::image::decode`, straight into the answer's
+# buffer as RGBA8.
+zune-jpeg = "0.5"
+zune-core = "0.5"
+# GIF decoding for `std::image::decode`.
+gif = "0.14"
 jpeg-encoder = { workspace = true }
 
 # Raw TLS-over-socket (`net::TcpStream::start_tls`) for the compiled
@@ -201,12 +229,6 @@ webpki-roots = "1"
 h2 = "0.4"
 tokio = { version = "1", default-features = false, features = ["io-util"] }
 
-# HTTP/3 server + client (`std::http_h3` compiled-tier shim). The
-# QUIC + h3 engine is shared with the interpreter via the standalone
-# `gossamer-http3` crate; the C-ABI shim in `c_abi::http3` marshals
-# the engine's wire types into the same `GosHttpRequest` /
-# `GosHttpResponse` path the h1 / h2 servers use.
-gossamer-http3 = { workspace = true }
 
 # UUID generation (`std::uuid` compiled-tier helpers).
 uuid = { version = "1", features = ["v4", "v7"] }
@@ -226,6 +248,8 @@ nix = { version = "0.31", default-features = false, features = ["user", "dir"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",

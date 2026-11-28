@@ -136,6 +136,15 @@ const SCAFFOLD_ADDITIONS: &str = r#"
 #[gos_module("extras")]
 mod extras {
     pub fn touch() {}
+
+    pub fn describe(name: Option<String>, count: Option<i64>, scale: Option<f64>) -> String {
+        format!(
+            "{}:{}:{}",
+            name.unwrap_or_else(|| "-".to_string()),
+            count.map_or_else(|| "-".to_string(), |n| n.to_string()),
+            scale.map_or_else(|| "-".to_string(), |x| x.to_string())
+        )
+    }
 }
 
 pub struct Counter {
@@ -221,6 +230,8 @@ fn main() {
     println("{}", probe::greet("gossamer"))
     println("{:?}", probe::parse_int("12"))
     println("{:?}", extras::touch())
+    println("{}", extras::describe(Some("box"), Some(3), Some(1.5)))
+    println("{}", extras::describe(None, None, None))
     let c = Counter::new()
     Counter::inc(c)
     Counter::inc(c)
@@ -235,11 +246,13 @@ fn main() {
 }
 "#;
 
-const SCAFFOLD_EXPECTED: &str = "hello, gossamer\nOk(12)\n()\n2\n42\n15\n10\nHEY!\n5997000\n";
+const SCAFFOLD_EXPECTED: &str =
+    "hello, gossamer\nOk(12)\n()\nbox:3:1.5\n-:-:-\n2\n42\n15\n10\nHEY!\n5997000\n";
 
 /// The crate `gos new --template binding` writes builds as written, and a
-/// project calling it - a unit function, an opaque type sharing a standard
-/// handle's name, and callbacks of every closure shape - prints the same
+/// project calling it - a unit function, `Option` arguments, an opaque type
+/// sharing a standard handle's name, and callbacks of every closure shape -
+/// prints the same
 /// under `gos run` and from `gos build` binaries.
 #[test]
 fn scaffolded_binding_runs_and_builds() {

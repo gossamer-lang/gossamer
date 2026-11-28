@@ -177,6 +177,9 @@ pub(super) enum PrintKind {
     /// `Vec<u64>` / `Vec<usize>`: the same slots read as unsigned, so an
     /// element at or above `i64::MAX` renders as its own decimal.
     VecUint,
+    /// `Vec<i128>` / `Vec<u128>` (`true` for unsigned), each element read
+    /// from its two slots.
+    VecWide(bool),
     /// `Vec<f64>` formatted via `gos_rt_vec_format_f64`.
     VecF64,
     /// `Vec<bool>` formatted via `gos_rt_vec_format_bool`.
@@ -258,6 +261,8 @@ fn tuple_elem_tag(tcx: &TyCtxt, ty: Ty) -> Option<u8> {
         // A `u64` / `usize` slot spans the whole unsigned range, so it reads
         // as unsigned wherever a tag stream names it.
         TyKind::Int(IntTy::U64 | IntTy::Usize) => Some(1),
+        TyKind::Int(IntTy::I128) => Some(gossamer_abi::TUPLE_TAG_I128),
+        TyKind::Int(IntTy::U128) => Some(gossamer_abi::TUPLE_TAG_U128),
         // Every other integer's slot holds its value widened to a word, sign-
         // extended when signed and zero-extended when not, so the signed word
         // is the value itself.
@@ -283,6 +288,9 @@ fn debug_payload_kind(tcx: &TyCtxt, ty: Ty) -> Option<u8> {
     }
     match tcx.kind_of(ty) {
         TyKind::Int(IntTy::U64 | IntTy::Usize) => Some(1),
+        // A 128-bit payload is boxed; the helper reads it through the word.
+        TyKind::Int(IntTy::I128) => Some(gossamer_abi::TUPLE_TAG_I128),
+        TyKind::Int(IntTy::U128) => Some(gossamer_abi::TUPLE_TAG_U128),
         TyKind::Int(_) => Some(0),
         TyKind::Float(_) => Some(2),
         TyKind::Bool => Some(3),
@@ -633,6 +641,37 @@ fn holds_f32(tcx: &TyCtxt, ty: gossamer_types::Ty) -> bool {
     }
 }
 
+/// Whether a value of `ty` holds a 128-bit integer anywhere inside it: an
+/// element, a field, a payload, a key or a value. `depth` bounds the walk
+/// through recursive types.
+fn holds_wide(tcx: &TyCtxt, ty: gossamer_types::Ty, depth: u32) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    let next = depth + 1;
+    match tcx.kind_of(ty) {
+        TyKind::Int(int) => int.is_wide(),
+        TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. } => {
+            holds_wide(tcx, *elem, next)
+        }
+        TyKind::Ref { inner, .. } => holds_wide(tcx, *inner, next),
+        TyKind::Tuple(elems) => elems.iter().any(|e| holds_wide(tcx, *e, next)),
+        TyKind::HashMap { key, value, .. } => {
+            holds_wide(tcx, *key, next) || holds_wide(tcx, *value, next)
+        }
+        TyKind::Adt { def, substs } => {
+            substs.types().iter().any(|t| holds_wide(tcx, *t, next))
+                || tcx
+                    .adt_field_tys(*def, substs)
+                    .is_some_and(|fields| fields.iter().any(|f| holds_wide(tcx, *f, next)))
+                || tcx.enum_variant_tys(*def).is_some_and(|variants| {
+                    variants.iter().flatten().any(|f| holds_wide(tcx, *f, next))
+                })
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn operand_print_kind(body: &Body, tcx: &TyCtxt, operand: &Operand) -> PrintKind {
     match operand {
         Operand::Const(ConstValue::Str(_)) => PrintKind::StrPtr,
@@ -674,6 +713,31 @@ pub(super) fn operand_print_kind(body: &Body, tcx: &TyCtxt, operand: &Operand) -
             );
             if !matches!(tcx.kind_of(ty), TyKind::Float(_)) && !flat_f32 && holds_f32(tcx, ty) {
                 return PrintKind::Unsupported("a value holding an f32");
+            }
+            // A 128-bit integer inside another value renders through the
+            // same descriptor walk; the integer itself, or a reference to it,
+            // renders through its own concat entry.
+            let wide_scalar = tcx.is_wide_int(ty)
+                || matches!(tcx.kind_of(ty), TyKind::Ref { inner, .. } if tcx.is_wide_int(*inner));
+            // An `Option` / `Result` whose arms are scalars renders through
+            // the payload helper, which reads a boxed 128-bit payload.
+            let scalar_carrier = matches!(
+                tcx.kind_of(ty),
+                TyKind::Adt { def, substs }
+                    if (def.local == u32::MAX || def.local == u32::MAX - 1)
+                        && substs.types().iter().all(|t| debug_payload_kind(tcx, *t).is_some())
+            );
+            // A user type renders through its own `fmt`, which reaches each
+            // field; a sequence of 128-bit integers has a formatter of its own.
+            let user_type =
+                matches!(tcx.kind_of(ty), TyKind::Adt { def, .. } if def.local < u32::MAX - 64);
+            let wide_seq = matches!(
+                tcx.kind_of(ty),
+                TyKind::Vec(elem) | TyKind::Slice(elem) if tcx.is_wide_int(*elem)
+            );
+            if !wide_scalar && !scalar_carrier && !user_type && !wide_seq && holds_wide(tcx, ty, 0)
+            {
+                return PrintKind::Unsupported("a value holding a 128-bit integer");
             }
             // A container renders through its own runtime shim whether the
             // local carries the container's type or the bare i64 handle the
@@ -801,6 +865,9 @@ pub(super) fn operand_print_kind(body: &Body, tcx: &TyCtxt, operand: &Operand) -
                 // than naming a parallel set of its own.
                 TyKind::Slice(elem) => {
                     let inner = match tcx.kind_of(*elem) {
+                        TyKind::Int(int) if int.is_wide() => {
+                            PrintKind::VecWide(*int == IntTy::U128)
+                        }
                         TyKind::Int(IntTy::U64 | IntTy::Usize) => PrintKind::VecUint,
                         TyKind::Int(_) => PrintKind::VecI64,
                         TyKind::Float(_) => PrintKind::VecF64,
@@ -823,6 +890,7 @@ pub(super) fn operand_print_kind(body: &Body, tcx: &TyCtxt, operand: &Operand) -
                     }
                 }
                 TyKind::Vec(elem) => match tcx.kind_of(*elem) {
+                    TyKind::Int(int) if int.is_wide() => PrintKind::VecWide(*int == IntTy::U128),
                     TyKind::Int(IntTy::U64 | IntTy::Usize) => PrintKind::VecUint,
                     TyKind::Int(_) => PrintKind::VecI64,
                     TyKind::Float(_) => PrintKind::VecF64,

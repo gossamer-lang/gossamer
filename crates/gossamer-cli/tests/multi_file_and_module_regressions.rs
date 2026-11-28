@@ -950,12 +950,12 @@ fn main() {{
 #[test]
 fn native_binary_exec_run_returns_subprocess_output() {
     let src = r#"
-use std::os::exec
+use std::process
 fn main() {
-    println("calling exec::run")
+    println("calling process::run")
     let mut argv: Vec<String> = Vec::from([])
     argv.push("hello-via-echo")
-    match exec::run("echo", argv) {
+    match process::run("echo", argv) {
         Ok(o) => println("code={} stdout={}", o.code, o.stdout),
         Err(e) => println("err: {}", e),
     }
@@ -970,7 +970,7 @@ fn main() {
     let _ = fs::remove_dir_all(&dir);
     assert_eq!(run.2, Some(0), "stderr: {}", run.1);
     assert!(
-        run.0.contains("calling exec::run"),
+        run.0.contains("calling process::run"),
         "expected pre-call print, got: {:?}",
         run.0,
     );
@@ -981,11 +981,11 @@ fn main() {
     );
 }
 
-/// Regression for the askq segfault: `exec::run(&prog,
+/// Regression for the askq segfault: `process::run(&prog,
 /// &[a, b, c].to_vec())` reached the runtime via the
 /// literal-array `.to_vec()` shape (not the empty-array +
 /// push pattern). Two distinct root causes converged here:
-/// 1. `exec::run` had no compiled-tier binding - the call
+/// 1. `process::run` had no compiled-tier binding - the call
 ///    fell through to a non-existent symbol and the
 ///    destination held an undefined Result pointer.
 /// 2. `[a, b, c].to_vec()` lowered to
@@ -997,13 +997,13 @@ fn main() {
 #[test]
 fn native_binary_exec_run_with_literal_array_args() {
     let src = r#"
-use std::os::exec
+use std::process
 fn main() {
     let args: Vec<String> = [
         "-n",
         "from-literal-array",
     ].to_vec()
-    match exec::run("echo", args) {
+    match process::run("echo", args) {
         Ok(o) => println("ok code={} stdout={}", o.code, o.stdout),
         Err(e) => println("err: {}", e),
     }
@@ -1997,37 +1997,27 @@ fn main() {
 }
 
 #[test]
-fn i128_use_panics_native_build_rather_than_silently_truncating() {
-    // `cl_type_of` was silently mapping `i128`/`u128` to `i64`,
-    // so `let n: i128 = 1 << 100` would compile, run, and produce
-    // a corrupted i64 with no warning. Refuse the build instead.
+fn i128_native_build_keeps_every_bit_past_64() {
     let src = r#"
 fn main() {
-    let n: i128 = 1
-    println("{}", n)
+    let n: i128 = 1 << 100
+    let m: u128 = u128::MAX - 1
+    println("{} {}", n, m)
 }
 "#;
-    let dir = fresh_dir("i128-reject");
-    let path = write_source(&dir, "i128_reject", src);
+    let expected = "1267650600228229401496703205376 340282366920938463463374607431768211454";
+    let dir = fresh_dir("i128-width");
+    let path = write_source(&dir, "i128_width", src);
+    let vm = run_vm(&path);
+    assert_eq!(vm.2, Some(0), "vm stderr: {}", vm.1);
+    assert_eq!(vm.0.trim(), expected, "vm stdout: {:?}", vm.0);
     let cl_dir = dir.join("cl");
     fs::create_dir_all(&cl_dir).unwrap();
-    let out = Command::new(gos_bin())
-        .arg("build")
-        .arg("--out-dir")
-        .arg(&cl_dir)
-        .arg(&path)
-        .output()
-        .expect("gos build");
+    let bin = build_native(&path, &cl_dir);
+    let nat = run_native(&bin);
     let _ = fs::remove_dir_all(&dir);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !out.status.success(),
-        "expected `gos build` to refuse i128 source; got success. stderr={stderr}",
-    );
-    assert!(
-        stderr.contains("i128") && stderr.contains("compiled tier"),
-        "expected diagnostic mentioning i128 + compiled tier, got: {stderr}",
-    );
+    assert_eq!(nat.2, Some(0), "native stderr: {}", nat.1);
+    assert_eq!(nat.0.trim(), expected, "native stdout: {:?}", nat.0);
 }
 
 #[test]
@@ -5476,4 +5466,35 @@ fn top_level_try_beside_serde_calls_needs_no_errors_import() {
     let _ = fs::remove_dir_all(&dir);
     assert_ne!(out.2, Some(0), "stdout: {}", out.0);
     assert!(out.1.contains("error[GR0001]"), "stderr: {}", out.1);
+}
+
+/// A module's grouped `use std::{errors, fs}` keeps binding its names when a
+/// module read after it decodes JSON into a type, which makes the toolchain
+/// import `errors` for its generated decoder.
+#[test]
+fn grouped_std_imports_survive_a_typed_decode_in_a_later_module() {
+    let dir = write_project(
+        "grouped_imports_typed_decode",
+        "x.dev/grouped",
+        &[
+            (
+                "src/main.gos",
+                "use config\nuse zz\nfn main() {\n    println(f\"{config::load(\"missing\").is_ok()} {zz::d(\"{\\\"x\\\": 4}\")}\")\n}\n",
+            ),
+            (
+                "src/config.gos",
+                "use std::{errors, fs}\npub fn load(path: String) -> Result<i64, errors::Error> {\n    let t = fs::read_to_string(path)?\n    Ok(t.len())\n}\n",
+            ),
+            (
+                "src/zz.gos",
+                "use std::encoding::json\nstruct P { x: i64 }\npub fn d(t: String) -> i64 { json::decode::<P>(t).unwrap().x }\n",
+            ),
+        ],
+    );
+    let (out, err, code) = project_run_vm(&dir);
+    assert_eq!(code, Some(0), "vm stderr: {err}");
+    assert_eq!(out, "false 4\n");
+    let (out, err, code) = project_build_run(&dir, "grouped");
+    assert_eq!(code, Some(0), "native stderr: {err}");
+    assert_eq!(out, "false 4\n");
 }

@@ -1,16 +1,16 @@
-use std::image
+use std::{errors, image}
+use std::image::{Image, Rgba}
 
-fn png_width() -> i64 {
-    let source = image::filled(2, 1, 0xff0000ff)
-    image::set_pixel(source, 1, 0, 0x00ff00ff)
-    let png = image::encode_png_base64(source)
-    let decoded = image::decode_base64(png)
-    image::width(decoded)
+fn png_width() -> Result<i64, errors::Error> {
+    let mut source = Image::filled(2, 1, Rgba { r: 255, g: 0, b: 0, a: 255 })?
+    source.set_pixel(1, 0, Rgba { r: 0, g: 255, b: 0, a: 255 })
+    let decoded = image::decode(source.encode_png()?)?
+    Ok(decoded.width())
 }
 
-println(png_width())
-println(png_width())
-let source = image::filled(2, 1, 0xff0000ff)
-image::set_pixel(source, 1, 0, 0x00ff00ff)
-println(image::pixel(source, 1, 0))
-println(image::height(image::decode_base64(image::encode_jpeg_base64(source, 90))))
+println(png_width().unwrap())
+println(png_width().unwrap())
+let mut source = Image::filled(2, 1, Rgba { r: 255, g: 0, b: 0, a: 255 }).unwrap()
+source.set_pixel(1, 0, Rgba { r: 0, g: 255, b: 0, a: 255 })
+println(source.pixel(1, 0).unwrap())
+println(image::decode(source.encode_jpeg(quality: 90).unwrap()).unwrap().height())

@@ -327,7 +327,11 @@ fn invoke_clang_pipeline(
         .arg(format!("--target={triple}"));
     if target_arch_from_triple(triple) == "x86_64" {
         cmd.arg(format!("-march={mcpu}"));
-        cmd.arg("-mprefer-vector-width=256");
+        // The width cap the llc pipeline passes as `-mattr`. Clang's
+        // `-mprefer-vector-width` only marks functions it generates from
+        // source, which IR input has none of, so the feature goes to the
+        // target machine directly, where it governs every function here.
+        cmd.args(["-Xclang", "-target-feature", "-Xclang", "+prefer-256-bit"]);
     } else {
         cmd.arg(format!("-mcpu={mcpu}"));
     }

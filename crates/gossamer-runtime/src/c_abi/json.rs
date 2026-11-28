@@ -19,13 +19,37 @@ use std::borrow::Cow;
 
 use serde::Deserialize;
 
-use super::json_ref::JsonRef;
+use super::json_ref::{JsonRef, Num};
 use super::*;
 
 /// Materializes a document [`gossamer_core::json::validate`] accepted, whose
 /// depth it has already bounded. `serde_json`'s own recursion counter rejects
 /// the valid document at depth 128 one level early, so that duplicate guard
 /// is disabled.
+/// The serde_json tree of a document the language's parser read.
+fn serde_from_core(value: gossamer_core::json::Value) -> serde_json::Value {
+    use gossamer_core::json::Value as Core;
+    match value {
+        Core::Null => serde_json::Value::Null,
+        Core::Bool(b) => serde_json::Value::Bool(b),
+        Core::Int(n) => serde_json::Value::from(n),
+        Core::Uint(n) => serde_json::Value::from(n),
+        Core::Number(f) => {
+            serde_json::Number::from_f64(f).map_or(serde_json::Value::Null, Into::into)
+        }
+        Core::String(s) => serde_json::Value::String(s),
+        Core::Array(items) => {
+            serde_json::Value::Array(items.into_iter().map(serde_from_core).collect())
+        }
+        Core::Object(members) => serde_json::Value::Object(
+            members
+                .into_iter()
+                .map(|(k, v)| (k, serde_from_core(v)))
+                .collect(),
+        ),
+    }
+}
+
 fn parse_checked_json(text: &str) -> Result<serde_json::Value, serde_json::Error> {
     let mut deserializer = serde_json::Deserializer::from_str(text);
     deserializer.disable_recursion_limit();
@@ -289,10 +313,19 @@ pub unsafe extern "C" fn gos_rt_json_valid(text: *const c_char) -> i8 {
     })
 }
 
-/// entry point. Returns a real `GosResult` so `match` and `?`
-/// work across function boundaries in compiled code.
+/// `json::parse(text) -> Result<json::Value, Error>`, refusing a key an
+/// object repeats. Returns a real `GosResult` so `match` and `?` work across
+/// function boundaries in compiled code.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_parse(text: *const c_char) -> i128 {
+    // SAFETY: the caller's contract is this one's.
+    unsafe { gos_rt_json_parse_with(text, 0) }
+}
+
+/// `json::parse(text, duplicate_keys: ..)`: [`gos_rt_json_parse`], reading
+/// a key an object repeats as the `json::DuplicateKeys` policy index says.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_parse_with(text: *const c_char, duplicates: i64) -> i128 {
     ffi_entry!({
         let bytes: &[u8] = if text.is_null() {
             b""
@@ -302,7 +335,24 @@ pub unsafe extern "C" fn gos_rt_json_parse(text: *const c_char) -> i128 {
         };
         // The same validator the VM's parser is, so every tier accepts,
         // rejects, and describes a document alike.
-        match gossamer_core::json::validate_to_tape(bytes) {
+        let duplicates = gossamer_core::json::DuplicateKeys::from_index(duplicates);
+        match gossamer_core::json::parse_to_tape(bytes, duplicates) {
+            // Every reading of a tape takes the last of equal keys, so a
+            // document that repeats one and keeps the first is read as a tree.
+            Ok((text, tape))
+                if duplicates == gossamer_core::json::DuplicateKeys::UseFirst
+                    && gossamer_core::json::has_duplicate_key(text, tape.as_ref()) =>
+            {
+                let value = gossamer_core::json::parse_with(text, duplicates).map(serde_from_core);
+                match value {
+                    Ok(value) => gos_rt_result_new(0, GosJson::into_raw(value) as i64),
+                    Err(error) => {
+                        let message = error.to_string();
+                        let err = crate::c_abi::errors::error_new_from_bytes(message.as_bytes());
+                        gos_rt_result_new(1, err as i64)
+                    }
+                }
+            }
             Ok((text, tape)) => {
                 let ptr = GosJson::parsed(text, tape);
                 gos_rt_result_new(0, ptr as i64)
@@ -1120,10 +1170,18 @@ pub unsafe extern "C" fn gos_rt_json_display(j: *const GosJson) -> *mut c_char {
         let Some(v) = (unsafe { json_borrow(j) }) else {
             return alloc_cstring(b"null");
         };
-        match v.string() {
-            Some(s) => alloc_cstring(s.as_bytes()),
-            None => alloc_cstring(&render_ref_bytes(v, false)),
+        // A top-level string or float displays as the plain value does,
+        // which is how the bytecode VM carries a scalar read from a document.
+        if let Some(s) = v.string() {
+            return alloc_cstring(s.as_bytes());
         }
+        if let Some(Num::Float(x)) = v.number() {
+            return alloc_cstring(crate::builtins::f64_display(
+                x,
+                &mut crate::builtins::FloatText::new(),
+            ));
+        }
+        alloc_cstring(&render_ref_bytes(v, false))
     })
 }
 
@@ -1606,6 +1664,44 @@ pub extern "C" fn gos_rt_json_value_int(n: i64) -> *mut GosJson {
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_json_value_uint(n: i64) -> *mut GosJson {
     ffi_entry!({ GosJson::into_raw(serde_json::Value::Number((n as u64).into())) })
+}
+
+/// The `json::Value` of a 128-bit integer's `bits`: a number when it fits
+/// 64 bits, else a string of its digits, as the typed encoder writes it.
+fn wide_json_value(bits: u128, unsigned: bool) -> serde_json::Value {
+    if unsigned {
+        u64::try_from(bits).map_or_else(
+            |_| serde_json::Value::String(bits.to_string()),
+            |n| serde_json::Value::Number(n.into()),
+        )
+    } else {
+        let value = bits.cast_signed();
+        if let Ok(n) = i64::try_from(value) {
+            serde_json::Value::Number(n.into())
+        } else if let Ok(n) = u64::try_from(value) {
+            serde_json::Value::Number(n.into())
+        } else {
+            serde_json::Value::String(value.to_string())
+        }
+    }
+}
+
+/// `json::Value` constructor for an `i128`, passed as its low and high words.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_json_value_i128(low: i64, high: i64) -> *mut GosJson {
+    ffi_entry!({
+        let bits = super::concat::wide_from_words(low.cast_unsigned(), high.cast_unsigned());
+        GosJson::into_raw(wide_json_value(bits, false))
+    })
+}
+
+/// `json::Value` constructor for a `u128`, passed as its low and high words.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_json_value_u128(low: i64, high: i64) -> *mut GosJson {
+    ffi_entry!({
+        let bits = super::concat::wide_from_words(low.cast_unsigned(), high.cast_unsigned());
+        GosJson::into_raw(wide_json_value(bits, true))
+    })
 }
 
 /// `json::Value::Bool(b)` constructor.

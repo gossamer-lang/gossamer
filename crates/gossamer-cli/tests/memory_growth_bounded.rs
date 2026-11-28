@@ -2148,3 +2148,73 @@ fn main() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A 16-megapixel image holds its 64 MB of pixels once in native code: the
+/// runtime writes them straight into the vector the program keeps, and the
+/// `?` that hands them to `Image` moves them. The PNG round trip decodes into
+/// one buffer too.
+#[test]
+fn a_sixteen_megapixel_image_holds_its_pixels_once() {
+    if !gnu_time_available() {
+        return;
+    }
+    let dir = env::temp_dir().join(format!("gos-image-mem-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("pixels.gos");
+    std::fs::write(
+        &source,
+        "use std::{errors, image}
+
+fn encoded() -> Result<Vec<u8>, errors::Error> {
+    let img = image::Image::filled(4000, 4000, image::Rgba { r: 9, g: 8, b: 7, a: 255 })?
+    img.encode_png()
+}
+
+fn main() -> Result<(), errors::Error> {
+    let png = encoded()?
+    let back = image::decode(png)?
+    println(f\"{back.width()} {back.pixel(3999, 3999).is_some()}\")
+    Ok(())
+}
+",
+    )
+    .unwrap();
+    let pixel_kb: u64 = 4000 * 4000 * 4 / 1024;
+    for release in [false, true] {
+        let mut cmd = Command::new(gos_bin());
+        cmd.arg("build");
+        if release {
+            cmd.arg("--release");
+        }
+        let build = cmd.arg(&source).output().expect("spawn gos build");
+        assert!(
+            build.status.success(),
+            "build failed (release={release}): {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let profile = if release { "release" } else { "debug" };
+        let bin = dir
+            .join("target")
+            .join(profile)
+            .join(format!("pixels{}", std::env::consts::EXE_SUFFIX));
+        let out = Command::new("/usr/bin/time")
+            .arg("-v")
+            .arg(&bin)
+            .output()
+            .expect("spawn /usr/bin/time");
+        assert!(
+            out.status.success(),
+            "binary failed (release={release}): {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "4000 true");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let kb = parse_max_rss_kb(&stderr)
+            .unwrap_or_else(|| panic!("could not parse Maximum resident set size:\n{stderr}"));
+        assert!(
+            kb * 10 < pixel_kb * 13,
+            "peak {kb} KiB is past 1.3x the {pixel_kb} KiB of pixels (release={release})"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

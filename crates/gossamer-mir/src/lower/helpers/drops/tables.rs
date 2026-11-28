@@ -56,10 +56,19 @@ pub(super) fn answers_owned_map(name: &str) -> bool {
             | "gos_rt_map_window"
             | "Map::new"
             | "collections::Map::new"
+            | "Map::with_capacity"
+            | "collections::Map::with_capacity"
+            | "Map::from"
+            | "collections::Map::from"
             | "HashMap::new"
             | "collections::HashMap::new"
+            | "HashMap::with_capacity"
+            | "HashMap::from"
+            | "collections::HashMap::from"
             | "BTreeMap::new"
             | "collections::BTreeMap::new"
+            | "BTreeMap::from"
+            | "collections::BTreeMap::from"
     ) || name.starts_with("gos_rt_map_range_")
         || takes_element_out(name)
         || name.starts_with("gos_rt_chan_recv")
@@ -145,11 +154,17 @@ pub(super) fn table_free(
 /// Gossamer function normalises the carrier it answers (see
 /// [`own_returned_map_payloads`]), and a receive, pop, or remove hands over a
 /// table its source no longer holds.
-pub(super) fn answers_owned_table_carrier(callee: &Operand) -> bool {
+pub(super) fn answers_owned_table_carrier(
+    callee: &Operand,
+    user_fn_names: &std::collections::HashSet<String>,
+) -> bool {
     match callee {
         Operand::FnRef { .. } => true,
+        // A Gossamer function called by name: a method, or one the compiler
+        // writes (a decode root).
         Operand::Const(ConstValue::Str(name)) => {
-            takes_element_out(name)
+            user_fn_names.contains(name.as_str())
+                || takes_element_out(name)
                 || name.starts_with("gos_rt_chan_recv")
                 || name.starts_with("gos_rt_chan_try_recv")
         }
@@ -186,7 +201,11 @@ pub(super) fn moves_table_carrier(name: &str) -> bool {
 /// a map read out of another, or one lent to it as a parameter - is replaced
 /// by a table of its own before the return, and a payload it did build is
 /// handed over as it stands.
-pub(crate) fn own_returned_map_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+pub(crate) fn own_returned_map_payloads(
+    body: &mut Body,
+    tcx: &gossamer_types::TyCtxt,
+    user_fn_names: &std::collections::HashSet<String>,
+) {
     if body.locals.is_empty() {
         return;
     }
@@ -256,7 +275,9 @@ pub(crate) fn own_returned_map_payloads(body: &mut Body, tcx: &gossamer_types::T
                 {
                     match callee {
                         Operand::FnRef { .. } => built = true,
-                        Operand::Const(ConstValue::Str(name)) if answers_owned_map(name) => {
+                        Operand::Const(ConstValue::Str(name))
+                            if answers_owned_map(name) || user_fn_names.contains(name.as_str()) =>
+                        {
                             built = true;
                         }
                         _ => return false,
@@ -314,7 +335,8 @@ pub(crate) fn own_returned_map_payloads(body: &mut Body, tcx: &gossamer_types::T
             && !matches!(callee, Operand::FnRef { .. })
             && !matches!(
                 callee,
-                Operand::Const(ConstValue::Str(name)) if answers_owned_map(name)
+                Operand::Const(ConstValue::Str(name))
+                    if answers_owned_map(name) || user_fn_names.contains(name.as_str())
             )
         {
             normalise = true;
@@ -356,7 +378,10 @@ pub(crate) fn own_returned_map_payloads(body: &mut Body, tcx: &gossamer_types::T
 /// `own_returned_map_payloads`). A copy of such a carrier carries that with
 /// it. Any other carrier - a parameter, or a `get` on a container - lends its
 /// payload.
-pub(super) fn frame_owned_carriers(body: &Body) -> Vec<bool> {
+pub(super) fn frame_owned_carriers(
+    body: &Body,
+    user_fn_names: &std::collections::HashSet<String>,
+) -> Vec<bool> {
     let n_all = body.locals.len();
     let mut owned_carrier = vec![false; n_all];
     for block in &body.blocks {
@@ -367,7 +392,7 @@ pub(super) fn frame_owned_carriers(body: &Body) -> Vec<bool> {
         } = &block.terminator
             && destination.projection.is_empty()
             && (destination.local.0 as usize) < n_all
-            && answers_owned_table_carrier(callee)
+            && answers_owned_table_carrier(callee, user_fn_names)
         {
             owned_carrier[destination.local.0 as usize] = true;
         }
@@ -639,7 +664,7 @@ pub(crate) fn insert_drops_at_returns(
     let last_block = body.blocks.len();
 
     let n_all = body.locals.len();
-    let owned_carrier = frame_owned_carriers(body);
+    let owned_carrier = frame_owned_carriers(body, user_fn_names);
     // A table read out of a carrier this frame owns is this frame's to free.
     let takes_owned_table = |rvalue: &Rvalue, dest: usize| -> Option<&'static str> {
         let free = table_free(tcx, body.locals[dest].ty)?;
@@ -1231,6 +1256,16 @@ pub(crate) fn insert_drops_at_returns(
                 _ => {}
             }
         }
+        // A copy of a `!` value follows a call that never returns (`panic` in
+        // an `unwrap` arm), so it never runs and defines nothing.
+        let copies_never = |rvalue: &Rvalue| {
+            matches!(rvalue, Rvalue::Use(Operand::Copy(from))
+            if (from.local.0 as usize) < body.locals.len()
+                && matches!(
+                    tcx.kind_of(body.locals[from.local.0 as usize].ty),
+                    TyKind::Never
+                ))
+        };
         // The sole whole-local definition of each local, when it is a bare
         // copy of another local. `let t = make(); x = t` names one allocation
         // through `t`, and the transfer has to see past that hop: otherwise
@@ -1248,6 +1283,7 @@ pub(crate) fn insert_drops_at_returns(
                         // A null store holds no allocation: it is the placeholder
                         // that keeps a release on an untaken path a no-op.
                         && !matches!(rvalue, Rvalue::Use(Operand::Const(ConstValue::Int(0))))
+                        && !copies_never(rvalue)
                     {
                         let i = place.local.0 as usize;
                         definitions[i] = definitions[i].saturating_add(1);
@@ -1348,6 +1384,7 @@ pub(crate) fn insert_drops_at_returns(
                 if let StatementKind::Assign { place, rvalue } = &stmt.kind
                     && place.projection.is_empty()
                     && (place.local.0 as usize) < dst_all_owning.len()
+                    && !copies_never(rvalue)
                 {
                     let owning = matches!(
                         rvalue,

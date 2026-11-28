@@ -1342,7 +1342,7 @@ impl<'a> Builder<'a> {
     pub(super) fn key_orders_as_word(&self, key_ty: Ty) -> bool {
         use gossamer_types::{IntTy, TyKind};
         match self.tcx.kind_of(key_ty) {
-            TyKind::Int(IntTy::U64 | IntTy::Usize) => false,
+            TyKind::Int(IntTy::U64 | IntTy::Usize | IntTy::I128 | IntTy::U128) => false,
             TyKind::Int(_) | TyKind::Bool | TyKind::Char | TyKind::Float(_) => true,
             TyKind::Adt { def, .. } => {
                 self.tcx.is_inline_enum_ty(key_ty)
@@ -1791,8 +1791,11 @@ impl<'a> Builder<'a> {
     /// (see [`Self::lower_iter_closure`]).
     pub(super) fn fold_callback_arg(&mut self, value: Local, span: Span) -> Local {
         let ty = self.locals[value.0 as usize].ty;
+        // A two-word value - a carrier or a 128-bit integer - reaches its
+        // callback by reference, the shape `lower_iter_closure` gives it.
         if !(crate::lower::carrier_ref::is_two_word_carrier(self.tcx, ty)
             && self.elem_bytes_of(ty) > 8)
+            && !self.tcx.is_wide_int(ty)
         {
             return value;
         }

@@ -15,9 +15,10 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 pub use gossamer_core::json::{
-    DEFAULT_MAX_DEPTH, DEFAULT_MAX_SIZE, Error, Value, cap_from_program, integral_i64,
-    integral_u64, max_depth, max_size, parse, pointer, pointer_index, pointer_tokens,
-    set_max_depth, set_max_size, typed, validate,
+    DEFAULT_MAX_DEPTH, DEFAULT_MAX_SIZE, DuplicateKeys, Error, ParsedTape, Value, ValueRef,
+    cap_from_program, has_duplicate_key, integral_i64, integral_u64, max_depth, max_size, parse,
+    parse_to_tape, parse_with, pointer, pointer_index, pointer_tokens, set_max_depth, set_max_size,
+    typed, validate,
 };
 
 /// Encodes a [`Value`] as a compact UTF-8 JSON string.

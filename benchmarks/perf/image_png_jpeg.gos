@@ -1,11 +1,12 @@
 use std::image
+use std::image::{Image, Rgba}
 
 #[bench]
 fn bench_image_png_jpeg_round_trip_observed() -> i64 {
-    let source = image::filled(64, 64, 0x336699ff)
-    let png = image::encode_png_base64(source)
-    let decoded = image::decode_base64(png)
-    image::width(decoded)
+    let source = Image::filled(64, 64, Rgba { r: 0x33, g: 0x66, b: 0x99, a: 0xff }).unwrap()
+    let png = source.encode_png().unwrap()
+    let decoded = image::decode(png).unwrap()
+    decoded.width()
 }
 
 fn main() { }

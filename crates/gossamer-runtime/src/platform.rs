@@ -99,6 +99,71 @@ pub fn temp_dir() -> std::path::PathBuf {
     std::path::PathBuf::from("/tmp")
 }
 
+/// The machine's host name, or the reason it could not be read.
+///
+/// # Errors
+///
+/// The system call's failure, or a platform with no host to name.
+#[cfg(unix)]
+pub fn host_name() -> Result<String, String> {
+    // POSIX bounds a host name by `HOST_NAME_MAX` (255 on every supported
+    // Unix); one more byte holds the terminator.
+    let mut buf = [0u8; 256];
+    // SAFETY: `buf` is writable for its whole length, which is the length passed.
+    if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } != 0 {
+        return Err(format!("os::hostname: {}", std::io::Error::last_os_error()));
+    }
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8(buf[..len].to_vec())
+        .map_err(|_| "os::hostname: the host name is not UTF-8".to_string())
+}
+
+/// The machine's host name, or the reason it could not be read.
+///
+/// # Errors
+///
+/// The system call's failure.
+#[cfg(windows)]
+pub fn host_name() -> Result<String, String> {
+    use windows_sys::Win32::System::SystemInformation::{
+        ComputerNamePhysicalDnsHostname, GetComputerNameExW,
+    };
+    let mut len: u32 = 0;
+    // SAFETY: a null buffer with a zero length asks only for the length the
+    // name needs, which the call writes to `len`.
+    unsafe {
+        GetComputerNameExW(
+            ComputerNamePhysicalDnsHostname,
+            std::ptr::null_mut(),
+            &raw mut len,
+        )
+    };
+    let mut buf = vec![0u16; len as usize];
+    // SAFETY: `buf` holds `len` UTF-16 units, the length passed.
+    if unsafe {
+        GetComputerNameExW(
+            ComputerNamePhysicalDnsHostname,
+            buf.as_mut_ptr(),
+            &raw mut len,
+        )
+    } == 0
+    {
+        return Err(format!("os::hostname: {}", std::io::Error::last_os_error()));
+    }
+    String::from_utf16(&buf[..len as usize])
+        .map_err(|_| "os::hostname: the host name is not valid UTF-16".to_string())
+}
+
+/// A platform without a host has no host name to answer.
+///
+/// # Errors
+///
+/// Always: this build runs in no machine it can name.
+#[cfg(not(any(unix, windows)))]
+pub fn host_name() -> Result<String, String> {
+    Err("os::hostname: this platform has no host name".to_string())
+}
+
 /// Threads the system lets this process run at once, or `None` where it
 /// reports no limit.
 #[must_use]

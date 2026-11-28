@@ -1,0 +1,156 @@
+// Every way a copy can come to share a vector a later write reaches: a copy
+// taken inside the writing loop, a callee that keeps what it is handed, a
+// field or slot replaced while a loop writes through it, an index that moves,
+// a `&mut` callee that copies its parameter before writing it, a callee
+// lent a vector a copy outside still holds, and closures lent a vector.
+// After each write the copies hold what they held.
+// Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+struct Grid {
+    cells: Vec<Vec<i64>>
+    kept: Vec<Vec<i64>>
+}
+
+impl Grid {
+    fn keep(&mut self, row: Vec<i64>) {
+        self.kept.push(row)
+    }
+
+    fn bump_rows(&mut self) {
+        for y in 0..self.cells.len() {
+            for x in 0..self.cells[y].len() {
+                self.cells[y][x] += 1
+            }
+        }
+    }
+}
+
+fn copy_inside_loop() {
+    let mut rows = #[#[0, 0], #[0, 0]]
+    let mut snaps: Vec<Vec<Vec<i64>>> = #[]
+    for i in 0..3 {
+        snaps.push(rows)
+        for y in 0..rows.len() {
+            rows[y][0] += i + 1
+        }
+    }
+    println(f"inside {rows} {snaps}")
+}
+
+fn keeper_in_loop() {
+    let mut g = Grid { cells: #[#[1, 2], #[3, 4]], kept: #[] }
+    for y in 0..2 {
+        let row = g.cells[y]
+        g.keep(row)
+        g.cells[y][1] = 100 + y
+    }
+    println(f"keeper {g.cells} {g.kept}")
+}
+
+fn field_replaced_in_loop() {
+    let mut g = Grid { cells: #[#[1, 1], #[2, 2]], kept: #[] }
+    let original = g.cells
+    for y in 0..2 {
+        if y == 1 {
+            g.cells = original
+        }
+        g.cells[y][0] = 9
+    }
+    println(f"field {g.cells} {original}")
+}
+
+fn slot_replaced_in_loop() {
+    let spare = #[7, 7]
+    let mut rows = #[#[1, 1], #[2, 2], #[3, 3]]
+    for y in 0..3 {
+        if y == 1 {
+            rows[y] = spare
+        }
+        rows[y][1] = 0
+    }
+    println(f"slot {rows} {spare}")
+}
+
+fn moving_index() {
+    let base = #[#[1], #[2], #[3]]
+    let mut rows = base
+    let mut y = 0
+    while y < 3 {
+        rows[y].push(y)
+        y += 1
+    }
+    println(f"index {rows} {base}")
+}
+
+fn copy_then_write(xs: &mut Vec<i64>) -> Vec<i64> {
+    let before = *xs
+    xs.push(99)
+    xs[0] = -1
+    before
+}
+
+fn lent_with_copy_outside(v: &mut Vec<Vec<i64>>) {
+    for i in 0..v.len() {
+        v[i].push(i)
+    }
+}
+
+fn lending() {
+    let mut a = #[1, 2]
+    let held = a
+    let before = copy_then_write(&mut a)
+    println(f"lend {a} {held} {before}")
+    let mut grid = #[#[0], #[1]]
+    let copy = grid
+    for _ in 0..2 {
+        lent_with_copy_outside(&mut grid)
+    }
+    println(f"lend grid {grid} {copy}")
+}
+
+fn closures_lent() {
+    let mut grid = #[#[1], #[2]]
+    let copy = grid
+    let add = |g: &mut Vec<Vec<i64>>, v: i64| {
+        for i in 0..g.len() {
+            g[i].push(v)
+        }
+    }
+    add(&mut grid, 5)
+    let snapshot = grid
+    add(&mut grid, 6)
+    println(f"closure {grid} {copy} {snapshot}")
+}
+
+fn method_on_copy() {
+    let mut g = Grid { cells: #[#[1, 2], #[3]], kept: #[] }
+    let copy = g.cells
+    g.bump_rows()
+    let again = g.cells
+    g.bump_rows()
+    println(f"method {g.cells} {copy} {again}")
+}
+
+fn nested_levels() {
+    let mut deep = #[#[#[1, 2], #[3]], #[#[4]]]
+    let outer = deep
+    let middle = deep[0]
+    for i in 0..deep.len() {
+        for j in 0..deep[i].len() {
+            deep[i][j][0] *= 10
+        }
+    }
+    println(f"nested {deep} {outer} {middle}")
+}
+
+fn main() {
+    copy_inside_loop()
+    keeper_in_loop()
+    field_replaced_in_loop()
+    slot_replaced_in_loop()
+    moving_index()
+    lending()
+    closures_lent()
+    method_on_copy()
+    nested_levels()
+}

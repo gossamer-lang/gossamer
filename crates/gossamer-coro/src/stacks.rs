@@ -108,6 +108,9 @@ fn physical_memory_bytes() -> Option<u64> {
 pub(crate) struct GrowableStack {
     base: usize,
     len: usize,
+    /// Where the first frame starts, below the mapping's end by the offset
+    /// within a page that the creating thread's own stack has.
+    top: usize,
 }
 
 #[cfg(all(unix, not(target_arch = "wasm32")))]
@@ -152,9 +155,20 @@ impl GrowableStack {
         if base == libc::MAP_FAILED {
             return Err(std::io::Error::last_os_error());
         }
+        // A mapping's end is page aligned, so frames on it would keep the
+        // same addresses within a page on every run, and a heap object that
+        // shares a frame's offset within a page (which a load waiting on a
+        // store mistakes for the same address) would do so every time. The
+        // kernel starts a thread's own stack at a varying offset within a
+        // page; starting here at the creating thread's offset keeps frames
+        // placed relative to the heap as they would be on that stack. The
+        // ABI wants the stack 16-byte aligned.
+        let marker = 0u8;
+        let offset = (std::ptr::from_ref(&marker) as usize) & (page - 1) & !15;
         let stack = Self {
             base: base as usize,
             len,
+            top: base as usize + len - offset,
         };
         // SAFETY: `[base + page, base + len)` lies inside the mapping made
         // above; the lowest page stays `PROT_NONE` as the guard.
@@ -217,13 +231,14 @@ impl Drop for GrowableStack {
     }
 }
 
-// SAFETY: `base()` is the top of a writable region of `len - page` bytes and
-// `limit()` its bottom, above the guard page; both stay valid until drop.
+// SAFETY: `base()` lies at most a page below the top of a writable region of
+// `len - page` bytes, 16-byte aligned, and `limit()` is that region's bottom,
+// above the guard page; both stay valid until drop.
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 unsafe impl corosensei::stack::Stack for GrowableStack {
     fn base(&self) -> corosensei::stack::StackPointer {
-        corosensei::stack::StackPointer::new(self.base + self.len)
-            .expect("a mapping's end is never zero")
+        corosensei::stack::StackPointer::new(self.top)
+            .expect("a mapping's end less part of a page is never zero")
     }
 
     fn limit(&self) -> corosensei::stack::StackPointer {

@@ -64,7 +64,9 @@ impl Vm {
         // arena, register the side-index reference. `jit_disabled`
         // is read once per chunk and frozen - the JIT can't be
         // toggled mid-run.
-        let jit_disabled = !jit_call::jit_enabled();
+        // A cell body runs only on the VM: its `&mut` parameters are capture
+        // cells, which compiled code has no form for.
+        let jit_disabled = !jit_call::jit_enabled() || chunk.cell_params;
         let eager = self.jit_eager_names.borrow().contains(chunk.name);
         let state_box = Box::new(ChunkState::new(
             chunk.call_cache_count,

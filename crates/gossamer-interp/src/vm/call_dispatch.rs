@@ -50,7 +50,7 @@ impl Vm {
         self.call_stack
             .borrow()
             .iter()
-            .map(|frame| frame.function.to_string())
+            .map(|frame| source_function_name(frame.function).to_string())
             .collect()
     }
 
@@ -123,7 +123,7 @@ impl Vm {
     pub fn call_stack_frames(&self) -> Vec<CallStackFrame> {
         let rendered =
             |function: &str, location: Option<crate::bytecode::SourceLocation>| CallStackFrame {
-                function: function.to_string(),
+                function: source_function_name(function).to_string(),
                 file: location.map(|location| location.file.to_string()),
                 line: location.map(|location| location.line),
                 column: location.map(|location| location.column),
@@ -262,6 +262,26 @@ impl Vm {
                     // code. Its live arguments remain in the suspended
                     // register file.
                     let resuming = resumed.is_some();
+                    // A captured binding lent `&mut` arrives as its cell or a
+                    // place inside it, which the function's cell body reads
+                    // and writes in place.
+                    if !resuming
+                        && !chunk.cell_params
+                        && chunk.mut_ref_params.iter().any(|&slot| {
+                            matches!(
+                                args.get(usize::from(slot)),
+                                Some(Value::CaptureCell(_) | Value::CapturePlace(_))
+                            )
+                        })
+                    {
+                        let Some(variant) = chunk.cell_variant.get() else {
+                            return Err(RuntimeError::Type(format!(
+                                "`{}` was compiled without a body for a captured `&mut` argument",
+                                chunk.name
+                            )));
+                        };
+                        chunk = Arc::clone(variant);
+                    }
                     let state = self.chunk_state_for(&chunk);
                     // Tier D2 - decrement the per-`Vm` hot counter and
                     // trigger a deferred JIT compile when the budget is
@@ -369,6 +389,11 @@ impl Vm {
                                         stack.pop();
                                     }
                                     drop(stack);
+                                    // The child's frame is gone, and with it
+                                    // what its bindings held: cleanups that
+                                    // queued run before the caller goes on,
+                                    // as a compiled return runs them.
+                                    crate::stdlib_builtins::guard::run_pending_cleanups(self);
                                     tail_frames = parent_tail;
                                     parent.registers[dst as usize] = value;
                                     chunk = Arc::clone(&parent.chunk);
@@ -480,6 +505,7 @@ impl Vm {
                                     stack.pop();
                                 }
                                 drop(stack);
+                                crate::stdlib_builtins::guard::run_pending_cleanups(self);
                                 tail_frames = parent_tail;
                                 parent.registers[dst as usize] = value;
                                 chunk = Arc::clone(&parent.chunk);
@@ -578,13 +604,14 @@ impl Vm {
                 // plain aggregate (the unchanged value flows back to
                 // the caller through the cell afterwards).
                 Value::Builtin(inner) => {
-                    let args = crate::value::unwrap_mut_cells_unless_writer(inner.name, args);
-                    (inner.call)(&args)
+                    crate::value::call_builtin(inner.name, args, |args| (inner.call)(args)).0
                 }
                 Value::Native(inner) => {
-                    let args = crate::value::unwrap_mut_cells_unless_writer(inner.name, args);
                     let mut dispatch = super::native_dispatch::VmDispatch::new(self);
-                    inner.entry.invoke(&mut dispatch, &args)
+                    crate::value::call_builtin(inner.name, args, |args| {
+                        inner.entry.invoke(&mut dispatch, args)
+                    })
+                    .0
                 }
                 Value::Closure(closure) => self.invoke_closure(&closure, args),
                 Value::Variant(inner) if inner.fields.is_empty() => Ok(Value::variant(
@@ -729,7 +756,12 @@ impl Vm {
                     // The task runs as the thread's active VM, so a fault
                     // or an exit inside compiled code reaches it.
                     let running: &Vm = vm;
-                    running.with_active_trace(|| task(running));
+                    running.with_active_trace(|| {
+                        task(running);
+                        // Cleanups the goroutine's last releases queued run
+                        // before it ends.
+                        crate::stdlib_builtins::guard::run_pending_cleanups(running);
+                    });
                     vm.reset_after_task();
                 });
             }),
@@ -829,7 +861,7 @@ impl Vm {
         let origin = Self::goroutine_origin(&callee);
         self.spawn_on_pool(origin, 0, move |vm| {
             let result = vm.as_comparator_host(|| vm.dispatch_call(&callee, args));
-            end_program_on_overflow(&result);
+            end_program_if_fatal(vm, &result);
             if let Err(err) = result {
                 if !vm.invoke_panic_hook(&crate::panic_message(&err)) {
                     // Report an unobserved goroutine panic with the same single
@@ -886,7 +918,7 @@ impl Vm {
                 },
                 SpawnTarget::Callable(callee) => vm.dispatch_call(&callee, args),
             };
-            end_program_on_overflow(&outcome);
+            end_program_if_fatal(vm, &outcome);
             sink(outcome);
         });
     }
@@ -920,7 +952,7 @@ impl Vm {
         self.spawn_on_pool(origin, channel.identity(), move |vm| {
             crate::stdlib_builtins::cohort::enter_child(cohort);
             let result = vm.as_comparator_host(|| vm.dispatch_call(&callee, args));
-            end_program_on_overflow(&result);
+            end_program_if_fatal(vm, &result);
             // A child fails by panicking or by answering `Err`, the same
             // two ways the compiled tier reports one.
             let failure = match &result {
@@ -965,8 +997,7 @@ impl Vm {
     pub(crate) fn dispatch_call(&self, callee: &Value, args: Vec<Value>) -> RuntimeResult<Value> {
         match callee {
             Value::Builtin(inner) => {
-                let args = crate::value::unwrap_mut_cells_unless_writer(inner.name, args);
-                (inner.call)(&args)
+                crate::value::call_builtin(inner.name, args, |args| (inner.call)(args)).0
             }
             Value::String(name) => {
                 let entry = self
@@ -982,9 +1013,11 @@ impl Vm {
             // VM's own call machinery through `VmDispatch`, so the user
             // callables they invoke run on the VM.
             Value::Native(inner) => {
-                let args = crate::value::unwrap_mut_cells_unless_writer(inner.name, args);
                 let mut dispatch = super::native_dispatch::VmDispatch::new(self);
-                inner.entry.invoke(&mut dispatch, &args)
+                crate::value::call_builtin(inner.name, args, |args| {
+                    inner.entry.invoke(&mut dispatch, args)
+                })
+                .0
             }
             // Calling a zero-field variant value acts as that variant's
             // constructor: `Circle(1.5)` produces
@@ -1210,11 +1243,29 @@ extern "C" fn render_active_vm_trace() -> *mut std::ffi::c_char {
 /// overflow is not a failure the goroutine reports through `join()`: it ends
 /// the program with status 101 and runs no defers, on every tier, as it does
 /// on the main goroutine.
-fn end_program_on_overflow(result: &RuntimeResult<Value>) {
-    if let Err(err @ RuntimeError::StackOverflow(_)) = result
-        && gossamer_runtime::platform::CAN_END_PROCESS
-    {
-        eprintln!("{err}");
-        std::process::exit(101);
+/// Ends the program for a goroutine whose result ends more than the
+/// goroutine: a stack overflow, or a `process::exit` that has unwound it.
+fn end_program_if_fatal(vm: &Vm, result: &RuntimeResult<Value>) {
+    if !gossamer_runtime::platform::CAN_END_PROCESS {
+        return;
     }
+    match result {
+        Err(err @ RuntimeError::StackOverflow(_)) => {
+            eprintln!("{err}");
+            std::process::exit(101);
+        }
+        Err(RuntimeError::Exit(code)) => {
+            crate::stdlib_builtins::guard::run_pending_cleanups(vm);
+            crate::flush_runtime_stdout();
+            crate::run_exit_hooks();
+            std::process::exit(*code);
+        }
+        _ => {}
+    }
+}
+
+/// The name the source gives the function a chunk runs: a chunk compiled for
+/// one instantiation of a generic function registers as `name$inst$..`.
+fn source_function_name(chunk: &str) -> &str {
+    chunk.split_once("$inst$").map_or(chunk, |(name, _)| name)
 }

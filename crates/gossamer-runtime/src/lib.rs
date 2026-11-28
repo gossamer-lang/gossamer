@@ -401,18 +401,31 @@ pub mod comptime_paths;
 pub mod comptime_policy;
 pub mod coverage;
 pub mod crc32c;
+pub mod crypto_interop;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod crypto_keys;
 pub mod dir_scan;
+pub mod file_lock;
 pub mod file_read;
 pub mod fs_mode;
+pub mod fs_ops;
 pub mod http_status;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod image_ops;
 pub mod listen;
+pub mod mail_address;
 pub mod memory_limit;
+pub mod netip_prefix;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod netpoll;
 pub mod open_file;
 pub mod path_grammar;
+pub mod rational;
+pub mod templates;
 // musl's own routines are replaced there; the tests run on every x86_64
 // host. Inline assembly is not something Miri interprets.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod dns;
 #[cfg(all(target_arch = "x86_64", not(miri), any(target_env = "musl", test)))]
 mod mem_x86_64;
 pub mod ordered;
@@ -428,7 +441,7 @@ pub mod safe_spawn;
 pub mod sampler;
 pub mod sched;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod smtp;
+pub mod tls_server;
 // The process-global scheduler singleton ties together OS worker
 // threads and a mio netpoller. The wasm playground links a
 // cooperative single-threaded equivalent (eager goroutines; a

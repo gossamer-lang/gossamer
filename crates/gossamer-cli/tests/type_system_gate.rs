@@ -150,9 +150,9 @@ fn a_trait_impl_names_a_contract_the_language_dispatches_through() {
                 Expect::Reject("GT0084"),
             ),
             (
-                "there is no destructor hook to implement",
+                "a drop impl is the cleanup that runs when the last reference goes",
                 "struct P { x: i64 }\nimpl Drop for P { fn drop(&mut self) { println(\"gone\") } }\nfn main() { println(\"{}\", P { x: 1 }) }\n",
-                Expect::Reject("GT0084"),
+                Expect::Accept,
             ),
             (
                 "the conversion is written on the target's `From`",
@@ -945,7 +945,7 @@ fn every_declined_type_and_declaration_is_named_where_it_is_written() {
             (
                 "i128",
                 "fn main() { let x: i128 = 1\n println(\"{}\", x) }\n",
-                Expect::Reject("GT0014"),
+                Expect::Accept,
             ),
             (
                 "nil",

@@ -47,15 +47,26 @@ impl<'tcx> FnBuilder<'tcx> {
     }
 
     fn emit_through_capture_cells(&mut self, op: Op) -> InstrIdx {
+        let (op, fused_home) = match self.fused_capture_write(op) {
+            Some((fused, home)) => (fused, Some(home)),
+            None => (op, None),
+        };
         let effects = crate::validate::register_effects(
             op,
             &self.closure_protos,
             &self.select_arms,
             &self.wide_ops,
         );
+        // At most one cell stays locked across `op`, taken after every other
+        // load and returned before every other store, so an instruction never
+        // waits on a second cell while holding one.
         let mut loads: Vec<Op> = Vec::new();
+        let mut held: Option<(Op, Op)> = None;
         let mut stores: Vec<Op> = Vec::new();
         for &(home, cell) in &self.capture_cells {
+            if fused_home == Some(home) {
+                continue;
+            }
             let reads = effects.v_reads.contains(&home);
             let writes = effects.v_writes.contains(&home);
             match (reads, writes) {
@@ -67,20 +78,84 @@ impl<'tcx> FnBuilder<'tcx> {
                         stores.push(Op::CaptureCellSet { cell, src: home });
                     }
                 }
+                // A method call may run program code that reaches the binding
+                // through a closure, so the cell keeps its value meanwhile and
+                // the home's copy is dropped afterwards rather than written
+                // back over what that code stored.
+                (true, _) if held.is_some() || matches!(op, Op::MethodCall { .. }) => {
+                    loads.push(Op::CaptureCellGet { dst: home, cell });
+                    stores.push(if writes {
+                        Op::CaptureCellSet { cell, src: home }
+                    } else {
+                        Op::ClearRegs {
+                            start: home,
+                            count: 1,
+                        }
+                    });
+                }
                 (true, _) => {
-                    loads.push(Op::CaptureCellTake { dst: home, cell });
-                    stores.push(Op::CaptureCellSet { cell, src: home });
+                    held = Some((
+                        Op::CaptureCellTake { dst: home, cell },
+                        Op::CaptureCellSet { cell, src: home },
+                    ));
                 }
             }
         }
         for load in loads {
             self.push_instr(load);
         }
+        if let Some((take, _)) = held {
+            self.push_instr(take);
+        }
         let idx = self.push_instr(op);
+        if let Some((_, set)) = held {
+            self.push_instr(set);
+        }
         for store in stores {
             self.push_instr(store);
         }
         idx
+    }
+
+    /// An in-place write whose target is a captured binding, as the fused
+    /// op that does the write on the cell's value under its lock, with the
+    /// binding's home register. Taking the value out for the write would
+    /// leave the cell empty while another goroutine, holding a closure that
+    /// captured the same binding, reads it. Only the target is fused; an
+    /// index or value register that is itself a captured binding is loaded
+    /// as usual.
+    fn fused_capture_write(&self, op: Op) -> Option<(Op, Reg)> {
+        let cell_of = |home: Reg| {
+            self.capture_cells
+                .iter()
+                .find(|(h, _)| *h == home)
+                .map(|(_, cell)| *cell)
+        };
+        match op {
+            Op::IndexSet { base, index, value } if base != index && base != value => Some((
+                Op::CaptureCellIndexSet {
+                    cell: cell_of(base)?,
+                    home: base,
+                    index,
+                    value,
+                },
+                base,
+            )),
+            Op::FieldSet {
+                receiver,
+                name_idx,
+                value,
+            } if receiver != value => Some((
+                Op::CaptureCellFieldSet {
+                    cell: cell_of(receiver)?,
+                    home: receiver,
+                    name_idx,
+                    value,
+                },
+                receiver,
+            )),
+            _ => None,
+        }
     }
 
     pub(crate) fn annotate_instructions(&mut self, start: usize, span: gossamer_lex::Span) {
@@ -161,10 +236,10 @@ impl<'tcx> FnBuilder<'tcx> {
 /// only as a plain value it hands on - a call or goroutine argument, a
 /// returned value, a branch operand. Such an instruction leaves the cell
 /// populated, so a closure reached from inside it still observes the
-/// binding. Every other instruction borrows the binding exclusively for
-/// its own duration: the value moves into the home register so an
-/// in-place mutation keeps its refcount at one, and the paired store
-/// returns it.
+/// binding. Every other instruction either borrows the binding exclusively
+/// for its own duration, holding the cell's lock while the value sits in
+/// the home register so an in-place mutation keeps its refcount at one, or,
+/// when it may run program code, reads a copy.
 fn reads_capture_binding_by_value(op: Op, home: Reg) -> bool {
     match op {
         Op::Call { .. }
@@ -183,6 +258,79 @@ fn reads_capture_binding_by_value(op: Op, home: Reg) -> bool {
         | Op::IncJumpIfLtI64 { .. }
         | Op::IncJumpIfLeI64 { .. } => true,
         Op::MethodCall { receiver, .. } => receiver != home,
+        // A copy or a read-only projection out of the binding leaves it as it
+        // was, so the cell keeps its value for every closure sharing it, one
+        // running on another goroutine's thread included. The `*Consume`
+        // projections move out of their base and keep the exclusive borrow.
+        Op::Move { dst, src } | Op::Deref { dst, src } => src == home && dst != home,
+        Op::IndexGet { dst, .. }
+        | Op::IndexGetChecked { dst, .. }
+        | Op::FieldGet { dst, .. }
+        | Op::TupleIndex { dst, .. }
+        | Op::TupleTailIndex { dst, .. }
+        | Op::IndexedFieldGet { dst, .. }
+        | Op::VariantField { dst, .. } => dst != home,
+        // These answer into a float or integer register, never the binding's.
+        Op::FieldGetF64 { .. }
+        | Op::FieldGetI64 { .. }
+        | Op::IndexedFieldGetF64 { .. }
+        | Op::IndexedFieldGetF64ByOffset { .. }
+        | Op::FieldGetF64ByOffset { .. }
+        | Op::FieldGetI64ByOffset { .. }
+        | Op::StrLenI64 { .. }
+        | Op::IntMapLen { .. }
+        | Op::IntArrayGetI64 { .. }
+        | Op::FloatVecGetF64 { .. }
+        | Op::U8VecGetByte { .. }
+        | Op::IntMapGetOr { .. }
+        | Op::FlatGetF64 { .. }
+        | Op::FlatGetF64I { .. } => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reads_capture_binding_by_value;
+    use crate::bytecode::Op;
+
+    #[test]
+    fn copies_and_projections_read_a_captured_binding_without_taking_it() {
+        let home = 2;
+        assert!(reads_capture_binding_by_value(
+            Op::Move { dst: 5, src: home },
+            home
+        ));
+        assert!(reads_capture_binding_by_value(
+            Op::IndexGetChecked {
+                dst: 5,
+                base: home,
+                index: 3
+            },
+            home
+        ));
+        assert!(!reads_capture_binding_by_value(
+            Op::IndexGetConsume {
+                dst: 5,
+                base: home,
+                index: 3
+            },
+            home
+        ));
+        assert!(!reads_capture_binding_by_value(
+            Op::IndexSet {
+                base: home,
+                index: 3,
+                value: 4
+            },
+            home
+        ));
+        assert!(!reads_capture_binding_by_value(
+            Op::Move {
+                dst: home,
+                src: home
+            },
+            home
+        ));
     }
 }

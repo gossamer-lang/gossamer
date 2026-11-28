@@ -358,6 +358,32 @@ pub extern "C" fn gos_rt_strconv_format_i64_radix(n: i64, base: i64) -> *mut c_c
     })
 }
 
+/// [`gos_rt_fmt_radix_i64`] for a 128-bit value passed as its low and high
+/// words, rendered as the unsigned value of its bits.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_fmt_radix_i128(low: i64, high: i64, base: i64) -> *mut c_char {
+    ffi_entry!({
+        let bits = super::concat::wide_from_words(low.cast_unsigned(), high.cast_unsigned());
+        let radix = u32::try_from(base).ok().filter(|r| (2..=36).contains(r));
+        let text = match radix {
+            None => bits.to_string(),
+            Some(_) if bits == 0 => "0".to_string(),
+            Some(radix) => {
+                let mut v = bits;
+                let r = u128::from(radix);
+                let mut digits = Vec::new();
+                while v > 0 {
+                    let d = u32::try_from(v % r).unwrap_or(0);
+                    digits.push(std::char::from_digit(d, radix).unwrap_or('0'));
+                    v /= r;
+                }
+                digits.iter().rev().collect()
+            }
+        };
+        alloc_cstring(text.as_bytes())
+    })
+}
+
 /// Format-spec intrinsic for `{:b}` / `{:o}` / `{:x}`-style integer
 /// rendering. Negative values are rendered as their 64-bit two's-complement
 /// bit pattern, matching Rust's radix formatters.

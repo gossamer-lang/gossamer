@@ -94,6 +94,10 @@ impl FieldKind {
             "u32" => Self::Int("u32"),
             "u64" => Self::U64("u64"),
             "usize" => Self::U64("usize"),
+            // A 128-bit integer is a JSON number when it fits 64 bits and a
+            // decimal string otherwise; the HIR serde pass writes both.
+            "i128" => Self::Int("i128"),
+            "u128" => Self::U64("u128"),
             "f64" => Self::Float("f64"),
             "f32" => Self::Float("f32"),
             "bool" => Self::Bool,

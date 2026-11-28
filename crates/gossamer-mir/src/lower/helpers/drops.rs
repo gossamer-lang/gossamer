@@ -1705,7 +1705,14 @@ fn copy_chain(sources: &[Option<Local>], local: Local) -> impl Iterator<Item = L
     })
 }
 
-pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+/// `callees` names the user functions' `&mut` parameters: MIR hands a whole
+/// aggregate local to one as the bare local, so the argument is a write of
+/// it only by the callee's signature.
+pub(crate) fn insert_rc_releases(
+    body: &mut Body,
+    tcx: &gossamer_types::TyCtxt,
+    callees: &crate::opt::CalleeParams,
+) {
     let n_locals = body.locals.len();
     if n_locals == 0 {
         return;
@@ -2253,6 +2260,16 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                     }
                     continue;
                 }
+                // A mutable borrow writes the local it borrows.
+                if let Rvalue::Ref {
+                    mutable: true,
+                    place: borrowed,
+                } = rvalue
+                    && (borrowed.local.0 as usize) < n_locals
+                {
+                    disqualified[borrowed.local.0 as usize] = true;
+                    stable_param[borrowed.local.0 as usize] = false;
+                }
                 if (place.local.0 as usize) >= n_locals {
                     continue;
                 }
@@ -2288,11 +2305,28 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                     _ => disqualified[i] = true,
                 }
             }
-            if let Terminator::Call { destination, .. } = &block.terminator
-                && (destination.local.0 as usize) < n_locals
+            if let Terminator::Call {
+                callee,
+                args,
+                destination,
+                ..
+            } = &block.terminator
             {
-                disqualified[destination.local.0 as usize] = true;
-                stable_param[destination.local.0 as usize] = false;
+                if (destination.local.0 as usize) < n_locals {
+                    disqualified[destination.local.0 as usize] = true;
+                    stable_param[destination.local.0 as usize] = false;
+                }
+                // A local handed to a `&mut` parameter is written by the
+                // callee, so it is neither a view nor the caller's value.
+                for (n, arg) in args.iter().enumerate() {
+                    if let Operand::Copy(src) = arg
+                        && (src.local.0 as usize) < n_locals
+                        && callees.takes_mut(callee, n)
+                    {
+                        disqualified[src.local.0 as usize] = true;
+                        stable_param[src.local.0 as usize] = false;
+                    }
+                }
             }
         }
         // A view that is stored into an aggregate, or handed to the caller,
@@ -4547,7 +4581,7 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
             (!fields.is_empty()).then_some((i, fields))
         })
         .filter(|(i, fields)| {
-            !param_fields_only_read(body, Local(u32::try_from(*i).unwrap_or(0)), fields)
+            !param_fields_only_read(body, Local(u32::try_from(*i).unwrap_or(0)), fields, callees)
         })
         .collect();
 
@@ -5652,7 +5686,11 @@ fn mints_owned_string(name: &str) -> bool {
 fn mints_owned_error(name: &str) -> bool {
     matches!(
         name,
-        "gos_rt_error_new" | "gos_rt_error_from" | "gos_rt_error_wrap" | "gos_rt_error_with_field"
+        "gos_rt_error_new"
+            | "gos_rt_error_from"
+            | "gos_rt_error_wrap"
+            | "gos_rt_error_with_field"
+            | "gos_rt_serde_rd_error"
     )
 }
 
@@ -5691,6 +5729,7 @@ fn mints_owned_node(name: &str) -> bool {
             | "gos_rt_rwlock_new"
             | "gos_rt_sync_map_new"
             | "gos_rt_shared_new"
+            | "gos_rt_runtime_guard_new"
             | "gos_rt_mutex_new"
             | "gos_rt_once_new"
             | "gos_rt_wg_new"
@@ -5710,6 +5749,7 @@ pub(super) mod lent_payloads;
 mod param_reads;
 mod read_counts;
 mod region_shares;
+mod scope_bound;
 pub(super) mod slots;
 mod tables;
 
@@ -5723,5 +5763,6 @@ pub(crate) use lent_payloads::*;
 pub(crate) use param_reads::*;
 pub(crate) use read_counts::*;
 pub(crate) use region_shares::*;
+pub(crate) use scope_bound::*;
 pub(crate) use slots::*;
 pub(crate) use tables::*;

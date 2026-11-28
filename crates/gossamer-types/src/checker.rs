@@ -230,8 +230,6 @@ struct OwnGenericMethodSig {
 }
 
 const HASH_SET_DEF_LOCAL: u32 = u32::MAX - 7;
-const VALIDATE_ERRORS_DEF_LOCAL: u32 = u32::MAX - 9;
-const VALIDATE_FIELD_ERROR_DEF_LOCAL: u32 = u32::MAX - 10;
 const BTREE_SET_DEF_LOCAL: u32 = u32::MAX - 18;
 const VEC_DEQUE_DEF_LOCAL: u32 = u32::MAX - 19;
 const BINARY_HEAP_DEF_LOCAL: u32 = u32::MAX - 28;
@@ -255,10 +253,6 @@ const PURE_HANDLE_HI_OFFSET: u32 = 49;
 /// [`TypeChecker::sync_handle_method_ret`] and [`TypeChecker::heap_buffer_method_ret`].
 const SYNC_HANDLE_LO_OFFSET: u32 = 50;
 const SYNC_HANDLE_HI_OFFSET: u32 = 58;
-
-/// Sentinel offsets of the `trace` span handles a `Tracer` hands out.
-const TRACE_SPAN_OFFSET: u32 = 59;
-const TRACE_ENDED_SPAN_OFFSET: u32 = 60;
 
 /// Sentinel offset of the `U8Vec` byte buffer, which predates the bands.
 const U8_VEC_OFFSET: u32 = 20;
@@ -309,7 +303,6 @@ const PURE_HANDLES: &[HandleRow] = &[
         "metrics::Registry",
         &[(&["metrics", "Registry"], "new")],
     ),
-    (40, "trace::Tracer", &[(&["trace", "Tracer"], "new")]),
     (
         41,
         "http::Router",
@@ -330,6 +323,7 @@ const PURE_HANDLES: &[HandleRow] = &[
     (44, "fs::File", &[]),
     (45, "fs::OpenOptions", &[(&["fs", "OpenOptions"], "new")]),
     (46, "sync::Shared", &[(&["sync", "Shared"], "new")]),
+    (49, "runtime::Guard", &[(&["runtime", "Guard"], "new")]),
     // The byte buffers are typed at their constructors by `bytes_handle_ty`;
     // the rows give a written `bytes::Buffer` parameter the same type.
     (BYTES_BUFFER_OFFSET, "bytes::Buffer", &[]),
@@ -446,13 +440,6 @@ const LEGACY_HANDLE_CTORS: &[LegacyHandleCtor] = &[
         "with_timeout",
         11,
         "context::Context",
-    ),
-    (&["validate", "Errors"], "new", 9, "validate::Errors"),
-    (
-        &["validate", "FieldError"],
-        "new",
-        10,
-        "validate::FieldError",
     ),
     (&["flag", "Set"], "new", 21, "flag::Set"),
     (&["http", "Client"], "new", 22, "http::Client"),
@@ -4209,7 +4196,7 @@ impl gossamer_ast::visitor::Visitor for SpawnScopeScan {
             ExprKind::Block(block) if block.kind == gossamer_ast::BlockKind::Cohort => {
                 self.cohorts.push(expr.span);
             }
-            // The prelude `spawn`, not a module's own (`exec::spawn`).
+            // The prelude `spawn`, not a module's own (`process::spawn`).
             ExprKind::Call { callee, .. } => {
                 if let ExprKind::Path(path) = &callee.kind
                     && let [seg] = path.segments.as_slice()
@@ -4348,8 +4335,8 @@ fn strings_fn_arity(name: &str) -> Option<usize> {
         "splitn" | "center" | "replace" | "pad_left" | "pad_right" | "slice" | "substring" => 3,
         "replacen" => 4,
         "split_whitespace" | "trim" | "trim_start" | "trim_end" | "to_lowercase"
-        | "to_uppercase" | "to_title" | "to_i64" | "to_f64" | "to_bool" | "lines" | "chars"
-        | "bytes" | "byte_len" => 1,
+        | "to_uppercase" | "to_title" | "to_i64" | "to_i128" | "to_u128" | "to_f64" | "to_bool"
+        | "lines" | "chars" | "bytes" | "byte_len" => 1,
         "repeat" | "byte_at" | "index_rune" | "contains_rune" => 2,
         // `join(parts, sep)` is installed on `Vec` rather than `String`, but
         // it remains a `strings` free function and therefore belongs in the
@@ -5367,7 +5354,6 @@ pub const STDLIB_TRAIT_NAMES: &[&str] = &[
     "Http2StreamingHandler",
     "Reader",
     "Serialize",
-    "Validate",
     "Writer",
 ];
 
@@ -5541,9 +5527,11 @@ mod string_method_tests {
             "strip_suffix",
             "to_bool",
             "to_f64",
+            "to_i128",
             "to_i64",
             "to_lowercase",
             "to_title",
+            "to_u128",
             "to_uppercase",
             "trim",
             "trim_end",

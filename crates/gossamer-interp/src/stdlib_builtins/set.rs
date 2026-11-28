@@ -675,10 +675,13 @@ impl MutexCell {
         let mut state = self.state.lock();
         while state.held {
             state.waiting += 1;
-            let Some(_waiting) = crate::vm::goroutine::ChannelWait::enter("Mutex::lock", || {
-                crate::stdlib_builtins::context::deadline_pending()
-                    || crate::stdlib_builtins::cohort::deadline_pending()
-            }) else {
+            let Some(_waiting) = crate::vm::goroutine::ChannelWait::enter_ignoring_cancellation(
+                "Mutex::lock",
+                || {
+                    crate::stdlib_builtins::context::deadline_pending()
+                        || crate::stdlib_builtins::cohort::deadline_pending()
+                },
+            ) else {
                 state.waiting -= 1;
                 return Err(None);
             };

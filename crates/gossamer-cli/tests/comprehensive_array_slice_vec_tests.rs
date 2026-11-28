@@ -246,8 +246,6 @@ fn slices_and_arrays_reject_every_vec_only_operation() {
         "extend(Vec::from([4]))",
         "reserve(8)",
         "capacity()",
-        "shrink_to_fit()",
-        "drain()",
     ];
     for method in methods {
         assert_rejected(

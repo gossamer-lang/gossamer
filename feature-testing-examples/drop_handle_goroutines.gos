@@ -1,0 +1,39 @@
+// A drop type is a shared handle, so goroutines that each copy it write the
+// one record. Eight goroutines record through it at once under the record's
+// own lock, while each also reads the record, and every write lands: no
+// reader sees the record missing while another goroutine writes it.
+use std::sync::Mutex
+
+struct Sink {
+    seen: Vec<String>
+    lock: Mutex = Mutex::new()
+}
+
+impl Drop for Sink {
+    fn drop(&mut self) {}
+}
+
+impl Sink {
+    fn record(&mut self, s: String) {
+        let _g = self.lock.lock()
+        self.seen.push(s)
+    }
+}
+
+fn main() {
+    let sink = Sink { seen: #[] }
+    let r = cohort {
+        for i in 0..8 {
+            spawn(|| {
+                let mut s = sink
+                for round in 0..20 {
+                    s.record(f"{i}.{round}")
+                }
+            })
+        }
+    }
+    println(r.is_ok())
+    let mut seen = sink.seen
+    seen.sort()
+    println(f"{seen.len()} {seen[0]} {seen[seen.len() - 1]}")
+}

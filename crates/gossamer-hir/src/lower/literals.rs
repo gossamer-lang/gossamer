@@ -55,7 +55,17 @@ impl Lowerer<'_> {
         base: Option<&gossamer_ast::Expr>,
         span: Span,
     ) -> HirExprKind {
-        let (name, declared_name) = self.struct_literal_names(node, path);
+        let (mut name, declared_name) = self.struct_literal_names(node, path);
+        // A std handle's literal builds under its module-qualified name, which
+        // no program type shares, so a program `Request` or `Response` never
+        // answers for one.
+        if let Some(gossamer_types::TyKind::Adt { def, .. }) =
+            self.table.get(node).and_then(|ty| self.tcx.kind(ty))
+            && def.local >= u32::MAX - gossamer_types::HANDLE_SENTINEL_SPAN
+            && let Some(std_name @ ("http::Request" | "http::Response")) = self.tcx.def_name(*def)
+        {
+            name = std_name.to_string();
+        }
         let error_ty = self.error_ty();
         let string_ty = self.error_ty();
         let mut args = Vec::with_capacity(1 + fields.len() * 2 + 2);

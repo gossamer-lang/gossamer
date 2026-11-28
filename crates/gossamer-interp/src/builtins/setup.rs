@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::{sync::atomic::AtomicBool, time::Duration};
 
 use gossamer_std::env as env_std;
-use gossamer_std::exec as exec_std;
+use gossamer_std::process as process_std;
 use gossamer_std::fs as fs_std;
 #[cfg(not(target_arch = "wasm32"))]
 use gossamer_std::http as http_std;
@@ -342,12 +342,13 @@ pub(crate) fn install(globals: &mut Vec<(&'static str, Value)>) {
     #[cfg(not(target_arch = "wasm32"))]
     globals.push(("serve", native("serve", native_http_serve)));
     #[cfg(not(target_arch = "wasm32"))]
-    for key in ["Server::serve", "http::Server::serve"] {
-        globals.push((
-            key,
-            native(key, crate::stdlib_builtins::http_server::native_http_server_serve),
-        ));
-    }
+    globals.push((
+        "http::Server::serve",
+        native(
+            "http::Server::serve",
+            crate::stdlib_builtins::http_server::native_http_server_serve,
+        ),
+    ));
     install_leaf_module_aliases(globals);
 }
 

@@ -14,7 +14,7 @@ use super::{Tape, TapeKind, TapeNode, scan};
 /// large for an `f64`. `capacity` slots are reserved up front, a bound the
 /// walk never exceeds, so recording never moves the nodes.
 pub(super) fn tape(source: &str, max_depth: usize, capacity: usize) -> Option<Tape> {
-    let mut walk = Walk {
+    let mut walk = Walk::<true> {
         text: source,
         bytes: source.as_bytes(),
         at: 0,
@@ -24,11 +24,107 @@ pub(super) fn tape(source: &str, max_depth: usize, capacity: usize) -> Option<Ta
             arrays: Vec::new(),
         },
     };
-    walk.document(max_depth)?;
+    walk.document(max_depth, false, &mut Vec::new())?;
     Some(walk.tape)
 }
 
-struct Walk<'a> {
+/// The number token of the well-formed document `source` starting at
+/// `start`, as its tape kind and word, and the offset just past it.
+pub(super) fn number_at(source: &str, start: usize) -> Option<(TapeKind, u64, usize)> {
+    let mut walk = Walk::<false> {
+        text: source,
+        bytes: source.as_bytes(),
+        at: start,
+        tape: Tape::default(),
+    };
+    let (kind, word) = walk.read_number()?;
+    Some((kind, word, walk.at))
+}
+
+/// Whether `source` is a well-formed document no deeper than `max_depth`,
+/// read by the same loop as [`tape`] with nothing recorded.
+pub(super) fn well_formed(source: &str, max_depth: usize) -> bool {
+    let mut walk = Walk::<false> {
+        text: source,
+        bytes: source.as_bytes(),
+        at: 0,
+        tape: Tape::default(),
+    };
+    walk.document(max_depth, false, &mut Vec::new()).is_some()
+}
+
+/// The containers a walk is inside, kept between walks so that skipping one
+/// value after another allocates its stack once.
+#[derive(Debug, Default)]
+pub(super) struct Stack(Vec<Open>);
+
+/// The offset just past the well-formed value of `source` starting at
+/// `start`, nesting no deeper than `max_depth`, or `None` when it is not one.
+pub(super) fn value_end(
+    source: &str,
+    start: usize,
+    max_depth: usize,
+    stack: &mut Stack,
+) -> Option<usize> {
+    let mut walk = Walk::<false> {
+        text: source,
+        bytes: source.as_bytes(),
+        at: start,
+        tape: Tape::default(),
+    };
+    // A scalar is read by its own step, with no stack of open containers.
+    match walk.bytes.get(start)? {
+        b'"' => {
+            walk.string()?;
+            return Some(walk.at);
+        }
+        b'-' | b'0'..=b'9' => {
+            walk.read_number()?;
+            return Some(walk.at);
+        }
+        b't' => {
+            return walk.bytes[start..]
+                .starts_with(b"true")
+                .then_some(start + 4);
+        }
+        b'f' => {
+            return walk.bytes[start..]
+                .starts_with(b"false")
+                .then_some(start + 5);
+        }
+        b'n' => {
+            return walk.bytes[start..]
+                .starts_with(b"null")
+                .then_some(start + 4);
+        }
+        _ => {}
+    }
+    stack.0.clear();
+    walk.document(max_depth, true, &mut stack.0)?;
+    // The walk stops past the whitespace after the value; the value ends at
+    // its last byte, which is never whitespace.
+    let mut end = walk.at;
+    while end > start && matches!(walk.bytes[end - 1], b' ' | b'\t' | b'\n' | b'\r') {
+        end -= 1;
+    }
+    Some(end)
+}
+
+/// The offset just past the well-formed string of `source` whose opening
+/// quote is at `start`, or `None` when it is not one.
+pub(super) fn string_end(source: &str, start: usize) -> Option<usize> {
+    let mut walk = Walk::<false> {
+        text: source,
+        bytes: source.as_bytes(),
+        at: start,
+        tape: Tape::default(),
+    };
+    walk.string()?;
+    Some(walk.at)
+}
+
+/// The walk, recording a tape when `RECORD` and only checking otherwise.
+struct Walk<'a, const RECORD: bool> {
     text: &'a str,
     bytes: &'a [u8],
     at: usize,
@@ -37,6 +133,7 @@ struct Walk<'a> {
 
 /// An object or array the walk is inside: its node's slot and how many
 /// members or elements it has read.
+#[derive(Debug)]
 struct Open {
     slot: usize,
     count: u32,
@@ -50,9 +147,10 @@ enum Next {
     AfterValue,
 }
 
-impl Walk<'_> {
-    fn document(&mut self, max_depth: usize) -> Option<()> {
-        let mut open: Vec<Open> = Vec::new();
+impl<const RECORD: bool> Walk<'_, RECORD> {
+    /// Reads one value at the cursor: the whole document, which must end
+    /// there, or with `single` just that value, whatever follows it.
+    fn document(&mut self, max_depth: usize, single: bool, open: &mut Vec<Open>) -> Option<()> {
         let mut next = Next::Value;
         loop {
             self.skip_whitespace();
@@ -116,7 +214,7 @@ impl Walk<'_> {
                 }
                 Next::AfterValue => {
                     let Some(top) = open.last_mut() else {
-                        return (self.at == self.bytes.len()).then_some(());
+                        return (single || self.at == self.bytes.len()).then_some(());
                     };
                     top.count += 1;
                     let object = top.object;
@@ -150,14 +248,19 @@ impl Walk<'_> {
     /// document whose offsets and lengths fit a node is walked.
     #[inline]
     fn scalar(&mut self, kind: TapeKind, start: usize, len: usize) {
-        self.tape
-            .nodes
-            .push(TapeNode::new(kind, start as u32, len as u32));
+        if RECORD {
+            self.tape
+                .nodes
+                .push(TapeNode::new(kind, start as u32, len as u32));
+        }
     }
 
     /// Records the container of `kind` opening at the cursor, with a word the
     /// close fills in; answers its slot.
     fn open(&mut self, kind: TapeKind) -> usize {
+        if !RECORD {
+            return 0;
+        }
         let slot = self.tape.nodes.len();
         if kind == TapeKind::Object {
             self.tape.objects.push(slot as u32);
@@ -171,6 +274,9 @@ impl Walk<'_> {
 
     /// Closes `container`, which ends just before the cursor.
     fn close(&mut self, container: Open) {
+        if !RECORD {
+            return;
+        }
         let extent = self.tape.nodes.len() as u64;
         let node = self.tape.nodes[container.slot];
         self.tape.nodes[container.slot] =
@@ -258,6 +364,18 @@ impl Walk<'_> {
     /// `u64` as `Uint`, and any other number, `-0` included, as `Float`.
     fn number(&mut self) -> Option<()> {
         let start = self.at;
+        let (kind, word) = self.read_number()?;
+        self.scalar(kind, start, self.at - start);
+        if RECORD {
+            self.tape.nodes.push(TapeNode::from_word(word));
+        }
+        Some(())
+    }
+
+    /// The number at the cursor as its tape kind and word, leaving the cursor
+    /// just past it.
+    fn read_number(&mut self) -> Option<(TapeKind, u64)> {
+        let start = self.at;
         let negative = self.bytes[start] == b'-';
         let mut at = start + usize::from(negative);
         let mut digits = Digits::default();
@@ -279,22 +397,7 @@ impl Walk<'_> {
         let mut exponent = Some(0i64);
         if let Some(b'e' | b'E') = self.bytes.get(at) {
             integral = false;
-            at += 1;
-            let sign = match self.bytes.get(at) {
-                Some(b'-') => -1,
-                Some(b'+') => 1,
-                _ => 0,
-            };
-            at += usize::from(sign != 0);
-            let mut written = Digits::default();
-            at = written.take(self.bytes, at, usize::MAX);
-            if written.count == 0 {
-                return None;
-            }
-            exponent = written
-                .exact()
-                .and_then(|n| i64::try_from(n).ok())
-                .map(|n| if sign < 0 { -n } else { n });
+            (at, exponent) = exponent_at(self.bytes, at + 1)?;
         }
         self.at = at;
         let (kind, word) = match (integral, digits.exact()) {
@@ -320,13 +423,13 @@ impl Walk<'_> {
             }
             _ => self.parsed(start, at, integral)?,
         };
-        self.scalar(kind, start, at - start);
-        self.tape.nodes.push(TapeNode::from_word(word));
-        Some(())
+        Some((kind, word))
     }
 
     /// The number `start..at` read from its text, for a value the digits
     /// alone do not settle.
+    #[cold]
+    #[inline(never)]
     fn parsed(&self, start: usize, at: usize, integral: bool) -> Option<(TapeKind, u64)> {
         let text = &self.text[start..at];
         if let (true, Ok(n)) = (integral, text.parse::<i64>()) {
@@ -338,6 +441,31 @@ impl Walk<'_> {
         let value = text.parse::<f64>().ok().filter(|v| v.is_finite())?;
         Some((TapeKind::Float, value.to_bits()))
     }
+}
+
+/// The exponent whose sign or first digit is at `at`, as the offset past it
+/// and its value (`None` when it does not fit an `i64`), or `None` for an
+/// exponent with no digits. Kept out of line: most numbers have none, and the
+/// common path stays small enough to stay in the decoded-instruction cache.
+#[cold]
+#[inline(never)]
+fn exponent_at(bytes: &[u8], mut at: usize) -> Option<(usize, Option<i64>)> {
+    let sign = match bytes.get(at) {
+        Some(b'-') => -1,
+        Some(b'+') => 1,
+        _ => 0,
+    };
+    at += usize::from(sign != 0);
+    let mut written = Digits::default();
+    at = written.take(bytes, at, usize::MAX);
+    if written.count == 0 {
+        return None;
+    }
+    let exponent = written
+        .exact()
+        .and_then(|n| i64::try_from(n).ok())
+        .map(|n| if sign < 0 { -n } else { n });
+    Some((at, exponent))
 }
 
 /// The decimal digits of a number read so far, as one integer while it fits.

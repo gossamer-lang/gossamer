@@ -156,30 +156,24 @@ fn assert_vm_output(tag: &str, src: &str, expected: &str) {
 fn image_png_jpeg_round_trip_and_invalid_input_match_native() {
     let src = r#"
 use std::image
+use std::image::{Image, Rgba}
 fn main() {
-    let source = image::filled(2, 1, 0xff0000ff)
-    println(image::set_pixel(source, 1, 0, 0x00ff00ff))
-    let png = image::encode_png_base64(source)
-    let decoded = image::decode_base64(png)
-    println(image::width(decoded))
-    println(image::height(decoded))
-    println(image::pixel(decoded, 1, 0))
-    println(image::decode_base64("not base64") == 0)
-    let jpeg = image::decode_base64(image::encode_jpeg_base64(source, 90))
-    println(image::width(jpeg))
-    println(image::height(jpeg))
-    println(image::release(source))
-    println(image::release(decoded))
-    println(image::release(jpeg))
-    println(image::width(source))
-    println(image::release(source))
-    println(image::release(0))
+    let mut source = Image::filled(2, 1, Rgba { r: 255, g: 0, b: 0, a: 255 }).unwrap()
+    source.set_pixel(1, 0, Rgba { r: 0, g: 255, b: 0, a: 255 })
+    let decoded = image::decode(source.encode_png().unwrap()).unwrap()
+    println(f"{decoded.width()}x{decoded.height()} {decoded.pixel(1, 0):?}")
+    println(f"{decoded.pixel(2, 0):?}")
+    println(image::decode("not an image".bytes()).is_err())
+    let jpeg = image::decode(source.encode_jpeg(quality: 90).unwrap()).unwrap()
+    println(f"{jpeg.width()}x{jpeg.height()}")
+    println(Image::new(0, 1).is_err())
+    println(source.encode_jpeg(quality: 0).is_err())
 }
 "#;
     assert_vm_output(
         "image_png_jpeg",
         src,
-        "true\n2\n1\n16711935\ntrue\n2\n1\ntrue\ntrue\ntrue\n0\nfalse\nfalse",
+        "2x1 Some(image::Rgba { r: 0, g: 255, b: 0, a: 255 })\nNone\ntrue\n2x1\ntrue\ntrue",
     );
 }
 

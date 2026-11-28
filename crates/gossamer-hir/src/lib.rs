@@ -13,8 +13,10 @@
 mod accessors;
 mod capture_cells;
 mod carrier;
+mod cleanup_points;
 mod dir_listing;
 mod disjoint_windows;
+mod drop_types;
 mod f32_round;
 mod foreign;
 mod foreign_boundary;

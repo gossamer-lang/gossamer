@@ -1024,6 +1024,28 @@ impl TypeChecker<'_> {
                             ("headers".to_string(), headers_ty),
                         ];
                         (response_ty, Some(fields))
+                    } else if matches!(self.tcx.kind_of(resolved_probe), TyKind::Var(_))
+                        && path_tail == Some("Request")
+                    {
+                        // `http::Request { .. }` builds the std handle, checked
+                        // against its layout. `context` is the runtime's own,
+                        // attached as the request is served.
+                        let request_ty = self.http_request_ty();
+                        let fields = match self.tcx.kind_of(request_ty) {
+                            TyKind::Adt { def, .. } => self
+                                .struct_fields
+                                .get(def)
+                                .map(|fields| {
+                                    fields
+                                        .iter()
+                                        .filter(|(name, _)| name != "context")
+                                        .cloned()
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default(),
+                            _ => Vec::new(),
+                        };
+                        (request_ty, Some(fields))
                     } else {
                         (struct_ty, None)
                     };

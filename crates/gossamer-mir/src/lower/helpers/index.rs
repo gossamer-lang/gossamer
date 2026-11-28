@@ -65,6 +65,8 @@ pub(crate) enum MapKeyKind {
 pub(crate) fn map_value_kind_from(tcx: &gossamer_types::TyCtxt, ty: Ty) -> MapValueKind {
     use gossamer_types::TyKind;
     match tcx.kind_of(ty) {
+        // A 128-bit value spans two words, so it is stored as a copy.
+        TyKind::Int(int) if int.is_wide() => MapValueKind::Other,
         TyKind::Int(_) | TyKind::Bool | TyKind::Char | TyKind::Float(_) => MapValueKind::I64,
         TyKind::String => MapValueKind::String,
         TyKind::Vec(elem) | TyKind::Slice(elem)
@@ -79,6 +81,8 @@ pub(crate) fn map_value_kind_from(tcx: &gossamer_types::TyCtxt, ty: Ty) -> MapVa
 pub(crate) fn map_key_kind_from(tcx: &gossamer_types::TyCtxt, ty: Ty) -> MapKeyKind {
     use gossamer_types::TyKind;
     match tcx.kind_of(ty) {
+        // A 128-bit key spans two words, so it keys by its content.
+        TyKind::Int(int) if int.is_wide() => MapKeyKind::Other,
         TyKind::Int(_) | TyKind::Bool | TyKind::Char | TyKind::Float(_) => MapKeyKind::I64,
         TyKind::String => MapKeyKind::String,
         // An enum whose variants all carry nothing is a discriminant and

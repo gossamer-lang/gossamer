@@ -223,6 +223,8 @@ pub unsafe extern "C" fn gos_rt_bheap_max_from_vec_i64(v: *mut GosVec) -> *mut G
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_push_i64(v: *mut GosVec, value: i64) {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             return;
         }
@@ -241,6 +243,8 @@ pub unsafe extern "C" fn gos_rt_bheap_max_push_i64(v: *mut GosVec, value: i64) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_pop_i64(v: *mut GosVec) -> i128 {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             return super::result::pack_result(1, 0);
         }
@@ -312,6 +316,8 @@ pub unsafe extern "C" fn gos_rt_bheap_min_from_vec_i64(v: *mut GosVec) -> *mut G
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_push_i64(v: *mut GosVec, value: i64) {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             return;
         }
@@ -331,6 +337,8 @@ pub unsafe extern "C" fn gos_rt_bheap_min_push_i64(v: *mut GosVec, value: i64) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_pop_i64(v: *mut GosVec) -> i128 {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             return super::result::pack_result(1, 0);
         }
@@ -389,6 +397,8 @@ pub unsafe extern "C" fn gos_rt_bheap_is_empty(v: *const GosVec) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_clear(v: *mut GosVec) {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             return;
         }
@@ -589,6 +599,8 @@ pub unsafe extern "C" fn gos_rt_bheap_max_from_vec_f64(v: *mut GosVec) -> *mut G
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_push_f64(v: *mut GosVec, value: f64) {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             return;
         }
@@ -610,6 +622,8 @@ pub unsafe extern "C" fn gos_rt_bheap_max_push_f64(v: *mut GosVec, value: f64) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_pop_f64(v: *mut GosVec) -> i128 {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             return super::result::pack_result(1, 0);
         }
@@ -666,6 +680,8 @@ pub unsafe extern "C" fn gos_rt_bheap_min_from_vec_f64(v: *mut GosVec) -> *mut G
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_push_f64(v: *mut GosVec, value: f64) {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             return;
         }
@@ -687,6 +703,8 @@ pub unsafe extern "C" fn gos_rt_bheap_min_push_f64(v: *mut GosVec, value: f64) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_pop_f64(v: *mut GosVec) -> i128 {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             return super::result::pack_result(1, 0);
         }
@@ -1333,6 +1351,8 @@ pub unsafe extern "C" fn gos_rt_bheap_min_push_desc(
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_bheap_max_pop_desc(v: *mut GosVec, tags: *const u8) -> i128 {
     ffi_entry_passthrough!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         // SAFETY: `v`, `tags` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `bheap_pop_desc` accepts.
         unsafe { bheap_pop_desc(v, tags, true) }
@@ -1343,6 +1363,8 @@ pub unsafe extern "C-unwind" fn gos_rt_bheap_max_pop_desc(v: *mut GosVec, tags: 
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_bheap_min_pop_desc(v: *mut GosVec, tags: *const u8) -> i128 {
     ffi_entry_passthrough!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         // SAFETY: `v`, `tags` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `bheap_pop_desc` accepts.
         unsafe { bheap_pop_desc(v, tags, false) }

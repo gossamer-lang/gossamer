@@ -72,7 +72,15 @@ impl<'a> Builder<'a> {
         let region_depth = self.region_depth;
         self.push_scope();
         self.defer_stack.push(Vec::new());
+        // A block's cleanup points give back only the temporaries its own
+        // statements made: a deferred block runs after its scope's answer is
+        // built, which it must leave alone.
+        let outer_statement_start = self.statement_locals_start;
+        self.statement_locals_start = self.locals.len();
         for stmt in &block.stmts {
+            if !is_cleanup_op(stmt) {
+                self.statement_locals_start = self.locals.len();
+            }
             self.lower_stmt(stmt);
             if self.current.is_none() {
                 self.region_depth = region_depth;
@@ -88,6 +96,7 @@ impl<'a> Builder<'a> {
                 return None;
             }
         }
+        self.statement_locals_start = outer_statement_start;
         let result = match block.tail.as_ref() {
             Some(tail) => self.lower_expr(tail),
             // Tail-less block whose flow didn't diverge yields the
@@ -247,8 +256,14 @@ impl<'a> Builder<'a> {
             {
                 match callee {
                     Operand::FnRef { .. } => true,
+                    // A free function of the program called by its name is the
+                    // same body a reference calls. A method is left out: it
+                    // may answer a part of the receiver it borrows.
                     Operand::Const(ConstValue::Str(name)) => {
-                        answers_table && name.starts_with(gossamer_hir::LIFTED_CLOSURE_PREFIX)
+                        (self.fn_ret_names.contains_key(name.as_str())
+                            && !self.impl_methods.contains_key(name.as_str()))
+                            || (answers_table
+                                && name.starts_with(gossamer_hir::LIFTED_CLOSURE_PREFIX))
                     }
                     _ => false,
                 }
@@ -305,14 +320,18 @@ impl<'a> Builder<'a> {
             } if destination.local == carrier && destination.projection.is_empty() => {
                 match callee {
                     Operand::FnRef { .. } => true,
-                    Operand::Const(ConstValue::Str(name)) => matches!(
-                        name.as_str(),
-                        "gos_rt_map_pop_i64"
-                            | "gos_rt_map_pop_str"
-                            | "gos_rt_map_pop_typed_str"
-                            | "gos_rt_map_pop_skey"
-                            | "gos_rt_map_pop_ekey"
-                    ),
+                    Operand::Const(ConstValue::Str(name)) => {
+                        self.fn_ret_names.contains_key(name.as_str())
+                            || matches!(
+                                name.as_str(),
+                                "gos_rt_map_pop_i64"
+                                    | "gos_rt_map_pop_str"
+                                    | "gos_rt_map_pop_typed_str"
+                                    | "gos_rt_map_pop_skey"
+                                    | "gos_rt_map_pop_ekey"
+                            )
+                            || gossamer_abi::mints_owned_result(name)
+                    }
                     _ => false,
                 }
             }
@@ -386,6 +405,15 @@ impl<'a> Builder<'a> {
         !decl.mutable
             && (self.param_locals.contains(&source) || self.immutable_let_locals.contains(&source))
             && reference_ok
+    }
+
+    /// The type a reference refers to, or `ty` itself: `*r` of a `&mut Vec`
+    /// lowers to the reference's own local, whose value is the vector.
+    fn referent_ty(&self, ty: gossamer_types::Ty) -> gossamer_types::Ty {
+        match self.tcx.kind_of(ty) {
+            gossamer_types::TyKind::Ref { inner, .. } => *inner,
+            _ => ty,
+        }
     }
 
     pub(crate) fn is_vec_like_ty(&self, ty: gossamer_types::Ty) -> bool {
@@ -951,7 +979,12 @@ impl<'a> Builder<'a> {
                             if gossamer_hir::is_capture_env_load(init) {
                                 // A closure capture aliases the enclosing
                                 // scope's value, so a heap type mutated
-                                // through it reaches the original.
+                                // through it reaches the original. That value
+                                // lives in the environment, not in a region
+                                // the closure's body opens, so the binding
+                                // gives back the share it takes.
+                                self.locals[local.0 as usize].region = false;
+                                self.locals[value.0 as usize].region = false;
                                 self.emit_assign(
                                     Place::local(local),
                                     Rvalue::Use(Operand::Copy(Place::local(value))),
@@ -1001,7 +1034,7 @@ impl<'a> Builder<'a> {
                                     Rvalue::Use(Operand::Copy(Place::local(value))),
                                     stmt.span,
                                 );
-                            } else if self.is_vec_like_ty(init_ty)
+                            } else if self.is_vec_like_ty(self.referent_ty(init_ty))
                                 && self.is_vec_like_ty(binding_ty)
                                 || matches!(
                                     self.tcx.kind_of(binding_ty),
@@ -1231,4 +1264,18 @@ pub(crate) fn is_collapsed_handle_kind(kind: &str) -> bool {
         || kind.starts_with("bufio::")
         || kind == "errors::Error"
         || kind == "flag::Set"
+}
+
+/// Whether `stmt` is a cleanup-point operation the HIR places after a
+/// statement: `__gos_release_binding(x)` or `__gos_run_cleanups()`.
+fn is_cleanup_op(stmt: &HirStmt) -> bool {
+    let HirStmtKind::Expr { expr, .. } = &stmt.kind else {
+        return false;
+    };
+    let HirExprKind::Call { callee, .. } = &expr.kind else {
+        return false;
+    };
+    matches!(&callee.kind, HirExprKind::Path { segments, .. }
+        if matches!(segments.as_slice(), [only]
+            if only.name == "__gos_run_cleanups" || only.name == "__gos_release_binding"))
 }

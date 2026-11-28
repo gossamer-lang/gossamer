@@ -124,6 +124,8 @@ fn socket_write_bytes(arg: Option<&Value>) -> Option<Vec<u8>> {
 
 pub(crate) fn install_net(globals: &mut Vec<(&'static str, Value)>) {
     install_module_pub("net", &[("lookup", builtin_net_resolve)], globals);
+    let q = "__gos_net_dns_raw";
+    globals.push((q, crate::builtins::builtin_pub(q, builtin_net_dns_raw)));
     let entries: &[(&str, BuiltinFnPub)] = &[
         ("TcpListener::bind", builtin_tcp_listener_bind),
         ("TcpListener::accept", builtin_tcp_listener_accept),
@@ -143,6 +145,10 @@ pub(crate) fn install_net(globals: &mut Vec<(&'static str, Value)>) {
             builtin_tcp_stream_start_tls_insecure,
         ),
         ("TcpStream::start_tls_ca", builtin_tcp_stream_start_tls_ca),
+        (
+            "TcpStream::start_tls_identity",
+            builtin_tcp_stream_start_tls_identity,
+        ),
         (
             "TcpStream::peer_certificate",
             builtin_tcp_stream_peer_certificate,
@@ -200,6 +206,35 @@ pub(crate) fn install_net(globals: &mut Vec<(&'static str, Value)>) {
         ),
     ] {
         globals.push((*short, crate::builtins::builtin_pub(short, *call)));
+    }
+}
+
+/// `__gos_net_dns_raw(name, rtype, server)`, the leaf under the injected
+/// `net::lookup_mx` / `lookup_txt` / `lookup_srv` / `lookup_cname` /
+/// `lookup_addr` wrappers.
+pub(crate) fn builtin_net_dns_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let name = args.first().and_then(as_str).unwrap_or("").to_string();
+    let rtype = match args.get(1) {
+        Some(Value::Int(n)) => *n,
+        _ => 0,
+    };
+    let server = args.get(2).and_then(as_str).unwrap_or("").to_string();
+    let Some(kind) = gossamer_runtime::dns::RecordType::from_code(rtype) else {
+        return Ok(err_variant(format!(
+            "dns: record type {rtype} is not one this resolver reads"
+        )));
+    };
+    match gossamer_runtime::sched_global::run_blocking("net-dns", move || {
+        gossamer_runtime::dns::lookup(&name, kind, Some(&server))
+    }) {
+        Ok(Ok(records)) => Ok(ok_variant(Value::Array(Arc::new(
+            records
+                .concat()
+                .into_iter()
+                .map(|field| Value::String(field.into()))
+                .collect(),
+        )))),
+        Ok(Err(e)) | Err(e) => Ok(err_variant(e)),
     }
 }
 
@@ -1070,6 +1105,42 @@ pub(crate) fn builtin_tcp_stream_start_tls_insecure(args: &[Value]) -> RuntimeRe
     }
 }
 
+/// `TcpStream::start_tls_identity(host, ca_pem, cert_pem, key_pem)`.
+pub(crate) fn builtin_tcp_stream_start_tls_identity(args: &[Value]) -> RuntimeResult<Value> {
+    const OP: &str = "TcpStream::start_tls_identity";
+    let Some(id) = args.first().and_then(handle_id) else {
+        return Ok(err_variant(format!("{OP}: missing handle")));
+    };
+    let mut texts = Vec::with_capacity(4);
+    for (index, name) in ["host", "ca_pem", "cert_pem", "key_pem"]
+        .into_iter()
+        .enumerate()
+    {
+        match arg_str_at(args, index + 1, OP, name) {
+            Ok(s) => texts.push(s),
+            Err(v) => return Ok(v),
+        }
+    }
+    let Some(stream) = take_tcp_stream(id) else {
+        return Ok(err_variant(format!("{OP}: stale handle")));
+    };
+    match stream.start_tls_identity(&texts[0], &texts[1], &texts[2], &texts[3]) {
+        Ok(tls) => {
+            let nid = next_net_id();
+            TLS_STREAM_REGISTRY.with(|r| {
+                r.borrow_mut()
+                    .insert(nid, Arc::new(parking_lot::Mutex::new(tls)));
+            });
+            Ok(ok_variant(handle_struct(
+                "net::TcpStream",
+                nid,
+                retire_tcp_stream,
+            )))
+        }
+        Err(e) => Ok(err_variant(e.to_string())),
+    }
+}
+
 pub(crate) fn builtin_tcp_stream_start_tls_ca(args: &[Value]) -> RuntimeResult<Value> {
     let Some(id) = args.first().and_then(handle_id) else {
         return Ok(err_variant("TcpStream::start_tls_ca: missing handle"));
@@ -1384,73 +1455,4 @@ mod net_registry_tests {
         builtin_unix_listener_close(std::slice::from_ref(&listener)).unwrap();
         std::fs::remove_file(path).unwrap();
     }
-}
-
-/// `smtp::send(addr, from, to, subject, body)` and its authenticated
-/// counterpart. Both go through `gossamer_runtime::smtp`, the same
-/// transaction the compiled tiers run.
-pub(crate) fn install_smtp(globals: &mut Vec<(&'static str, Value)>) {
-    for (name, call) in [
-        (
-            "smtp::send",
-            builtin_smtp_send as crate::builtins::BuiltinFnPub,
-        ),
-        ("smtp::send_auth", builtin_smtp_send_auth),
-    ] {
-        globals.push((name, crate::builtins::builtin_pub(name, call)));
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn smtp_arg(args: &[Value], index: usize) -> String {
-    match args.get(index) {
-        Some(Value::String(s)) => s.as_str().to_string(),
-        Some(other) => format!("{other}"),
-        None => String::new(),
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn smtp_dispatch(args: &[Value], with_credentials: bool) -> RuntimeResult<Value> {
-    let addr = smtp_arg(args, 0);
-    let from = smtp_arg(args, 1);
-    let to = smtp_arg(args, 2);
-    let subject = smtp_arg(args, 3);
-    let body = smtp_arg(args, 4);
-    let message = gossamer_runtime::smtp::Message {
-        from: &from,
-        to: &to,
-        subject: &subject,
-        body: &body,
-    };
-    let username = smtp_arg(args, 5);
-    let password = smtp_arg(args, 6);
-    let credentials = with_credentials.then(|| gossamer_runtime::smtp::Credentials {
-        username: &username,
-        password: &password,
-    });
-    match gossamer_runtime::smtp::send(&addr, &message, credentials.as_ref()) {
-        Ok(()) => Ok(ok_variant(Value::Unit)),
-        Err(text) => Ok(err_variant(text)),
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn builtin_smtp_send(args: &[Value]) -> RuntimeResult<Value> {
-    smtp_dispatch(args, false)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn builtin_smtp_send_auth(args: &[Value]) -> RuntimeResult<Value> {
-    smtp_dispatch(args, true)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn builtin_smtp_send(_args: &[Value]) -> RuntimeResult<Value> {
-    Ok(err_variant("smtp::send: no sockets on wasm32"))
-}
-
-#[cfg(target_arch = "wasm32")]
-fn builtin_smtp_send_auth(_args: &[Value]) -> RuntimeResult<Value> {
-    Ok(err_variant("smtp::send_auth: no sockets on wasm32"))
 }

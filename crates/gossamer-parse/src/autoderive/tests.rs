@@ -433,5 +433,33 @@ mod autoderive_tests {
         let augmented = super::augment_source(&src);
         assert!(super::program_source_end(&augmented) >= src.len());
     }
-}
 
+    #[test]
+    fn a_standard_type_written_in_gossamer_outlines_its_fields_and_methods() {
+        let outline = super::stdlib_wrapper_type_outline("std::time", "CivilTime").unwrap();
+        assert!(outline.contains("    nanosecond: i64 = 0\n"), "{outline}");
+        let outline = super::stdlib_wrapper_type_outline("std::time", "Location").unwrap();
+        assert!(
+            outline.contains("fn civil(&self, unix_ms: i64) -> Result<time::CivilTime, errors::Error>"),
+            "{outline}"
+        );
+        let outline = super::stdlib_wrapper_type_outline("std::time", "CivilResolution").unwrap();
+        assert!(outline.contains("    Fold(i64, i64)\n"), "{outline}");
+    }
+
+    #[test]
+    fn an_import_inside_an_inline_module_does_not_bind_the_wrappers_module() {
+        let source = "use std::time\n\npub fn now() -> i64 { time::Time::now().unix_ns }\n\n\
+                      mod tests {\n    use std::errors\n}\n";
+        let augmented = super::augment_source(source);
+        let mut map = SourceMap::new();
+        let file = map.add_file("test.gos", augmented.clone());
+        let parsed = super::parse_with_autoderive(&augmented, file).0;
+        let at_root = parsed.uses.iter().any(|decl| {
+            decl.module.is_empty()
+                && matches!(&decl.target, gossamer_ast::UseTarget::Module(path)
+                    if path.segments.iter().map(|s| s.name.as_str()).collect::<Vec<_>>() == ["std", "errors"])
+        });
+        assert!(at_root, "the generated source names `errors::` with no file-level import");
+    }
+}

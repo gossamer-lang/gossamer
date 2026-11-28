@@ -343,6 +343,21 @@ fn http_response_stream_parity_across_tiers() {
     );
 }
 
+/// Both kinds of `http::ResponseStream` in one program, a written one and
+/// one read from upstream, proxied, and served by a handler that arrives as
+/// an `Fn` parameter, identically on every tier.
+#[test]
+fn http_response_stream_kinds_parity_across_tiers() {
+    self_terminating_server_parity(
+        "feature-testing-examples/http_response_stream_kinds.gos",
+        &[
+            "direct 200: line tick 0; rest \"tick 1\\ntick 2\\ndone\", chunks within 4: true",
+            "proxied 200: line tick 0; rest \"tick 1\\ntick 2\\ndone\", chunks within 4: true",
+            "routed 200: line tick 0; rest \"tick 1\\ntick 2\\ndone\", chunks within 4: true",
+        ],
+    );
+}
+
 /// A request written as a cohort and as an arena must behave identically
 /// on every tier: the children are joined before the response, a failing
 /// child cancels its siblings and becomes the block's `Err`, and what the
@@ -469,22 +484,6 @@ fn http_middleware_bearer_parity_across_tiers() {
     );
 }
 
-/// Canonical authenticated API example: a path-parameter router, a
-/// `middleware::bearer_ok` auth gate, typed `r.path_int` extraction,
-/// and signed `session::sign` / `verify` cookies - all composed in
-/// one program that must behave bit-identically on every tier.
-#[test]
-fn web_auth_api_parity_across_tiers() {
-    self_terminating_server_parity(
-        "examples/web_auth_api.gos",
-        &[
-            "login session={\"user\":\"ada\"}",
-            "order status=200 body={\"order\":42}",
-            "noauth status=401",
-        ],
-    );
-}
-
 /// Router `{id}` / `{rest...}` path captures must reach a Gossamer
 /// handler via `r.path_value(name)` bit-identically on every tier.
 /// An undeclared capture name yields `""`.
@@ -593,6 +592,25 @@ fn http_serve_tls_parity_across_tiers() {
     );
 }
 
+/// `tls::ServerConfig` with `http::serve_tls_config`: a server requiring a
+/// client certificate refuses a client without one and serves one that
+/// presents it, an SNI name selects its own certificate, and a reload reaches
+/// the next handshake while a failed one leaves the old certificate in place,
+/// identically on every tier.
+#[test]
+fn http_tls_server_config_parity_across_tiers() {
+    self_terminating_server_parity(
+        "feature-testing-examples/http_tls_server_config.gos",
+        &[
+            "mtls without a client certificate: rejected",
+            "mtls with a client certificate: A",
+            "sni other.test: B",
+            "after reload: C",
+            "bad reload keeps the old certificate: true C",
+        ],
+    );
+}
+
 /// The compiled HTTP server must emit the RFC 9110 origin headers
 /// `Date` and `Server` that the interp tier already sends, so a client
 /// observes the same response-header set on every tier.
@@ -632,59 +650,6 @@ fn http_serve_err_binding_parity_across_tiers() {
             "{} must not panic on serve failure\n--- stderr ---\n{}",
             tier.label(),
             run.stderr,
-        );
-    }
-}
-
-/// `http_h3::serve` is the QUIC + HTTP/3 server entry, wired across
-/// all three tiers through the shared `gossamer-http3` engine. A full
-/// QUIC round trip is too slow / nondeterministic for the parity walk
-/// (the loopback handshake takes tens of seconds), so this fixture
-/// exercises the same handler-fn-ptr dispatch and `Result<(), Error>`
-/// surface deterministically: HTTP/3 mandates TLS, so the server
-/// reads the cert / key PEM before binding, and a missing cert file
-/// is the caller's `Err` value on every tier - not a panic. The cert
-/// read goes through `std::fs::read` on both tiers, so the OS error
-/// tail is identical; this pins the stable prefix and asserts
-/// cross-tier equality of the full line.
-#[test]
-fn http3_serve_err_binding_parity_across_tiers() {
-    let fixture = spec("feature-testing-examples/http3_serve_err_binding.gos");
-    let stable_prefix = "about to bind\nError: http_h3::serve: h3 io: read cert:";
-    let mut outputs: Vec<(String, String)> = Vec::new();
-    for tier in [Tier::Vm, Tier::Cranelift, Tier::Llvm] {
-        let run =
-            run_tier(&fixture, tier).unwrap_or_else(|e| panic!("{} error: {e}", tier.label()));
-        assert_eq!(
-            run.code,
-            Some(0),
-            "{} must exit 0 - a cert read failure is the caller's Err value, not a panic\n\
-             --- stdout ---\n{}\n--- stderr ---\n{}",
-            tier.label(),
-            run.stdout,
-            run.stderr,
-        );
-        assert!(
-            run.stdout.starts_with(stable_prefix),
-            "{} stdout must carry the stable cert-read-error prefix\n--- stdout ---\n{}",
-            tier.label(),
-            run.stdout,
-        );
-        assert!(
-            !run.stderr.contains("GX0005"),
-            "{} must not panic on a cert read failure\n--- stderr ---\n{}",
-            tier.label(),
-            run.stderr,
-        );
-        outputs.push((tier.label().to_string(), run.stdout));
-    }
-    // The OS error tail is machine-specific but identical across
-    // tiers on the same host: every tier's full stdout must match.
-    let (first_label, first_out) = &outputs[0];
-    for (label, out) in &outputs[1..] {
-        assert_eq!(
-            out, first_out,
-            "{label} stdout must match {first_label} byte-for-byte",
         );
     }
 }

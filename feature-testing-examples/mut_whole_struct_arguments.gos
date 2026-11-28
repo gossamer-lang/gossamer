@@ -1,0 +1,65 @@
+// A struct handed whole to a `&mut` parameter, from a `mut` parameter or a
+// copy of a by-value one, is written in the callee's frame only: the caller's
+// value, and the strings it holds, are as they were. A program's own
+// String iterator collects without keeping a string behind.
+use std::env
+
+struct Label { text: String, hits: i64 }
+
+fn extend(label: &mut Label) {
+    label.text = label.text + "+"
+    label.hits += 1
+}
+
+fn twice(mut label: Label) -> String {
+    extend(&mut label)
+    extend(&mut label)
+    label.text
+}
+
+fn through_copy(label: Label) -> String {
+    let mut own = label
+    extend(&mut own)
+    own.text
+}
+
+struct Words { next: String, last: String, done: bool }
+
+impl Iterator for Words {
+    type Item = String
+    fn next(&mut self) -> Option<String> {
+        if self.done { return None }
+        let current = self.next
+        if current == self.last {
+            self.done = true
+        } else {
+            self.next = current + "a"
+        }
+        Some(current)
+    }
+}
+
+impl Words {
+    fn advance_by(&mut self, n: i64) {
+        for _ in 0..n { self.next() }
+    }
+}
+
+fn skipped(words: Words) -> Vec<String> {
+    let mut own = words
+    own.advance_by(1)
+    own.collect::<Vec<String>>()
+}
+
+fn main() {
+    let label = Label { text: f"label-{env::args().len()}", hits: 0 }
+    println(twice(label))
+    let filler: Vec<String> = (0..200).map(|i| f"filler-{i}").collect()
+    println(through_copy(label))
+    println(twice(label))
+    println(f"caller still holds {label.text} with {label.hits} hits, filler {filler.len()}")
+    let words = Words { next: "a", last: "aaaa", done: false }
+    println(words.collect::<Vec<String>>())
+    println(skipped(words))
+    println(words.map(|w| w.len()).collect::<Vec<i64>>())
+}

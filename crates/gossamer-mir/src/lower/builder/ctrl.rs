@@ -302,6 +302,7 @@ impl<'a> Builder<'a> {
             }
         }
         let scrutinee_local = self.lower_expr(scrutinee)?;
+        self.temp_scrutinees.insert(scrutinee.id.0, scrutinee_local);
         let join_block = self.new_block(span);
         let result_local = self.fresh(ty);
         // Save the post-scrutinee block before allocating the
@@ -450,6 +451,7 @@ impl<'a> Builder<'a> {
         enum_name: &str,
     ) -> Option<Local> {
         let scrutinee_local = self.lower_expr(scrutinee)?;
+        self.temp_scrutinees.insert(scrutinee.id.0, scrutinee_local);
         let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
 
         // A payload-bearing enum's value is a pointer to `[disc, p0, ...]`,
@@ -709,6 +711,7 @@ impl<'a> Builder<'a> {
         span: Span,
     ) -> Option<Local> {
         let scrutinee_local = self.lower_expr(scrutinee)?;
+        self.temp_scrutinees.insert(scrutinee.id.0, scrutinee_local);
         let result_local = self.fresh(ty);
         let join = self.new_block(span);
         // `match &mut x` over a local the reference copies into a slot of its
@@ -2168,15 +2171,7 @@ impl<'a> Builder<'a> {
                             };
                             if let Some(inner) = inner_ty {
                                 if let Some(sname) = self.struct_name_of(inner) {
-                                    let runtime_kind: Option<&'static str> = match sname.as_str() {
-                                        "Error" => Some("errors::Error"),
-                                        "Response" => Some("http::Response"),
-                                        "Request" => Some("http::Request"),
-                                        "Client" => Some("http::Client"),
-                                        "Scanner" => Some("bufio::Scanner"),
-                                        "Pattern" => Some("regex::Pattern"),
-                                        _ => None,
-                                    };
+                                    let runtime_kind = self.std_type_runtime_kind(inner, &sname);
                                     self.local_struct.insert(payload_local, sname);
                                     if let Some(rk) = runtime_kind {
                                         self.local_runtime_kind.insert(payload_local, rk);
@@ -2659,6 +2654,14 @@ impl<'a> Builder<'a> {
             }
             if temp_file_pair && field_idx == 0 {
                 self.local_runtime_kind.insert(element_local, "fs::File");
+            }
+            // A pair that reached here through a function's return carries no
+            // call tag, so its stream or file names its kind by its type.
+            if !self.local_runtime_kind.contains_key(&element_local)
+                && let Some(kind @ ("net::TcpStream" | "net::UnixStream" | "fs::File")) =
+                    self.runtime_kind_from_ty(elem_ty)
+            {
+                self.local_runtime_kind.insert(element_local, kind);
             }
             let projection = vec![crate::ir::Projection::Field(
                 u32::try_from(field_idx).expect("tuple projection overflow"),

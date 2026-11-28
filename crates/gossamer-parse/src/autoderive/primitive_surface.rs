@@ -21,16 +21,18 @@ enum Receivers {
     Unsigned,
     Integers,
     Floats,
+    /// The totally ordered scalars and `String`.
+    Ordered,
     /// `Vec<T>`, declared once for every element type.
     Vector,
 }
 
 impl Receivers {
     fn types(self) -> &'static [&'static str] {
-        const SIGNED: &[&str] = &["i8", "i16", "i32", "i64", "isize"];
-        const UNSIGNED: &[&str] = &["u8", "u16", "u32", "u64", "usize"];
+        const SIGNED: &[&str] = &["i8", "i16", "i32", "i64", "i128", "isize"];
+        const UNSIGNED: &[&str] = &["u8", "u16", "u32", "u64", "u128", "usize"];
         const INTEGERS: &[&str] = &[
-            "i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize",
+            "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128", "usize",
         ];
         match self {
             Self::Char => &["char"],
@@ -39,6 +41,10 @@ impl Receivers {
             Self::Unsigned => UNSIGNED,
             Self::Integers => INTEGERS,
             Self::Floats => &["f64", "f32"],
+            Self::Ordered => &[
+                "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32", "u64", "u128",
+                "usize", "char", "String",
+            ],
             Self::Vector => &["Vec"],
         }
     }
@@ -587,6 +593,28 @@ const METHODS: &[Method] = &[
             if a < b { -1 } else if a > b { 1 } else { 0 }
         }",
     ),
+    // The order `impl Ord`'s `cmp` answers, as a sign, for the scalars and
+    // `String` a hand-written `cmp` compares field by field. A difference
+    // (`other.n - self.n`) overflows where this does not.
+    method(
+        "cmp",
+        Receivers::Ordered,
+        &[],
+        r"fn cmp(&self, other: T) -> i64 {
+            if *self < other { -1 } else if *self > other { 1 } else { 0 }
+        }",
+    ),
+    // `Vec<T>`: a copy, as `to_vec` is of an array or a set, for the `Vec` a
+    // range read (`xs[lo..hi]`) answers.
+    method(
+        "to_vec",
+        Receivers::Vector,
+        &[],
+        r"fn to_vec(&self) -> Vec<T> {
+        let copy = *self
+        copy
+    }",
+    ),
     // `Vec<T>`: in-place filtering.
     method(
         "retain",
@@ -943,6 +971,7 @@ fn unsigned_of(ty: &str) -> &'static str {
         "i16" | "u16" => "u16",
         "i32" | "u32" => "u32",
         "isize" | "usize" => "usize",
+        "i128" | "u128" => "u128",
         _ => "u64",
     }
 }

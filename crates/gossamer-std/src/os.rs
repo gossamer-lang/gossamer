@@ -210,3 +210,12 @@ pub fn family() -> &'static str {
 pub fn arch() -> &'static str {
     std::env::consts::ARCH
 }
+
+/// The machine's host name. Mirrors Go's `os.Hostname`.
+///
+/// # Errors
+///
+/// The reason the system could not report one.
+pub fn hostname() -> Result<String, String> {
+    gossamer_runtime::platform::host_name()
+}

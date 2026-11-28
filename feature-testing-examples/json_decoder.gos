@@ -1,0 +1,52 @@
+// `json::Decoder` reads the JSON values of a file one at a time, separated by
+// whitespace (NDJSON included): `next_text` hands a value's text to a typed
+// decode, `next` answers a `json::Value`, a value may span many read chunks,
+// and a value the file cuts off, or one that does not parse, is an `Err`
+// naming the byte it began at.
+use std::encoding::json
+use std::fs
+
+struct Event { kind: String, n: i64 }
+
+fn main() {
+    let dir = fs::TempDir::new("jd").unwrap()
+    let path = f"{dir.path()}/events.ndjson"
+    let mut text = String::new()
+    for i in 0..5 {
+        text += f"{{\"kind\": \"tick\", \"n\": {i}, \"note\": \"a \\\"quoted\\\" {{brace}}\"}}\n"
+    }
+    text += "[1, [2, 3]] \"plain\" 42 true null -1.5e3\n"
+    fs::write(path, text.bytes()).unwrap()
+    let mut d = json::Decoder::new(fs::File::open(path).unwrap())
+    let mut total = 0
+    for _ in 0..5 {
+        let Some(t) = d.next_text().unwrap() else { return }
+        let e = json::decode::<Event>(t).unwrap()
+        total += e.n
+    }
+    println(f"total {total} at {d.offset()}")
+    while let Some(v) = d.next().unwrap() {
+        println(f"{d.offset()}: {v}")
+    }
+    let mut big = String::from("{\"items\": [")
+    for i in 0..30000 {
+        if i > 0 { big += ", " }
+        big += f"{{\"id\": {i}, \"tag\": \"x\\\"y\"}}"
+    }
+    big += "]}\n7\n"
+    fs::write(path, big.bytes()).unwrap()
+    let mut long = json::Decoder::new(fs::File::open(path).unwrap())
+    let doc = long.next().unwrap().unwrap()
+    let items = json::get(doc, "items").unwrap()
+    let last = json::at(items, 29999).unwrap()
+    println(f"items {json::as_array(items).unwrap().len()} last {json::get(last, "id").unwrap()} tag {json::get(last, "tag").unwrap()}")
+    println(f"after {long.next()} at {long.offset()} then {long.next()}")
+    fs::write(path, "{\"a\": 1} {\"b\": [1, 2".bytes()).unwrap()
+    let mut cut = json::Decoder::new(fs::File::open(path).unwrap())
+    println(cut.next())
+    println(cut.next())
+    fs::write(path, "{\"a\": } 7".bytes()).unwrap()
+    let mut bad = json::Decoder::new(fs::File::open(path).unwrap())
+    println(bad.next())
+    println(bad.next())
+}

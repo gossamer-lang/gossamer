@@ -14,28 +14,32 @@
 
 #![forbid(unsafe_code)]
 
-pub use crate::text::{Error, Value};
+pub use crate::text::{Error, MissingKey, Value};
 
-/// Compiled HTML template.
+/// Compiled HTML template: the text engine's tree, rendered with every
+/// substitution escaped by the context it lands in.
 #[derive(Debug, Clone)]
 pub struct Template {
-    text: String,
+    parsed: crate::text::Template,
 }
 
 impl Template {
-    /// Parses `source`. The parse step verifies action balance.
+    /// Parses `source`.
     pub fn from_source(source: &str) -> Result<Self, Error> {
-        // Reuse the text-template parser solely as a balance check.
-        crate::text::parse(source)?;
         Ok(Self {
-            text: source.to_string(),
+            parsed: crate::text::parse(source)?,
         })
     }
 
     /// Renders the template against `data`, escaping every dynamic
     /// substitution by context.
     pub fn render(&self, data: &Value) -> Result<String, Error> {
-        render_html(&self.text, data)
+        self.render_with_missing(data, MissingKey::Empty)
+    }
+
+    /// [`Self::render`], with what a field the data does not hold renders as.
+    pub fn render_with_missing(&self, data: &Value, missing: MissingKey) -> Result<String, Error> {
+        render_parsed(&self.parsed, data, missing)
     }
 }
 
@@ -60,36 +64,8 @@ pub fn parse(source: &str) -> Result<Template, Error> {
 /// content-security-policy substitute. Treat untrusted HTML fragments
 /// with a real sanitizer.
 pub fn render_json(source: &str, json_data: &str) -> Result<String, Error> {
-    let data = json_to_value(json_data)?;
+    let data = crate::text::json_to_value(json_data)?;
     render(source, &data)
-}
-
-fn json_to_value(text: &str) -> Result<Value, Error> {
-    if text.trim().is_empty() {
-        return Ok(Value::Null);
-    }
-    let v: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| Error::Parse(format!("template data: {e}")))?;
-    Ok(json_value(&v))
-}
-
-fn json_value(v: &serde_json::Value) -> Value {
-    match v {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => n
-            .as_i64()
-            .map_or_else(|| Value::Float(n.as_f64().unwrap_or(0.0)), Value::Int),
-        serde_json::Value::String(s) => Value::String(s.clone()),
-        serde_json::Value::Array(items) => Value::Seq(items.iter().map(json_value).collect()),
-        serde_json::Value::Object(map) => {
-            let mut m = std::collections::BTreeMap::new();
-            for (k, val) in map {
-                m.insert(k.clone(), json_value(val));
-            }
-            Value::Map(m)
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -367,10 +343,13 @@ fn escape_js(s: &str) -> String {
 /// `template` all work and a value inside any of them is escaped exactly
 /// as one at top level is. `{{ safe .x }}` writes through unescaped -
 /// that is the caller taking responsibility for the fragment.
-fn render_html(source: &str, data: &Value) -> Result<String, Error> {
-    let template = crate::text::parse(source)?;
+fn render_parsed(
+    template: &crate::text::Template,
+    data: &Value,
+    missing: MissingKey,
+) -> Result<String, Error> {
     let funcs = crate::text::FuncMap::new();
-    template.render_with(
+    template.render_with_missing(
         data,
         &funcs,
         Some(&|literal: &str, value: &str, raw: bool| {
@@ -384,6 +363,7 @@ fn render_html(source: &str, data: &Value) -> Result<String, Error> {
                 Context::Js => escape_js(value),
             }
         }),
+        missing,
     )
 }
 

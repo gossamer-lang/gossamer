@@ -1217,6 +1217,12 @@ pub fn try_spawn_service(task: Box<dyn FnOnce() + Send + 'static>) -> Option<Gid
     reason = "fire-and-forget spawn is the common shape; Gid is informational"
 )]
 pub fn spawn(task: Box<dyn FnOnce() + Send + 'static>) -> Gid {
+    let task = Box::new(move || {
+        // Cleanups the goroutine's last releases queued run before it ends,
+        // on an unwind too.
+        let _cleanups = crate::c_abi::guard::CleanupsAtExit;
+        task();
+    });
     let coro = gossamer_coro::Goroutine::new(task);
     scheduler().spawn(GoroutineTask {
         coro,

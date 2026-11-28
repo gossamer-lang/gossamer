@@ -7,6 +7,27 @@ impl<'tcx> FnBuilder<'tcx> {
         op: HirUnaryOp,
         operand: &HirExpr,
     ) -> RuntimeResult<Reg> {
+        if matches!(op, HirUnaryOp::Neg | HirUnaryOp::Not)
+            && let Some(unsigned) = self.wide_int_ty(self.static_ty(operand))
+        {
+            // `-170141183460469231731687303715884105728` is `i128::MIN`, a
+            // constant whose magnitude alone does not fit.
+            if op == HirUnaryOp::Neg
+                && let HirExprKind::Literal(gossamer_hir::HirLiteral::Int(text)) = &operand.kind
+            {
+                let negative = gossamer_hir::HirLiteral::Int(format!("-{text}"));
+                return self.compile_wide_literal(&negative, unsigned);
+            }
+            let src = self.compile_expr(operand)?;
+            let dst = self.alloc_reg();
+            self.emit(Op::WideUnary {
+                dst,
+                operand: src,
+                neg: op == HirUnaryOp::Neg,
+                unsigned,
+            });
+            return Ok(dst);
+        }
         // `-x` / `!x` on a user struct / enum route to its `neg` / `not`
         // impl method.
         if let Some(method) = match op {

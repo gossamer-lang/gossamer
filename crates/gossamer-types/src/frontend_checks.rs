@@ -136,6 +136,10 @@ pub fn check_resolved_unit(
         for diag in crate::check_guard_uses(sf, resolutions, &table, tcx) {
             fatal.push(diag.to_diagnostic());
         }
+        // A drop type is a struct shared by handle, and is never cloned.
+        for diag in crate::check_drop_uses(sf, &table, tcx) {
+            fatal.push(diag.to_diagnostic());
+        }
         // A parallel adapter's callback runs on many workers at once, so one
         // whose purity cannot be shown is refused on every tier.
         if !earlier_fatal && fatal.is_empty() {

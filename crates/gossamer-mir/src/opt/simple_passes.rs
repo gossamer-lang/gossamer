@@ -293,11 +293,17 @@ fn fold_typed_integer_ordering(
 ) -> Option<ConstValue> {
     use gossamer_types::IntTy;
 
+    // A 128-bit constant is held as its bit pattern, which an `i128` reads
+    // signed and a `u128` unsigned past `i128::MAX`; the tiers order it at
+    // run time.
+    if int_ty.is_wide() {
+        return None;
+    }
     let unsigned_width = match int_ty {
         IntTy::U8 => Some(8),
         IntTy::U16 => Some(16),
         IntTy::U32 => Some(32),
-        IntTy::U64 | IntTy::U128 | IntTy::Usize => Some(64),
+        IntTy::U64 | IntTy::Usize => Some(64),
         _ => None,
     };
     let ordering = match unsigned_width {
@@ -330,11 +336,16 @@ fn fold_typed_integer_arithmetic(
 ) -> Option<i128> {
     use gossamer_types::IntTy;
 
+    // 128-bit arithmetic needs more room than the fold's `i128` working
+    // value has, so the tiers compute it at run time.
+    if int_ty.is_wide() {
+        return None;
+    }
     let unsigned_bits = match int_ty {
         IntTy::U8 => Some(8),
         IntTy::U16 => Some(16),
         IntTy::U32 => Some(32),
-        IntTy::U64 | IntTy::U128 | IntTy::Usize => Some(64),
+        IntTy::U64 | IntTy::Usize => Some(64),
         _ => None,
     };
     if let Some(bits) = unsigned_bits {
@@ -371,7 +382,7 @@ fn fold_typed_integer_arithmetic(
         IntTy::I8 => 8,
         IntTy::I16 => 16,
         IntTy::I32 => 32,
-        IntTy::I64 | IntTy::I128 | IntTy::Isize => 64,
+        IntTy::I64 | IntTy::Isize => 64,
         _ => unreachable!(),
     };
     let value = match op {

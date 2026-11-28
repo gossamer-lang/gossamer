@@ -925,7 +925,10 @@ pub(super) fn lower_intrinsic_call_collections(
                 .get(destination.local.0 as usize)
                 .and_then(|decl| match tcx.kind_of(decl.ty) {
                     TyKind::HashMap { key, value, .. } => {
+                        // A 128-bit integer keys by content and is stored
+                        // as a copy, which the first insert installs.
                         let kind = |ty| match tcx.kind_of(ty) {
+                            TyKind::Int(int) if int.is_wide() => None,
                             TyKind::Int(_) => Some(0),
                             TyKind::String => Some(1),
                             TyKind::Vec(elem) | TyKind::Slice(elem)
@@ -1015,6 +1018,7 @@ pub(super) fn lower_intrinsic_call_collections(
             // 0 = i64-shaped storage, 1 = String storage. Anything else has no
             // typed insert helper, so the body stays on bytecode.
             let storage_kind = |ty: Ty| match tcx.kind_of(ty) {
+                TyKind::Int(int) if int.is_wide() => None,
                 TyKind::Int(_) | TyKind::Bool | TyKind::Char => Some(0i64),
                 TyKind::String => Some(1i64),
                 _ => None,
@@ -1099,7 +1103,10 @@ pub(super) fn lower_intrinsic_call_collections(
                 .get(destination.local.0 as usize)
                 .and_then(|decl| match tcx.kind_of(decl.ty) {
                     TyKind::HashMap { key, value, .. } => {
+                        // A 128-bit integer keys by content and is stored
+                        // as a copy, which the first insert installs.
                         let kind = |ty| match tcx.kind_of(ty) {
+                            TyKind::Int(int) if int.is_wide() => None,
                             TyKind::Int(_) => Some(0),
                             TyKind::String => Some(1),
                             TyKind::Vec(elem) | TyKind::Slice(elem)

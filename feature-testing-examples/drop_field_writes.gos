@@ -1,0 +1,86 @@
+// Writes through the fields of a type with `impl Drop`, each shape a write
+// takes: a method call, one that answers a value, an assignment, a compound
+// assignment, an index write, and a write whose own expression returns early
+// through `?`. Each changes the field in place and touches no other field.
+//
+// Beside them, the shapes those writes are built from, written directly: a
+// closure that captures nothing handed to another closure, a method called
+// through an explicit dereference, `(*r).push(x)`, `pop` through a `&mut`
+// parameter, `&mut` of a `String` element or field handed to a function
+// that replaces it, and a reborrow `&mut *r` handed on.
+
+struct Ledger {
+    entries: Vec<i64>
+    total: i64
+    label: String
+}
+
+impl Drop for Ledger {
+    fn drop(&mut self) {
+        println(f"closing {self.label} at {self.total}")
+    }
+}
+
+impl Ledger {
+    fn add(&mut self, amount: i64) {
+        self.entries.push(amount)
+        self.total += amount
+    }
+
+    fn undo(&mut self) -> Option<i64> {
+        let last = self.entries.pop()?
+        self.total -= last
+        Some(last)
+    }
+
+    fn add_parsed(&mut self, text: String) -> Option<i64> {
+        self.total += text.to_i64()?
+        Some(self.total)
+    }
+}
+
+fn push_through(r: &mut Vec<i64>) {
+    (*r).push(7)
+}
+
+fn take_last(r: &mut Vec<i64>) -> Option<i64> {
+    r.pop()
+}
+
+fn rename(s: &mut String) {
+    *s = "renamed"
+}
+
+fn rename_through(s: &mut String) {
+    rename(&mut *s)
+}
+
+fn main() {
+    let mut ledger = Ledger { entries: #[], total: 0, label: "books" }
+    for amount in [5, 10, 20] {
+        ledger.add(amount)
+    }
+    println(f"after adds: {ledger.entries} total {ledger.total}")
+    println(f"undo: {ledger.undo()}")
+    ledger.entries[0] = 6
+    ledger.total += 1
+    ledger.label = "ledger"
+    println(f"edited: {ledger.entries} total {ledger.total} label {ledger.label}")
+    println(f"parsed: {ledger.add_parsed("4")}, refused: {ledger.add_parsed("x")}")
+    println(f"total now {ledger.total}")
+
+    let mut cell: Vec<i64> = #[]
+    let lend = |edit: Fn(&mut Vec<i64>)| edit(&mut cell)
+    lend(|v: &mut Vec<i64>| v.push(1))
+    lend(|v: &mut Vec<i64>| { (*v).push(2) })
+    push_through(&mut cell)
+    println(f"lent: {cell}")
+    println(f"taken: {take_last(&mut cell):?}, left {cell}")
+
+    let mut names = #["first", "second"]
+    rename(&mut names[1])
+    rename_through(&mut names[0])
+    let mut shelf = Ledger { entries: #[], total: 0, label: "shelf" }
+    rename(&mut shelf.label)
+    println(f"renamed: {names} {shelf.label}")
+}

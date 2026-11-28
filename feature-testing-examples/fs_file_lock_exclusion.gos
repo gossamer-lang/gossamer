@@ -1,0 +1,56 @@
+// A lock belongs to the open file that took it: a second `fs::File` of the
+// same path in this process conflicts with it as another process's would, so
+// goroutines exclude each other, and closing a third file of the same path
+// leaves the lock in place.
+use std::fs
+use std::fs::OpenOptions
+use std::sync::channel
+
+fn open_rw(path: String) -> fs::File {
+    OpenOptions::new().read(true).write(true).open(path).unwrap()
+}
+
+fn main() {
+    let dir = fs::TempDir::new("locks").unwrap()
+    let path = f"{dir.path()}/data"
+    fs::write(path, "0123456789".bytes()).unwrap()
+    let a = open_rw(path)
+    let b = open_rw(path)
+    println(f"a exclusive: {a.try_lock_exclusive().unwrap()}")
+    println(f"b exclusive: {b.try_lock_exclusive().unwrap()}")
+    println(f"b shared: {b.try_lock_shared().unwrap()}")
+    let c = fs::File::open(path).unwrap()
+    c.close()
+    println(f"b after a third file closes: {b.try_lock_exclusive().unwrap()}")
+    a.unlock().unwrap()
+    println(f"b after a unlocks: {b.try_lock_exclusive().unwrap()}")
+    b.unlock().unwrap()
+
+    println(f"a range 0..4: {a.try_lock_range(0, 4, true).unwrap()}")
+    println(f"b range 2..6: {b.try_lock_range(2, 4, false).unwrap()}")
+    println(f"b range 4..8: {b.try_lock_range(4, 4, true).unwrap()}")
+    let d = fs::File::open(path).unwrap()
+    d.close()
+    println(f"b range 0..2 after a third file closes: {b.try_lock_range(0, 2, true).unwrap()}")
+    a.unlock_range(0, 4).unwrap()
+    println(f"b range 0..2 after a releases: {b.try_lock_range(0, 2, true).unwrap()}")
+    b.unlock().unwrap()
+
+    let holder = open_rw(path)
+    println(f"main holds: {holder.try_lock_exclusive().unwrap()}")
+    let tx, rx = channel()
+    spawn(|| {
+        let mine = open_rw(path)
+        tx.send(mine.try_lock_exclusive().unwrap())
+        tx.close()
+    })
+    println(f"goroutine while main holds: {rx.recv().unwrap()}")
+    holder.unlock().unwrap()
+    let tx2, rx2 = channel()
+    spawn(|| {
+        let mine = open_rw(path)
+        tx2.send(mine.try_lock_exclusive().unwrap())
+        tx2.close()
+    })
+    println(f"goroutine after main releases: {rx2.recv().unwrap()}")
+}

@@ -157,8 +157,11 @@ fn emit_stubs(out: &mut String, ty: &TyId) {
         ));
     }
     for op in ["from_json", "from_toml", "from_yaml"] {
+        // `duplicate_keys`: the `json::DuplicateKeys` index a call's argument
+        // of that name became; TOML refuses a repeated key in its grammar.
+        let duplicates = if op == "from_toml" { "" } else { ", duplicate_keys: i64 = 0" };
         out.push_str(&format!(
-            "pub fn {}(text: &String) -> Result<{name}, errors::Error> {{\n    panic(\"{op} is generated after checking\")\n}}\n\n",
+            "pub fn {}(text: &String{duplicates}) -> Result<{name}, errors::Error> {{\n    panic(\"{op} is generated after checking\")\n}}\n\n",
             serde_fn(op, &ty.symbol)
         ));
     }
@@ -452,11 +455,13 @@ fn is_scalar_fmt_name(name: &str) -> bool {
         "i8" | "i16"
             | "i32"
             | "i64"
+            | "i128"
             | "isize"
             | "u8"
             | "u16"
             | "u32"
             | "u64"
+            | "u128"
             | "usize"
             | "f32"
             | "f64"
@@ -1249,6 +1254,52 @@ fn types_with_user_method(parsed: &SourceFile, method: &str) -> HashSet<String> 
     out
 }
 
+/// Types the source implements `Iterator` for, whose `min` and `max` are the
+/// iterator's terminals rather than the two-value order methods.
+fn types_with_iterator_impl(parsed: &SourceFile) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for (module, item) in flatten_active_items_with_modules(&parsed.items) {
+        if let ItemKind::Impl(decl) = &item.kind
+            && impl_trait_head(decl) == Some("Iterator")
+            && let Some(name) = type_head_name(&decl.self_ty)
+        {
+            out.insert(TyId::new(&module, name).path);
+        }
+    }
+    out
+}
+
+/// Markers asking for an ordered type's two-value `min`, `max`, and `clamp`,
+/// each with the method it stands for.
+const ORDER_METHODS: [(&str, &str); 3] = [
+    ("min", "__OrderMin"),
+    ("max", "__OrderMax"),
+    ("clamp", "__OrderClamp"),
+];
+
+/// The two-value order methods `derives` asks for, written against the type's
+/// `cmp`, with the ties Rust's `Ord` gives them: `min` keeps `self` and `max`
+/// takes `other` when the two are equal, and `clamp` refuses bounds out of
+/// order.
+fn emit_order_methods(out: &mut String, self_ty: &str, derives: &[String]) {
+    let has = |marker: &str| derives.iter().any(|d| d == marker);
+    if has("__OrderMin") {
+        out.push_str(&format!(
+            "    fn min(self, other: {self_ty}) -> {self_ty} {{ if self.cmp(other) <= 0 {{ self }} else {{ other }} }}\n"
+        ));
+    }
+    if has("__OrderMax") {
+        out.push_str(&format!(
+            "    fn max(self, other: {self_ty}) -> {self_ty} {{ if self.cmp(other) > 0 {{ self }} else {{ other }} }}\n"
+        ));
+    }
+    if has("__OrderClamp") {
+        out.push_str(&format!(
+            "    fn clamp(self, lo: {self_ty}, hi: {self_ty}) -> {self_ty} {{\n        if lo.cmp(hi) > 0 {{ panic(\"clamp: the lower bound is above the upper bound\") }}\n        if self.cmp(lo) < 0 {{ return lo }}\n        if self.cmp(hi) > 0 {{ return hi }}\n        self\n    }}\n"
+        ));
+    }
+}
+
 /// Trait an `impl` header names, if it names one.
 fn impl_trait_head(decl: &gossamer_ast::ImplDecl) -> Option<&str> {
     decl.trait_ref
@@ -1407,7 +1458,19 @@ fn field_default_literal(
 fn is_numeric_scalar(name: &str) -> bool {
     matches!(
         name,
-        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" | "f32" | "f64"
+        "i8" | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
     )
 }
 
@@ -1521,6 +1584,11 @@ pub fn synthesize_derive_impls_with(
     let user_eq = types_with_user_method(parsed, "eq");
     let user_default = types_with_user_method(parsed, "default");
     let user_cmp = types_with_user_method(parsed, "cmp");
+    let user_order_methods: Vec<HashSet<String>> = ORDER_METHODS
+        .iter()
+        .map(|(method, _)| types_with_user_method(parsed, method))
+        .collect();
+    let iterators = types_with_iterator_impl(parsed);
 
     // Field types per struct / enum, used to grow the `formattable` set,
     // paired with the declaration's own type-parameter names.
@@ -1768,6 +1836,15 @@ pub fn synthesize_derive_impls_with(
             if !orderable.contains(tn) {
                 derives.retain(|d| d != "Ord" && d != "PartialOrd");
             }
+            // An ordered type takes the two-value `min` / `max` / `clamp` an
+            // integer has, unless it writes its own or is an iterator.
+            if (orderable.contains(tn) || user_cmp.contains(tn)) && !iterators.contains(tn) {
+                for ((_, marker), user) in ORDER_METHODS.iter().zip(&user_order_methods) {
+                    if !user.contains(tn) {
+                        derives.push((*marker).to_string());
+                    }
+                }
+            }
         }
         if derives.is_empty() {
             continue;
@@ -2005,7 +2082,8 @@ fn emit_enum_derive_impl(
     let want_default = has("Default");
     let render_methods = rendering_method_names(derives);
     let want_rendering = !render_methods.is_empty();
-    if !(want_clone || want_eq || want_cmp || want_default || want_rendering) {
+    let want_order = ORDER_METHODS.iter().any(|(_, marker)| has(marker));
+    if !(want_clone || want_eq || want_cmp || want_default || want_rendering || want_order) {
         return;
     }
     // A generic enum's derived methods live on `impl<T> Name<T>`, the same
@@ -2154,6 +2232,7 @@ fn emit_enum_derive_impl(
             }
         }
     }
+    emit_order_methods(out, name, derives);
     out.push_str("}\n\n");
 }
 
@@ -2271,7 +2350,8 @@ fn emit_tuple_struct_derive_impl(
     let want_default = has("Default");
     let render_methods = rendering_method_names(derives);
     let want_rendering = !render_methods.is_empty();
-    if !(want_clone || want_eq || want_cmp || want_default || want_rendering) {
+    let want_order = ORDER_METHODS.iter().any(|(_, marker)| has(marker));
+    if !(want_clone || want_eq || want_cmp || want_default || want_rendering || want_order) {
         return;
     }
     let (gen_decl, self_ty) = struct_generics(decl, name);
@@ -2337,6 +2417,7 @@ fn emit_tuple_struct_derive_impl(
             argvals.join(", ")
         ));
     }
+    emit_order_methods(out, &self_ty, derives);
     out.push_str("}\n");
 }
 
@@ -2357,7 +2438,8 @@ fn emit_struct_derive_impl(
     let want_default = has("Default");
     let render_methods = rendering_method_names(derives);
     let want_rendering = !render_methods.is_empty();
-    if !(want_clone || want_eq || want_cmp || want_default || want_rendering) {
+    let want_order = ORDER_METHODS.iter().any(|(_, marker)| has(marker));
+    if !(want_clone || want_eq || want_cmp || want_default || want_rendering || want_order) {
         return;
     }
     // `(gen_decl, self_ty)` = ("<T>", "Pair<T>") for a generic struct, else
@@ -2450,6 +2532,7 @@ fn emit_struct_derive_impl(
             &param_name_set(&decl.generics),
         );
     }
+    emit_order_methods(out, &self_ty, derives);
     out.push_str("}\n\n");
 }
 

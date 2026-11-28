@@ -120,7 +120,6 @@ fn checked_sum_i64(values: impl Iterator<Item = i64>) -> i64 {
     for value in values {
         let Some(next) = total.checked_add(value) else {
             crate::c_abi::panic::panic_text("attempt to add with overflow");
-            unreachable!("the raise does not return on the main thread");
         };
         total = next;
     }
@@ -134,7 +133,6 @@ fn checked_product_i64(values: impl Iterator<Item = i64>) -> i64 {
     for value in values {
         let Some(next) = total.checked_mul(value) else {
             crate::c_abi::panic::panic_text("attempt to multiply with overflow");
-            unreachable!("the raise does not return on the main thread");
         };
         total = next;
     }
@@ -618,7 +616,6 @@ impl Iterator for BorrowedGosVecI64 {
             crate::c_abi::panic::panic_text(
                 "borrowed Vec source was structurally mutated during iteration",
             );
-            return None;
         }
         // SAFETY: `index` is below the source's length (checked above), and the adapter holds a
         // share of `source`.
@@ -709,7 +706,6 @@ impl Iterator for GosRangeFromI64 {
     fn next(&mut self) -> Option<Self::Item> {
         let Some((out, next)) = advance_range_from_i64(self.current, self.checked) else {
             crate::c_abi::panic::panic_text("attempt to add with overflow in open integer range");
-            unreachable!("the raise does not return on the main thread");
         };
         self.current = next;
         Some(out)
@@ -1160,7 +1156,6 @@ pub unsafe extern "C-unwind" fn gos_rt_lazy_iter_next_pair_i64(
         };
         if blob.is_null() {
             crate::c_abi::panic::panic_text("lazy pair iterator: out of memory for the pair");
-            return gos_rt_result_new(1, 0);
         }
         gos_rt_result_new(0, blob.expose_provenance() as i64)
     })
@@ -1379,7 +1374,6 @@ impl Iterator for BorrowedGosVecAggr {
             crate::c_abi::panic::panic_text(
                 "borrowed Vec source was structurally mutated during iteration",
             );
-            return None;
         }
         let slot = if self.counted {
             // SAFETY: `index` is in `[0, len)` against this same live header.

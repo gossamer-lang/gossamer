@@ -712,7 +712,7 @@ impl<'a> Builder<'a> {
         matches!(
             self.tcx.kind_of(t),
             TyKind::Int(_) | TyKind::Bool | TyKind::Char | TyKind::String | TyKind::Var(_)
-        )
+        ) && !self.tcx.is_wide_int(t)
     }
 
     /// Element type of a sequence receiver, peeling references.

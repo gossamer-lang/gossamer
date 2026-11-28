@@ -526,6 +526,9 @@ fn wait_for_drain(node: &Arc<CohortNode>) -> bool {
     if state.outstanding == 0 {
         return true;
     }
+    if crate::vm::goroutine::main_deadlocked() {
+        return false;
+    }
     state.joining = true;
     let Some(joining) = crate::vm::goroutine::JoinWait::enter(|| state.outstanding == 0) else {
         state.joining = false;
@@ -781,6 +784,14 @@ pub fn close_root() {
     // The root drain runs after the program's own work is done: a
     // goroutine still running here is one nothing joined.
     crate::vm::goroutine::mark_main_returned();
+    // A deadlock `main` found ends the program with its own report, and the
+    // goroutines it left can never finish.
+    if crate::vm::goroutine::main_deadlocked() {
+        ROOT_LEFT_BLOCKED.store(true, Ordering::Release);
+        node.state.lock().joined = true;
+        pop_current();
+        return;
+    }
     ROOT_DRAINING.store(id, Ordering::Release);
     let (outstanding, blocked) = wait_for_root_drain(&node);
     ROOT_DRAINING.store(0, Ordering::Release);

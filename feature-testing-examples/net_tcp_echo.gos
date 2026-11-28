@@ -14,7 +14,12 @@
 // delivered in one read() on every platform - the echo is exact. The
 // result is a numeric status code (not a String) so the cross-goroutine
 // channel carries an i64 - its element type is identical on every tier.
+//
+// The accepted stream and its peer come back through a function of the
+// program's own, which answers the pair `accept` built: the stream keeps the
+// share it was given on the way through.
 
+use std::errors
 use std::net
 use std::sync::channel
 
@@ -41,6 +46,10 @@ fn client(addr: String, tx: Sender<i64>) {
     tx.send(if ok { OK } else { MISMATCH })
 }
 
+fn accept_one(listener: net::TcpListener) -> Result<(net::TcpStream, String), errors::Error> {
+    listener.accept()
+}
+
 fn main() {
     let listener = match net::TcpListener::bind("127.0.0.1:0") {
         Ok(l) => l
@@ -54,7 +63,7 @@ fn main() {
     }
     let tx, rx = channel()
     spawn(|| client(addr, tx))
-    let stream, _peer = match listener.accept() {
+    let stream, _peer = match accept_one(listener) {
         Ok(p) => p
         Err(e) => { println("accept failed: {}", e)
             return }

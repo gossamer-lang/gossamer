@@ -1,0 +1,52 @@
+// `image::decode` reads PNG, JPEG, and GIF bytes (a GIF's first frame, its
+// transparent index included), `resize` resamples with a Lanczos-3 filter,
+// and `encode_png` / `encode_jpeg` answer bytes for a file. A failure is an
+// `Err` that says what went wrong.
+use std::image
+use std::image::{Image, Rgba}
+use std::encoding::base64
+
+// An 8 by 4 GIF: the left half red, the right half blue, and the top-right
+// pixel transparent.
+const GIF: String = "R0lGODlhCAAEAIEAAP8AAAAA/wAAAAAAACH5BAEAAAIALAAAAAAIAAQAAAgUAAEIBBCgoICBBAsGQKhw4cCGAQEAOw=="
+
+fn hex(pixel: Option<Rgba>) -> String {
+    match pixel {
+        Some(p) => f"{p.r:02x}{p.g:02x}{p.b:02x}{p.a:02x}"
+        None => "none"
+    }
+}
+
+fn main() {
+    let gif = image::decode(base64::decode(GIF).unwrap()).unwrap()
+    println(f"gif {gif.width()}x{gif.height()}: {hex(gif.pixel(0, 0))} {hex(gif.pixel(5, 3))} {hex(gif.pixel(7, 0))}")
+    let png = gif.encode_png().unwrap()
+    println(f"png bytes start {png[1]} {png[2]} {png[3]}")
+    let again = image::decode(png).unwrap()
+    println(f"png round trip keeps pixels: {again.pixels() == gif.pixels()}")
+    let thumb = gif.resize(4, 2).unwrap()
+    println(f"thumb {thumb.width()}x{thumb.height()}: {hex(thumb.pixel(0, 1))} {hex(thumb.pixel(3, 1))}")
+    println(f"across the edge: {hex(thumb.pixel(1, 1))} {hex(thumb.pixel(2, 1))} {hex(thumb.pixel(3, 0))}")
+    let big = gif.resize(16, 8).unwrap()
+    println(f"big {big.width()}x{big.height()}: {hex(big.pixel(0, 7))} {hex(big.pixel(15, 7))}")
+    let jpeg = big.encode_jpeg().unwrap()
+    println(f"jpeg starts {jpeg[0]} {jpeg[1]}, decodes to {image::decode(jpeg).unwrap().width()} wide")
+    match image::decode(#[1u8, 2, 3]) {
+        Ok(_) => println("not an image decoded")
+        Err(e) => println(f"not an image: {e}")
+    }
+    match gif.resize(0, 2) {
+        Ok(_) => println("empty resize accepted")
+        Err(e) => println(f"empty resize: {e}")
+    }
+    match big.encode_jpeg(quality: 101) {
+        Ok(_) => println("quality 101 accepted")
+        Err(e) => println(f"quality 101: {e}")
+    }
+    // 41 bytes claiming a 65535 by 65535 screen.
+    let bomb = "R0lGODlh/////4AAAAAAAAAAACwAAAAAAQABAAACAkQBADs="
+    match image::decode(base64::decode(bomb).unwrap()) {
+        Ok(_) => println("bomb decoded")
+        Err(e) => println(f"bomb: {e}")
+    }
+}

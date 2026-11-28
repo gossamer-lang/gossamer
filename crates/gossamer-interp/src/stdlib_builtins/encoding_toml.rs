@@ -134,7 +134,7 @@ pub(crate) fn builtin_toml_parse(args: &[Value]) -> RuntimeResult<Value> {
 /// `toml::encode(value)`: a `json::Value` object as a TOML document.
 pub(crate) fn builtin_toml_encode(args: &[Value]) -> RuntimeResult<Value> {
     let value = match args.first() {
-        Some(Value::Json(value)) => value.as_value().clone(),
+        Some(Value::Json(value)) => value.to_owned_value(),
         Some(other) => crate::builtins::gossamer_to_json_value(other),
         None => gossamer_std::json::Value::Null,
     };

@@ -478,26 +478,23 @@ pub struct ClosureParam {
 pub struct StructExprField {
     /// Field name being initialized.
     pub name: Ident,
-    /// Initializer expression; `None` means shorthand (name is both field and value).
+    /// Initializer expression. The parser gives a shorthand field (`Point {
+    /// x }`) the path naming the binding, so it resolves and checks like
+    /// `x: x`.
     pub value: Option<Expr>,
+    /// Whether the source wrote the field as shorthand.
+    #[serde(default)]
+    pub shorthand: bool,
 }
 
 impl StructExprField {
-    /// Constructs a shorthand initializer `name`.
-    #[must_use]
-    pub fn shorthand(name: impl Into<String>) -> Self {
-        Self {
-            name: Ident::new(name),
-            value: None,
-        }
-    }
-
     /// Constructs an explicit initializer `name: value`.
     #[must_use]
     pub fn explicit(name: impl Into<String>, value: Expr) -> Self {
         Self {
             name: Ident::new(name),
             value: Some(value),
+            shorthand: false,
         }
     }
 }

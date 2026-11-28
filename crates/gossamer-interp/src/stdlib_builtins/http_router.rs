@@ -149,13 +149,16 @@ pub(crate) const ROUTER_FREE_FNS: &[(&str, &str, BuiltinFnPub)] = &[
 ];
 
 pub(crate) const ROUTER_METHODS: &[(&str, BuiltinFnPub)] = &[
-    ("Router::get", builtin_router_method_get),
-    ("Router::post", builtin_router_method_post),
-    ("Router::put", builtin_router_method_put),
-    ("Router::delete", builtin_router_method_delete),
-    ("Router::patch", builtin_router_method_patch),
-    ("Router::head", builtin_router_method_head),
-    ("Router::options", builtin_router_method_options),
+    ("http::router::Router::get", builtin_router_method_get),
+    ("http::router::Router::post", builtin_router_method_post),
+    ("http::router::Router::put", builtin_router_method_put),
+    ("http::router::Router::delete", builtin_router_method_delete),
+    ("http::router::Router::patch", builtin_router_method_patch),
+    ("http::router::Router::head", builtin_router_method_head),
+    (
+        "http::router::Router::options",
+        builtin_router_method_options,
+    ),
 ];
 
 // Module-local (not the `http_sse` glob export): `http_sse` is gated
@@ -194,24 +197,27 @@ pub(crate) fn install_http_router(globals: &mut Vec<(&'static str, Value)>) {
     // `r.path_value("id")` on a server Request reads the router's path
     // captures. Registered for both the bare and `http::`-qualified
     // dispatch keys.
-    for key in ["Request::path_value", "http::Request::path_value"] {
-        globals.push((
-            key,
-            crate::builtins::builtin_pub(key, builtin_request_path_value as BuiltinFnPub),
-        ));
-    }
-    for key in ["Request::path_int", "http::Request::path_int"] {
-        globals.push((
-            key,
-            crate::builtins::builtin_pub(key, builtin_request_path_int as BuiltinFnPub),
-        ));
-    }
-    for key in ["Request::path_float", "http::Request::path_float"] {
-        globals.push((
-            key,
-            crate::builtins::builtin_pub(key, builtin_request_path_float as BuiltinFnPub),
-        ));
-    }
+    globals.push((
+        "http::Request::path_value",
+        crate::builtins::builtin_pub(
+            "http::Request::path_value",
+            builtin_request_path_value as BuiltinFnPub,
+        ),
+    ));
+    globals.push((
+        "http::Request::path_int",
+        crate::builtins::builtin_pub(
+            "http::Request::path_int",
+            builtin_request_path_int as BuiltinFnPub,
+        ),
+    ));
+    globals.push((
+        "http::Request::path_float",
+        crate::builtins::builtin_pub(
+            "http::Request::path_float",
+            builtin_request_path_float as BuiltinFnPub,
+        ),
+    ));
 }
 
 pub(crate) fn router_method_add(verb: &'static str, args: &[Value]) -> RuntimeResult<Value> {
@@ -343,7 +349,7 @@ pub(crate) fn http_404_response() -> Value {
         ("body", Value::String("not found".into())),
     ];
     fields.push(("headers", Value::Array(Arc::new(Vec::new()))));
-    Value::struct_("Response", Arc::unwrap_or_clone(Arc::new(fields)))
+    Value::struct_("http::Response", Arc::unwrap_or_clone(Arc::new(fields)))
 }
 
 pub(crate) fn request_method_and_path(v: &Value) -> (String, String) {
@@ -438,7 +444,7 @@ pub(crate) fn builtin_request_path_float(args: &[Value]) -> RuntimeResult<Value>
 
 pub(crate) fn builtin_router_new(_args: &[Value]) -> RuntimeResult<Value> {
     Ok(crate::value::state_handle(
-        "Router",
+        "http::router::Router",
         "__router",
         Arc::new(SharedTable::default()),
     ))
@@ -446,7 +452,7 @@ pub(crate) fn builtin_router_new(_args: &[Value]) -> RuntimeResult<Value> {
 
 /// The table a router handle holds.
 pub(crate) fn router_of(v: &Value) -> Option<Arc<SharedTable>> {
-    crate::value::handle_state(v, "Router", "__router")
+    crate::value::handle_state(v, "http::router::Router", "__router")
 }
 
 pub(crate) fn builtin_router_add(args: &[Value]) -> RuntimeResult<Value> {

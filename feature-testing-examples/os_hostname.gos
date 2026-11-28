@@ -1,0 +1,17 @@
+// `os::hostname()` answers the machine's host name on every tier, as Go's
+// `os.Hostname`; the output names only its shape, so it is the same on
+// every machine.
+use std::os
+
+fn main() {
+    let mut seen = 0
+    for _ in 0..3 {
+        match os::hostname() {
+            Ok(name) => {
+                if !name.is_empty() && name == name.trim() { seen += 1 }
+            }
+            Err(e) => println(f"no host name: {e}")
+        }
+    }
+    println(f"host name read {seen} times")
+}

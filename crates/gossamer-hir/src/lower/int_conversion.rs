@@ -45,7 +45,7 @@ const fn int_bounds(ty: IntTy) -> (bool, u128, u128) {
     if ty.is_signed() {
         (true, 1 << (bits - 1), (1 << (bits - 1)) - 1)
     } else {
-        (false, 0, (1 << bits) - 1)
+        (false, 0, u128::MAX >> (128 - bits))
     }
 }
 

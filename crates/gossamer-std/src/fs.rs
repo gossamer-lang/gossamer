@@ -8,7 +8,6 @@ use std::fs::{self as stdfs, Metadata};
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -123,9 +122,6 @@ fn decode_hex_units(hex: &str) -> Option<Vec<u16>> {
         .map(|start| u16::from_str_radix(&hex[start..start + 4], 16).ok())
         .collect()
 }
-
-static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
-static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Directory entry surfaced by [`read_dir`].
 #[derive(Debug, Clone)]
@@ -1665,9 +1661,8 @@ pub struct TempDir {
 }
 
 impl TempDir {
-    /// Creates a new unique directory under the system temp root.
-    /// The name uses the process id + a monotonic counter; never
-    /// reuses a name within the lifetime of a process.
+    /// Creates a new unique directory under the system temp root, named
+    /// with OS randomness and readable by its owner only on Unix.
     pub fn new() -> io::Result<Self> {
         Self::with_prefix("tmp")
     }
@@ -1676,15 +1671,7 @@ impl TempDir {
     /// caller-supplied `prefix` for easier identification in
     /// long-lived working directories.
     pub fn with_prefix(prefix: &str) -> io::Result<Self> {
-        validate_temp_prefix(prefix)?;
-        let n = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let pid = gossamer_runtime::platform::process_id();
-        let nanos = gossamer_runtime::platform::system_time_now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let mut path = gossamer_runtime::platform::temp_dir();
-        path.push(format!("gossamer-{prefix}-{pid}-{nanos:x}-{n}"));
-        stdfs::create_dir(&path)?;
+        let path = gossamer_runtime::c_abi::fs::create_temp_dir(None, prefix)?;
         Ok(Self { path })
     }
 
@@ -1800,35 +1787,7 @@ impl Drop for TempDir {
 /// automatic cleanup. Mirrors Python's `tempfile.mkstemp` (sans
 /// the file-descriptor return).
 pub fn temp_file(prefix: &str) -> io::Result<(File, PathBuf)> {
-    validate_temp_prefix(prefix)?;
-    let n = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = gossamer_runtime::platform::process_id();
-    let nanos = gossamer_runtime::platform::system_time_now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let mut path = gossamer_runtime::platform::temp_dir();
-    path.push(format!("gossamer-{prefix}-{pid}-{nanos:x}-{n}"));
-    let file = stdfs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .read(true)
-        .open(&path)?;
-    Ok((file, path))
-}
-
-/// Rejects a caller-controlled prefix that could turn a generated temporary
-/// name into a path outside the system temporary root. This is deliberately
-/// platform-independent: a prefix produced on one host must remain safe when
-/// the same test runs on another host with different path separators. A `:`
-/// would make `C:x` a drive-relative path on Windows.
-fn validate_temp_prefix(prefix: &str) -> io::Result<()> {
-    if prefix.contains(['/', '\\', ':', '\0']) || matches!(prefix, "." | "..") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "temporary-resource prefix must be a single path component",
-        ));
-    }
-    Ok(())
+    gossamer_runtime::c_abi::fs::create_temp_file(None, prefix)
 }
 
 #[cfg(test)]

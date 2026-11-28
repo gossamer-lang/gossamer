@@ -194,31 +194,19 @@ impl Gen<'_> {
         inner: Ty,
         span: gossamer_lex::Span,
     ) -> HirExpr {
-        let i64_ty = self.tcx.int_ty(IntTy::I64);
         let bool_ty = self.tcx.bool_ty();
         let unit = self.tcx.unit();
-        let count = self.fresh("n");
         let r = self.reader(span);
         let message = self.string_lit("option", span);
-        let begun = self.step("rd_array", vec![r, message], i64_ty, span);
-        out.stmt(self.let_stmt(&count, false, i64_ty, begun, span));
-        let held = self.local(&count, i64_ty, span);
-        let zero = self.int_lit(0, i64_ty, span);
-        let empty = self.expr(
-            bool_ty,
-            span,
-            HirExprKind::Binary {
-                op: HirBinaryOp::Eq,
-                lhs: Box::new(held),
-                rhs: Box::new(zero),
-            },
-        );
+        let begun = self.step("rd_array", vec![r, message], unit, span);
+        out.stmt(self.expr_stmt(begun, span));
+        // `[v]` steps into its one element; `[]` has none.
+        let has = self.fresh("has");
+        let r = self.reader(span);
+        let next = self.step("rd_next_elem", vec![r], bool_ty, span);
+        out.stmt(self.let_stmt(&has, false, bool_ty, next, span));
         let none = self.none(ty, span);
         let mut some = Emit::default();
-        let r = self.reader(span);
-        let first = self.int_lit(0, i64_ty, span);
-        let enter = self.step("rd_elem", vec![r, first], unit, span);
-        some.stmt(self.expr_stmt(enter, span));
         let value = self.decode(&mut some, inner, span);
         let local = self.fresh("x");
         some.stmt(self.let_stmt(&local, false, inner, value, span));
@@ -227,7 +215,8 @@ impl Gen<'_> {
         let wrapped = self.ctor("Some", vec![value], ty, span);
         let some_stmts = self.finish(some, span);
         let some_block = self.block(some_stmts, Some(wrapped), ty, span);
-        self.if_else(empty, none, some_block, ty, span)
+        let present = self.local(&has, bool_ty, span);
+        self.if_else(present, some_block, none, ty, span)
     }
 
     /// One arm of a wire `Result`: the payload, wrapped by `ctor`.

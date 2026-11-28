@@ -155,6 +155,9 @@ impl Encoded {
             Value::Bool(b) => AbiValue::words(tag::BOOL, u64::from(*b), 0),
             Value::Int(i) => AbiValue::words(tag::INT, *i as u64, 0),
             Value::Uint(u) => AbiValue::words(tag::INT, *u, 0),
+            // The binding ABI's integers are one word; no binding type is a
+            // 128-bit integer.
+            Value::Wide(_) | Value::WideInline(..) => return type_err(value_kind(value)),
             Value::Float(f) => AbiValue::words(tag::FLOAT, f.to_bits(), 0),
             Value::Char(c) => AbiValue::words(tag::CHAR, u64::from(*c), 0),
             Value::String(s) => {
@@ -197,7 +200,7 @@ impl Encoded {
                     .collect::<RuntimeResult<Vec<_>>>()?;
                 self.array(tag::TUPLE, encoded, items.len())
             }
-            Value::Json(json) => self.encode(&json_to_value(json.as_value()), ty)?,
+            Value::Json(json) => self.encode(&json_to_value(&json.as_value()), ty)?,
             Value::MutCell(cell) => {
                 let inner = cell.lock().clone();
                 self.encode_owned(inner, ty)?
@@ -206,6 +209,7 @@ impl Encoded {
                 let inner = cell.lock().clone();
                 self.encode_owned(inner, ty)?
             }
+            Value::CapturePlace(place) => self.encode_owned(place.read(), ty)?,
             Value::Closure(_) | Value::Native(_) | Value::Builtin(_) => {
                 self.callback(value.clone())
             }
@@ -372,6 +376,7 @@ fn map_key_to_value(k: &MapKey) -> Value {
         MapKey::Bool(b) => Value::Bool(*b),
         MapKey::Int(i) => Value::Int(*i),
         MapKey::Uint(n) => Value::Int(*n as i64),
+        MapKey::Wide(_) => k.to_value(),
         MapKey::Char(c) => Value::Char(*c),
         MapKey::Float(bits) => Value::Float(f64::from_bits(bits.0)),
         MapKey::Str(s) => Value::String(s.clone()),

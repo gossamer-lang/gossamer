@@ -134,7 +134,7 @@ pub(crate) fn builtin_xml_parse(args: &[Value]) -> RuntimeResult<Value> {
 
 pub(crate) fn builtin_xml_encode(args: &[Value]) -> RuntimeResult<Value> {
     let node = match args.first() {
-        Some(Value::Json(value)) => gossamer_std::encoding::xml::from_json(value.as_value()),
+        Some(Value::Json(value)) => gossamer_std::encoding::xml::from_json(&value.as_value()),
         _ => None,
     };
     match node {

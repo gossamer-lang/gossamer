@@ -54,7 +54,7 @@ Gossamer deliberately omits:
 
 - Lifetimes and the borrow checker (automatic memory management
   removes the need).
-- Manual memory management and `Drop` semantics tied to stack frames.
+- Manual memory management.
 - `nil`/`null` of any kind.
 - Raw pointers in safe code.
 - Exceptions.
@@ -298,6 +298,12 @@ an `if let`, a `match`), or write `{name:?}` where the `Some(..)` / `None`
 spelling is the text meant. An `Option` that is the whole output
 (`println(opt)`, `f"{opt}"`) reads as itself and is not flagged.
 
+A precision spec `.N` reads the value it formats: a float shows `N` digits
+after the point, an integer of any width shows its exact digits followed by
+`N` zeros after the point (`{u64::MAX:.1}` is `18446744073709551615.0`), and a
+`String` keeps its first `N` characters. On any other type (an `Option`, a
+collection, a struct, a `bool`, a `char`) it is `GT0147`.
+
 Literal suffixes disambiguate type:
 
 - `42i32`, `42u64`, `42usize` - typed integer literals.
@@ -404,8 +410,8 @@ statement whose value is discarded, and the implicit `main` returns
 
 - Signed ints: `i8`, `i16`, `i32`, `i64`, `i128`, `isize`.
 - Unsigned ints: `u8`, `u16`, `u32`, `u64`, `u128`, `usize`.
-  (`i128` / `u128` are reserved spellings, rejected with `GT0014` -
-  see the conformance note below.)
+  (`i128` / `u128` are full 128-bit types on every tier - see the
+  conformance note below.)
 - Floats: `f32`, `f64`.
 - `bool` (1 byte).
 - `char` - a 32-bit Unicode scalar value (not a surrogate).
@@ -431,10 +437,12 @@ of the model:
   spelling, and the only one: no setting makes the plain operators wrap, so
   `a + b` means the same thing in every program and every package.
 - Unary `-` on a signed integer, unary `!` (the bitwise complement on an
-  integer), the bits `<<` moves past the width, and a signed `MIN / -1`
-  wrap at the declared width in every profile: `-(-128i8) == -128`,
-  `!5u8 == 250`, `200u8 << 2 == 32`, `-128i8 / -1 == -128`, and
-  `i64::MIN / -1 == i64::MIN`. Unary `-` on an unsigned integer is GT0001:
+  integer), and the bits `<<` moves past the width wrap at the declared
+  width in every profile: `-(-128i8) == -128`, `!5u8 == 250`, and
+  `200u8 << 2 == 32`. A signed `MIN / -1` and `MIN % -1` panic, as an
+  overflowing `+` does (`attempt to divide with overflow`, `attempt to
+  calculate the remainder with overflow`); `x.checked_div(y)` answers
+  `None` there. Unary `-` on an unsigned integer is GT0001:
   `0 -% x` is the value that wraps, `-(x as i64)` the signed negation.
 - `/` truncates toward zero and `%` answers a remainder with the sign of
   the value it divides, as in C, Rust, and Go: `-7 / 2 == -3` and
@@ -503,11 +511,20 @@ Wrapping arithmetic has this one spelling. `x.wrapping_add(y)` and
 operator rewrite. Other Rust integer arithmetic method families are not part of
 Gossamer's method surface.
 
-`i128` and `u128` are not supported on any tier. The checker rejects
-every spelling of these types at the declaration site with a
-compile-time error (`GT0014`), so `gos`, the JIT, and `gos build`
-all fail identically - there is no interpreter-only acceptance and no
-silent 64-bit narrowing.
+`i128` and `u128` are 128-bit integers on every tier, with the same
+checked arithmetic as the narrower types: `+ - *` panic on overflow,
+`+% -% *%` wrap at 128 bits, `/` and `%` panic on a zero divisor and on
+`i128::MIN / -1`, a shift amount outside `0..128` panics, and `as`
+panics where the value does not fit its target. Their literals run to
+the full width (`170141183460469231731687303715884105727i128`). They
+work everywhere a 64-bit integer does: struct fields, `Vec` elements,
+`Option` / `Result` / enum payloads, map and set keys and values,
+callbacks, `{}` and the `{:x}` / `{:b}` / `{:o}` specs, `to_string()`,
+and the strict parses `s.to_i128()` / `s.to_u128()`, which answer an
+`Option`. The JSON and other serde codecs write a value that fits 64
+bits as a number and a wider one as a string of its digits, and read
+either back. A value that fits a word costs what a word does; the
+bytecode VM holds one up to 120 bits inline and boxes only a wider one.
 
 Silent surprise is never part of the contract - the behaviour is
 explicit two's-complement arithmetic at 64-bit width, not
@@ -642,6 +659,14 @@ exposes length- or capacity-changing methods. A mutable slice can modify
 existing elements and use non-resizing mutable methods such as `swap`, `sort`,
 `sort_by`, `sort_by_key`, `reverse`, and `fill`.
 
+Every sort is stable on every tier: elements that compare equal (`cmp`
+answers 0, or `sort_by_key` gives equal keys) keep their relative order, so a
+sort by one key after a sort by another orders by both. A comparator answers a
+sign as an `i64`; integers, `char`, and `String` answer `a.cmp(b)` in that
+form, which is what an `impl Ord` writes field by field. `to_vec()` copies a
+`Vec`, as it does an array or a set, so a range read such as
+`xs[lo..hi].to_vec()` reads as written.
+
 `.slice(start, end)` is a checked copying operation that returns
 `Result<Vec<T>, errors::Error>`. It is not a borrowed sub-slice; the borrowed
 form is the mutable window of §3.3b, which never escapes its lexical scope.
@@ -671,8 +696,9 @@ range has exactly one - the part that overlaps. It is also the rule
 `substring` already follows, and slicing a `String` *is* `substring`.
 
 **A `String` slice takes byte offsets** (§3.2), the same index space
-`substring`, `byte_at`, and `as_bytes` use, and snaps outward to codepoint
-boundaries so the result is always valid text. `s.len()` and `s[i]` count
+`substring`, `byte_at`, and `as_bytes` use; an open end (`s[lo..]`) is the
+byte length. An offset inside a character panics naming it, as `substring`
+does, so the result is always valid text. `s.len()` and `s[i]` count
 Unicode scalars, so do not mix the two spellings on non-ASCII text. A
 `String` is read by index and never written by one: `s[i] = c` is GT0130,
 since a character's UTF-8 width can differ from the one it would replace;
@@ -1672,7 +1698,7 @@ initializer is evaluated in its declared type at every step, as the same
 arithmetic would run: a step that overflows, divides by zero, or shifts by an
 amount outside `0..BITS` is `GT0134`
 (`const SPAN: i64 = 1_000_000_000 * 60 * 60 * 24 * 365 * 300`). The wrapping
-operators (`+%`, `*%`), unary `-`, and a signed `MIN / -1` wrap there as they
+operators (`+%`, `*%`) and unary `-` wrap there as they
 do at run time. The same evaluation reaches arithmetic in a function body
 whose operands are literals, `const` items, and immutable bindings a constant
 initializes: an overflow there, a division or remainder by a constant `0`,
@@ -2003,6 +2029,13 @@ fn read_all(path: String) -> Result<Vec<u8>, Error> {
   file.read_to_end()
 }
 ```
+
+A panic unwinding a frame and `process::exit(code)` run the frame's pending
+deferred expressions too: an exit unwinds the calling goroutine, innermost
+frame first, and the process ends with `code` once its root is reached. A
+deferred expression that calls `process::exit` replaces a panic in flight,
+and the frame's other deferred expressions still run. `process::abort()`
+ends the process at once.
 
 Because the scope is the nearest `{ }`, a `defer` inside a loop body runs at
 the end of *each* iteration:
@@ -2952,6 +2985,49 @@ require non-lexical lifetime inference or arbitrary alias reasoning.
 
 ---
 
+### 7.6 Cleanup at the last reference
+
+A cleanup that must run when a value is no longer used is written two ways:
+
+- `runtime::Guard::new(f)` answers a guard that calls `f` once, when the last
+  reference to the guard goes (Go's `runtime.AddCleanup`, Python's
+  `weakref.finalize`, but at a defined point rather than at a collection).
+- A struct with `impl Drop` (or `struct T: Drop { .. fn drop(&mut self) .. }`)
+  is a shared handle, as a Swift class or a CPython object is: `let b = a`
+  shares one value, a write through either name is seen through both, and
+  `fn drop(&mut self)` runs exactly once, when the last reference goes.
+  `clone()` of one is GT0146, and `impl Drop` on a generic type or an enum is
+  GT0145 (hold a `runtime::Guard` field there instead).
+
+The timing is defined at statement granularity, the same on every tier:
+
+- A binding whose type holds a guard or a drop type, directly or through a
+  `Vec`, a `Map`, an `Option`, a tuple, or a field, lives to the end of the
+  block that binds it, as in Rust, and is released there on every exit
+  (the end, `return`, `break`, `?`, a panic), last bound first. A match
+  arm's bindings end with the arm, and a parameter with the call.
+- A cleanup runs when the statement that released the last reference ends.
+  A value such a statement discards (`let _ = e`, or `e;`) is released at
+  the end of that statement, and so is a temporary scrutinee once its
+  `match` ends.
+- A panic in a cleanup or in `drop` ends the program with its report
+  (exit 101), and `process::exit` in one ends the process with its code.
+  Values caught in a reference cycle run `drop` when the cycle collector
+  reclaims them, in no defined order; a value still alive when the process
+  ends does not run `drop`.
+
+```gossamer
+use std::fs
+
+struct LockFile: Drop {
+    path: String
+
+    fn drop(&mut self) {
+        let _ = fs::remove_file(self.path)
+    }
+}
+```
+
 ## 8. Concurrency
 
 ### 8.1 Goroutines
@@ -3440,9 +3516,7 @@ goroutine rather than holding a worker.
 
 **`std::os`** holds only what is genuinely about the host and fits none
 of the four: `family` and `arch`, plus the `std::os::signal`,
-`std::os::fd`, and `std::os::user` submodules. `std::os::exec` is a
-compatibility alias for `std::process` and is Deprecated; new code writes
-`std::process`.
+`std::os::fd`, and `std::os::user` submodules.
 
 `std::os::signal` subscribes to any signal number with `on(sig)`; its
 constants spell the numbers for the target (`SIGINT`, `SIGTERM`,
@@ -3684,6 +3758,10 @@ outside its list is a type error (`GT0002`).
 - `net::TcpListener`, `TcpStream`, `UdpSocket`.
 - `http::Server`, `http::Client`, `http::Request`, `http::Response`.
 - `http::serve(addr: String, handler: impl Handler) -> Result<(), Error>`.
+- `net::mail::parse_address(text) -> Result<Address, Error>` and
+  `net::mail::parse_address_list(text) -> Result<Vec<Address>, Error>` read
+  RFC 5322 addresses, decoding RFC 2047 encoded words in a display name;
+  `{}` on a `mail::Address` writes the form a header field carries.
 
 #### Namespace boundaries
 
@@ -3692,16 +3770,9 @@ path grammar. It performs neither URL parsing nor percent escaping; filesystem
 I/O belongs to `std::fs`. `std::net::url` parses network URLs and escapes URL
 components. It is not an HTTP router or a filesystem path API.
 
-`std::process` is the canonical API for the current process and child
-processes. `std::os::exec` is a deprecated compatibility facade retained for
-the 0.x line; new APIs land only in `std::process`. Both remain Experimental
-until cancellation, blocking behavior, and platform differences have a Stable
-contract.
-
-HTTP/3 remains Experimental under the historical `std::http_h3` spelling.
-There is intentionally no `std::http::h3` alias: a second public name before
-streaming and resource-limit semantics are complete would create a
-compatibility promise without improving fidelity.
+`std::process` is the API for the current process and child processes. It
+remains Experimental until cancellation, blocking behavior, and platform
+differences have a Stable contract.
 
 ### 10.11 `std::encoding::json`, `std::encoding::csv`
 
@@ -3715,7 +3786,13 @@ compatibility promise without improving fidelity.
   `json::pointer(value, "/a/b/0")` reads the value an RFC 6901 JSON Pointer
   names, and `json::entries(value)` answers an object's members as
   `(key, value)` pairs in key order (`None` for a value that is not an
-  object). `as_i64` and `as_u64` take an integral
+  object).
+- A key an object repeats is an `Err` naming the key and its position, for
+  `json::parse` and typed `json::decode::<T>` (and a repeated mapping key
+  for `yaml::parse` and `yaml::decode::<T>`). A call's
+  `duplicate_keys: json::DuplicateKeys` argument chooses instead: `Error`
+  (the default), `UseFirst`, or `UseLast`. `json::is_valid` checks the
+  grammar alone, under which a repeated key is well formed. `as_i64` and `as_u64` take an integral
   number inside the type's range; `as_f64` takes any number. A `json::Value`
   object holds its members by key, as `serde_json::Value` does.
 - Limits: a document has no size cap by default, as in `serde_json` and Go;
@@ -4664,8 +4741,8 @@ The features below are **permanently declined**, not planned or deferred.
 They are recorded here so their absence reads as a decision rather than a
 gap, and so a proposal to add one starts from the stated reason. Each is
 rejected where it is written with a diagnostic naming the alternative:
-`GP0061` for a declined spelling, `GT0095` for a blanket impl, `GT0014` for
-`i128` / `u128`, and a `GR0001` whose help names `Option` for `nil`.
+`GP0061` for a declined spelling, `GT0095` for a blanket impl, and a
+`GR0001` whose help names `Option` for `nil`.
 
 Power, but not complexity: a feature earns its place by making correct
 code the shortest code, without adding a second spelling of an existing
@@ -4704,7 +4781,6 @@ idiom, a new type-system theory, or machinery the reader cannot see.
   exhaustive `match` is the shape that pays.
 - **Full units of measure.** Admired for over a decade and copied by no
   one. The opaque-alias subset captures the real-world wins.
-- **`i128` / `u128`.** Rejected with `GT0014`; `math::big` covers the need.
 - **Nil, zero-value initialization, untyped error interfaces, inheritance.**
   These are the recurring complaints about the languages Gossamer replaces.
 
@@ -4750,8 +4826,9 @@ idiom, a new type-system theory, or machinery the reader cannot see.
 
 1. No lifetimes (automatic memory management removes the need).
 2. No borrow checker (automatic memory management removes the need).
-3. No `Drop` trait with deterministic destruction - use `defer` for
-   cleanup tied to scope; the runtime reclaims memory.
+3. `impl Drop` makes a type a shared handle: `let b = a` shares one value,
+   and `drop` runs once, when the last reference goes (§7.6). Rust moves a
+   `Drop` value and drops it at its owner's scope end.
 4. No `Box<T>` / `Rc<T>` / `Arc<T>` - values are reference counted by the
    runtime; a `&T` / `&mut T` is a lexical view that cannot cross a
    goroutine boundary (§3.4).

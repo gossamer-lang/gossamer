@@ -131,6 +131,43 @@ pub unsafe extern "C" fn gos_rt_vec_format_u64(v: *const GosVec, bare: i32) -> *
     })
 }
 
+/// The 128-bit integer element `i` of `vec`, its two slots read whole.
+fn wide_elem_bits(vec: crate::c_abi::vec::VecView<'_>, i: usize) -> u128 {
+    let elem = vec.elem(i);
+    let mut bytes = [0u8; 16];
+    let n = elem.len().min(16);
+    bytes[..n].copy_from_slice(&elem[..n]);
+    u128::from_le_bytes(bytes)
+}
+
+/// Renders an `i128`-elem `Vec` as `[v0, v1, …]`. Returns a fresh String
+/// pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_format_i128(v: *const GosVec, bare: i32) -> *mut c_char {
+    ffi_entry!({
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
+        unsafe {
+            format_elems(v, bare, |vec, i, out| {
+                out.push_str(&wide_elem_bits(vec, i).cast_signed().to_string());
+            })
+        }
+    })
+}
+
+/// Renders a `u128`-elem `Vec` as `[v0, v1, …]`. Returns a fresh String
+/// pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_format_u128(v: *const GosVec, bare: i32) -> *mut c_char {
+    ffi_entry!({
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
+        unsafe {
+            format_elems(v, bare, |vec, i, out| {
+                out.push_str(&wide_elem_bits(vec, i).to_string());
+            })
+        }
+    })
+}
+
 /// Renders an `f64`-elem `Vec` as `[v0, v1, …]`. Returns a fresh
 /// String pointer.
 #[unsafe(no_mangle)]
@@ -795,9 +832,9 @@ pub unsafe extern "C" fn gos_rt_os_unset_env(name: *const c_char) {
     });
 }
 
-/// `exec::spawn(prog, args) -> Result<i64, errors::Error>`.
+/// `process::spawn(prog, args) -> Result<i64, errors::Error>`.
 ///
-/// Non-blocking sibling of `exec::run`: launches `prog` with
+/// Non-blocking sibling of `process::run`: launches `prog` with
 /// `args` in the background, redirects stdin/stdout/stderr to
 /// `/dev/null` so the child detaches from the calling tty, and
 /// returns the child PID immediately. Wait/kill is the caller's
@@ -813,7 +850,8 @@ pub unsafe extern "C" fn gos_rt_os_unset_env(name: *const c_char) {
 pub unsafe extern "C" fn gos_rt_exec_spawn(prog: *const c_char, args: *mut GosVec) -> i128 {
     ffi_entry!({
         let prog_str = if prog.is_null() {
-            let err = crate::c_abi::errors::error_new_from_bytes(b"exec::spawn: program is null");
+            let err =
+                crate::c_abi::errors::error_new_from_bytes(b"process::spawn: program is null");
             return gos_rt_result_new(1, err as i64);
         } else {
             // SAFETY: `prog` is a String argument from compiled code, null or a live string body for the whole call.
@@ -838,7 +876,7 @@ pub unsafe extern "C" fn gos_rt_exec_spawn(prog: *const c_char, args: *mut GosVe
                 gos_rt_result_new(0, pid)
             }
             Err(e) => {
-                let msg = format!("exec::spawn({prog_str}): {e}");
+                let msg = format!("process::spawn({prog_str}): {e}");
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
                 gos_rt_result_new(1, err as i64)
             }

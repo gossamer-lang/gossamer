@@ -6,11 +6,14 @@
 //! open. A test that drops its lock and takes it straight back can find it
 //! still held by a sibling test's child.
 
-use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+#[cfg(unix)]
+use parking_lot::RwLockWriteGuard;
+use parking_lot::{RwLock, RwLockReadGuard};
 
 static CHILDREN: RwLock<()> = RwLock::new(());
 
-/// Held while a test spawns a child process.
+/// Held while a test spawns a child process; only the Unix tests spawn one.
+#[cfg(unix)]
 pub(crate) fn spawning() -> RwLockWriteGuard<'static, ()> {
     CHILDREN.write()
 }

@@ -338,6 +338,89 @@ pub unsafe extern "C" fn gos_rt_http_client_builder_build(
 /// Allocates the pending builder request the `client.<verb>(url)`
 /// shims hand back for `.header(..)` / `.body(..)` / `.send()`
 /// chaining. Captures the originating client's agent so the eventual
+/// The `(String, String)` pairs a `Vec<(String, String)>` holds, each
+/// element a 16-byte slot of two string words.
+///
+/// # Safety
+/// `v` is null or a live `Vec` of string pairs.
+unsafe fn string_pairs(v: *const GosVec) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if v.is_null() {
+        return out;
+    }
+    // SAFETY: `v` is non-null (checked above), and this `unsafe fn`'s caller passes a live `Vec`.
+    let vref = unsafe { &*v };
+    // Each element is two string words, so a narrower slot holds no pair.
+    if vref.ptr.is_null() || vref.len <= 0 || vref.elem_bytes < 16 {
+        return out;
+    }
+    let elem = vref.elem_bytes as usize;
+    let base = vref.ptr.as_ptr();
+    for i in 0..vref.len as usize {
+        // SAFETY: `i` counts below the vec's length, so the element's two words lie inside its
+        // slot of at least 16 bytes; a slot may sit at any byte offset.
+        let slot = unsafe { base.add(i * elem).cast::<i64>() };
+        // SAFETY: as above.
+        let (name, value) = unsafe { (slot.read_unaligned(), slot.add(1).read_unaligned()) };
+        // SAFETY: each word is null or a live string body (C-ABI contract).
+        let text = |word: i64| unsafe { crate::c_abi::gos_str_arg_string(word as *const c_char) };
+        out.push((text(name), text(value)));
+    }
+    out
+}
+
+/// `http::Request { .. }` built in a program: the method, path, query,
+/// header pairs, and body it names, with no socket behind it. The body is
+/// `raw_body` when the literal gives one, else the bytes of `body`.
+///
+/// # Safety
+/// Each string argument is null or a live string body; `headers` is null or
+/// a live `Vec<(String, String)>`; `raw_body` is null or a live `Vec<u8>`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_http_request_new(
+    method: *const c_char,
+    path: *const c_char,
+    query: *const c_char,
+    headers: *const GosVec,
+    body: *const c_char,
+    raw_body: *const GosVec,
+    peer: *const c_char,
+) -> *mut GosHttpRequest {
+    ffi_entry!({
+        // SAFETY: the string arguments are null or live string bodies (C-ABI contract).
+        let text = |p: *const c_char| unsafe { crate::c_abi::gos_str_arg_string(p) };
+        let (path, query) = (text(path), text(query));
+        let url = if query.is_empty() {
+            path
+        } else {
+            format!("{path}?{query}")
+        };
+        // SAFETY: `raw_body` is null or a live `Vec<u8>` (C-ABI contract).
+        let raw = unsafe { crate::c_abi::vec::vec_bytes(raw_body) };
+        let body = if raw.is_empty() {
+            text(body).into_bytes()
+        } else {
+            raw
+        };
+        // The headers keep the order the program wrote them in.
+        let request = GosHttpRequest {
+            method: text(method),
+            url,
+            // SAFETY: `headers` is null or a live `Vec<(String, String)>` (C-ABI contract).
+            headers: unsafe { string_pairs(headers) },
+            body,
+            body_offset: 0,
+            params: Vec::new(),
+            values: Vec::new(),
+            agent: None,
+            peer: text(peer),
+            context_site: None,
+            context: 0,
+        };
+        Box::into_raw(Box::new(request))
+    })
+}
+
 /// `.send()` honours its cookie jar / proxy / policy.
 unsafe fn client_pending_request(
     method: &str,
@@ -2286,15 +2369,21 @@ pub unsafe extern "C" fn gos_rt_http_stream_next_line(rs: *const i64) -> i128 {
         let Some(arc) = stream_registry_lookup(handle) else {
             return gos_rt_result_new(1, 0);
         };
-        use std::io::BufRead;
-        let mut buf = String::new();
-        let read_result = arc.lock().read_line(&mut buf);
+        // The next line may wait on a goroutine of this program writing it,
+        // so the read runs off the scheduler's workers.
+        let read_result = crate::sched_global::run_blocking("http-stream-line", move || {
+            use std::io::BufRead;
+            let mut buf = String::new();
+            arc.lock().read_line(&mut buf).map(|n| (n, buf))
+        })
+        .map_err(std::io::Error::other)
+        .and_then(|read| read);
         match read_result {
-            Ok(0) => {
+            Ok((0, _)) => {
                 stream_registry_drop(handle);
                 gos_rt_result_new(1, 0)
             }
-            Ok(_) => {
+            Ok((_, mut buf)) => {
                 if buf.ends_with('\n') {
                     buf.pop();
                     if buf.ends_with('\r') {
@@ -2340,17 +2429,21 @@ pub unsafe extern "C" fn gos_rt_http_stream_next_chunk(rs: *const i64, max_bytes
             return gos_rt_result_new(1, 0);
         };
         let cap = usize::try_from(max_bytes.clamp(1, 1 << 20)).unwrap_or(1);
-        let mut buf = vec![0u8; cap];
-        let read_result = {
+        // The next bytes may wait on a goroutine of this program writing
+        // them, so the read runs off the scheduler's workers.
+        let read_result = crate::sched_global::run_blocking("http-stream-chunk", move || {
             use std::io::Read;
-            arc.lock().read(&mut buf)
-        };
+            let mut buf = vec![0u8; cap];
+            arc.lock().read(&mut buf).map(|n| (n, buf))
+        })
+        .map_err(std::io::Error::other)
+        .and_then(|read| read);
         match read_result {
-            Ok(0) => {
+            Ok((0, _)) => {
                 stream_registry_drop(handle);
                 gos_rt_result_new(1, 0)
             }
-            Ok(n) => {
+            Ok((n, buf)) => {
                 let v = crate::c_abi::vec::gos_rt_vec_with_capacity(1, n as i64);
                 if !v.is_null() {
                     // SAFETY: `v` is non-null (checked above), the fresh vec made above.

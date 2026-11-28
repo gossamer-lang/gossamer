@@ -514,6 +514,17 @@ impl CellPass<'_> {
                 refill_cell(expr, ids, cell_name, cell_ty, unit_ty);
                 return;
             }
+            // A scope-bound binding's release gives back the scope's share
+            // of the cell; the closures keep theirs.
+            if let HirExprKind::Call { callee, args } = &mut expr.kind
+                && matches!(&callee.kind, HirExprKind::Path { segments, .. }
+                    if matches!(segments.as_slice(), [only] if only.name == "__gos_release_binding"))
+                && let [released] = args.as_mut_slice()
+                && is_name(released, name)
+            {
+                *released = cell(ids, released.span);
+                return;
+            }
             if !is_name(expr, name) {
                 return;
             }

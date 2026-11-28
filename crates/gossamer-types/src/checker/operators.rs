@@ -2125,12 +2125,15 @@ impl TypeChecker<'_> {
 
     /// Rejects a call whose arguments reach one referent twice while a
     /// `&mut` argument holds it: a second `&mut` of the same root, or a
-    /// closure that captures the root. The callee would observe the referent
-    /// through an alias the `&mut` does not account for.
+    /// closure that captures the root of a window (`&mut xs[a..b]`), which
+    /// the callee works on apart from the sequence until it returns. A
+    /// closure that captures the root of any other `&mut` argument reads the
+    /// binding's current value and its writes reach it, as the callee's do.
     pub(super) fn check_overlapping_mutable_call_args(&mut self, args: &[Expr]) {
         let mut borrowed: Vec<PlacePath> = Vec::new();
         let mut windows: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
+        let mut window_roots: HashSet<String> = HashSet::new();
         for arg in args {
             let ExprKind::Unary {
                 op: UnaryOp::RefMut,
@@ -2146,6 +2149,9 @@ impl TypeChecker<'_> {
             // Windows of one place may share a call: their ranges are checked
             // disjoint before it runs.
             let window = window_place_key(operand);
+            if window.is_some() {
+                window_roots.insert(root.clone());
+            }
             let first_window = windows
                 .entry(root.clone())
                 .or_insert_with(|| window.clone());
@@ -2162,9 +2168,8 @@ impl TypeChecker<'_> {
                 );
             }
         }
-        let roots: HashSet<String> = borrowed.into_iter().map(|place| place.root).collect();
         for arg in args {
-            if let Some((root, borrower)) = self.closure_alias_of(arg, &roots) {
+            if let Some((root, borrower)) = self.closure_alias_of(arg, &window_roots) {
                 self.emit(
                     TypeError::MutableReferenceConflict { root, borrower },
                     arg.span,

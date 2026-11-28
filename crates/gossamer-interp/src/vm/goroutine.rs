@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 /// Joins every outstanding goroutine and returns once they finish.
 /// Called by the CLI entrypoint after `main` returns so spawned work
@@ -19,6 +19,16 @@ pub fn join_outstanding_goroutines() {
     if let Some(pool) = POOL.get() {
         pool.drain_until(exit_drain_deadline);
     }
+}
+
+/// Set when a wait on `main`'s thread found the program deadlocked. The
+/// error reporting it unwinds `main`, and the goroutines it leaves can never
+/// finish, so no drain on the way out waits for them.
+static MAIN_DEADLOCKED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a wait on `main`'s thread found the program deadlocked.
+pub(crate) fn main_deadlocked() -> bool {
+    MAIN_DEADLOCKED.load(Ordering::Acquire)
 }
 
 /// Records that `main` has returned: from here a goroutine parked where
@@ -890,6 +900,24 @@ impl ChannelWait {
     /// among that channel's waiters, so a handoff this caller completes is
     /// visible to the readiness count.
     pub(crate) fn enter(op: &'static str, can_progress: impl Fn() -> bool) -> Option<Self> {
+        Self::enter_in(
+            op,
+            crate::stdlib_builtins::cohort::current_cohort(),
+            can_progress,
+        )
+    }
+
+    /// [`Self::enter`] for a wait that cancelling its cohort does not end,
+    /// such as a lock's: the waiter is recorded in no cohort, so a cancelled
+    /// cohort never reads as a reason this waiter could move.
+    pub(crate) fn enter_ignoring_cancellation(
+        op: &'static str,
+        can_progress: impl Fn() -> bool,
+    ) -> Option<Self> {
+        Self::enter_in(op, 0, can_progress)
+    }
+
+    fn enter_in(op: &'static str, cohort: i64, can_progress: impl Fn() -> bool) -> Option<Self> {
         // The browser settles every goroutine at its spawn, so by the time a
         // wait is entered there every sender that will ever run has run.
         if !gossamer_runtime::platform::CAN_BLOCK {
@@ -898,7 +926,6 @@ impl ChannelWait {
         // Recorded before this wait is counted, so a participant that sees
         // the count already sees which operation `main` is stopped at.
         note_main_wait(Some(op));
-        let cohort = crate::stdlib_builtins::cohort::current_cohort();
         WAITING_COHORTS.lock().push(cohort);
         CHANNEL_WAITERS.fetch_add(1, Ordering::AcqRel);
         // The program's participants are every outstanding goroutine plus
@@ -944,6 +971,7 @@ impl ChannelWait {
             if ON_GOROUTINE_WORKER.with(std::cell::Cell::get) {
                 report_fatal_deadlock(op);
             }
+            MAIN_DEADLOCKED.store(true, Ordering::Release);
             return None;
         }
         Some(Self {
@@ -1050,6 +1078,7 @@ impl JoinWait {
             if ON_GOROUTINE_WORKER.with(std::cell::Cell::get) {
                 report_fatal_deadlock("cohort join");
             }
+            MAIN_DEADLOCKED.store(true, Ordering::Release);
             return None;
         }
         Some(Self {

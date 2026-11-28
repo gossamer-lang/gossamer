@@ -241,6 +241,56 @@ fn main() {
 "#,
     ),
     (
+        "mut_whole_struct_arguments",
+        r#"
+struct Label { text: String, hits: i64 }
+
+fn extend(label: &mut Label) {
+    label.text = label.text + "+"
+    label.hits += 1
+}
+
+fn twice(mut label: Label) -> i64 {
+    extend(&mut label)
+    extend(&mut label)
+    label.text.byte_len()
+}
+
+fn through_copy(label: Label) -> i64 {
+    let mut own = label
+    extend(&mut own)
+    own.text.byte_len()
+}
+
+struct Words { next: String, last: String, done: bool }
+
+impl Iterator for Words {
+    type Item = String
+    fn next(&mut self) -> Option<String> {
+        if self.done { return None }
+        let current = self.next
+        if current == self.last {
+            self.done = true
+        } else {
+            self.next = current + "a"
+        }
+        Some(current)
+    }
+}
+
+fn main() {
+    let mut total = 0
+    for round in 0..20000 {
+        let label = Label { text: f"label-{round}", hits: 0 }
+        total += twice(label) + through_copy(label) + label.text.byte_len()
+        let words = Words { next: f"{round}", last: f"{round}aaa", done: false }
+        total += words.collect::<Vec<String>>().len()
+    }
+    println(f"{total}")
+}
+"#,
+    ),
+    (
         "spawn_shared_read",
         r"
 fn rows(n: i64) -> Vec<Vec<f64>> {
@@ -1433,6 +1483,30 @@ fn main() {
     println(total)
 }
 ",
+    ),
+    (
+        "propagated_error_through_option_answer",
+        r#"
+use std::errors
+
+fn text(at: i64) -> Result<Option<String>, errors::Error> {
+    if at % 2 == 0 { return Err(errors::new(f"ends at byte {at}")) }
+    Ok(Some(f"v{at}"))
+}
+
+fn next(at: i64) -> Result<Option<i64>, errors::Error> {
+    let Some(t) = text(at)? else { return Ok(None) }
+    Ok(Some(t.len()))
+}
+
+fn main() {
+    let mut failed = 0
+    for i in 0..200000 {
+        if next(i).is_err() { failed += 1 }
+    }
+    println(failed)
+}
+"#,
     ),
 ];
 

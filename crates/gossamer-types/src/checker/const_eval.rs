@@ -20,6 +20,21 @@ pub(super) struct ConstFault {
     pub span: Span,
 }
 
+/// The value of an integer type's own bound, `u8::MAX` or `i64::MIN`, when
+/// `path` names one; `u128::MAX` is past what an `i128` holds, so it is none.
+fn int_bound(path: &gossamer_ast::PathExpr) -> Option<i128> {
+    let [owner, bound] = path.segments.as_slice() else {
+        return None;
+    };
+    let own = IntTy::from_name(&owner.name.name)?;
+    let (min, max) = int_range(own);
+    match bound.name.name.as_str() {
+        "MIN" => Some(min),
+        "MAX" if own != IntTy::U128 => Some(max),
+        _ => None,
+    }
+}
+
 /// The smallest and largest value of `int`.
 fn int_range(int: IntTy) -> (i128, i128) {
     match int_bounds(int) {
@@ -133,9 +148,16 @@ fn fold_binary(
                 }
             )));
         }
-        // A signed `MIN / -1` wraps at the declared width.
-        BinaryOp::Div => wrap_to(a / b, int),
-        BinaryOp::Rem => a.checked_rem(b).ok_or_else(|| overflow("%"))?,
+        // A signed `MIN / -1` (and `MIN % -1`) has a quotient past the type.
+        BinaryOp::Div | BinaryOp::Rem if min < 0 && a == min && b == -1 => {
+            return Err(overflow(if matches!(op, BinaryOp::Div) {
+                "/"
+            } else {
+                "%"
+            }));
+        }
+        BinaryOp::Div => a / b,
+        BinaryOp::Rem => a % b,
         BinaryOp::WrappingAdd => wrap_to(a.wrapping_add(b), int),
         BinaryOp::WrappingSub => wrap_to(a.wrapping_sub(b), int),
         BinaryOp::WrappingMul => wrap_to(a.wrapping_mul(b), int),
@@ -198,6 +220,9 @@ impl TypeChecker<'_> {
                     .get(&binding)
                     .copied()
                     .filter(|v| fits(*v)))
+            }
+            ExprKind::Path(path) if let Some(value) = int_bound(path) => {
+                Ok(fits(value).then_some(value))
             }
             ExprKind::Path(_) => {
                 let Some(Resolution::Def {

@@ -52,7 +52,7 @@ pub(crate) fn builtin_file_server_new(args: &[Value]) -> RuntimeResult<Value> {
         ("__fs_root", Value::String(SmolStr::from(root))),
         ("__fs_prefix", Value::String(SmolStr::from(prefix))),
     ];
-    Ok(Value::struct_("FileServer", fields))
+    Ok(Value::struct_("http::static_files::FileServer", fields))
 }
 
 fn file_server_fields(v: Option<&Value>) -> (String, String) {
@@ -121,7 +121,7 @@ fn file_response(status: i64, bytes: &[u8], mime: &str, headers: &[(&str, String
         ),
         ("headers", header_array(headers)),
     ];
-    Value::struct_("Response", fields)
+    Value::struct_("http::Response", fields)
 }
 
 /// The `301` that sends a directory request to the same path with a
@@ -140,7 +140,7 @@ fn redirect_response(location: &str) -> Value {
             header_array(&[("location", location.to_string())]),
         ),
     ];
-    Value::struct_("Response", fields)
+    Value::struct_("http::Response", fields)
 }
 
 fn forbidden_response() -> Value {
@@ -153,7 +153,7 @@ fn forbidden_response() -> Value {
         ),
         ("headers", Value::Array(Arc::new(Vec::new()))),
     ];
-    Value::struct_("Response", fields)
+    Value::struct_("http::Response", fields)
 }
 
 /// `FileServer::serve(server, request)` - invoked by `http::serve`'s

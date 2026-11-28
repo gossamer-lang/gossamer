@@ -9,6 +9,31 @@ impl<'tcx> FnBuilder<'tcx> {
         args: &[HirExpr],
         result_ty: Ty,
     ) -> RuntimeResult<Reg> {
+        // A scope-bound binding's release empties its register, which gives
+        // back the binding's share there, as the compiled tiers do.
+        if let HirExprKind::Path { segments, .. } = &callee.kind
+            && let [only] = segments.as_slice()
+            && only.name == "__gos_release_binding"
+            && let [arg] = args
+            && let HirExprKind::Path {
+                segments: names, ..
+            } = &arg.kind
+            && let [name] = names.as_slice()
+            && let Some(typed) = self.lookup_local(&name.name)
+        {
+            // A capture cell's home is the cell the closures share: they keep
+            // it, so the scope's release leaves it in place.
+            if typed.kind == RegKind::Value
+                && !self.reference_alias_regs.contains(&typed.reg)
+                && self.capture_cell_for_local(typed).is_none()
+            {
+                self.emit(Op::ClearRegs {
+                    start: typed.reg,
+                    count: 1,
+                });
+            }
+            return Ok(self.load_unit());
+        }
         if let Some(reg) = self.try_compile_described_call(callee, args)? {
             return Ok(reg);
         }
@@ -279,7 +304,7 @@ impl<'tcx> FnBuilder<'tcx> {
             } = &pad_args[0].kind
             && Self::callee_is_concat(rendered_callee)
             && rendered_args.len() == 1
-            && matches!(self.tcx.kind(rendered_args[0].ty), Some(TyKind::Int(_)))
+            && matches!(self.tcx.kind(rendered_args[0].ty), Some(TyKind::Int(it)) if !it.is_wide())
             && !self.expr_has_uint_display_provenance(&rendered_args[0])
         {
             let prefix = self.compile_expr(&args[0])?;
@@ -306,7 +331,7 @@ impl<'tcx> FnBuilder<'tcx> {
         if Self::callee_is_concat(callee)
             && args.len() == 2
             && matches!(self.tcx.kind(args[0].ty), Some(TyKind::String))
-            && matches!(self.tcx.kind(args[1].ty), Some(TyKind::Int(_)))
+            && matches!(self.tcx.kind(args[1].ty), Some(TyKind::Int(it)) if !it.is_wide())
             && !self.expr_has_uint_display_provenance(&args[1])
         {
             let prefix = self.compile_expr(&args[0])?;
@@ -384,6 +409,9 @@ impl<'tcx> FnBuilder<'tcx> {
         let render_call = Self::callee_renders_args(callee);
         let encodes_json = Self::callee_encodes_json(callee);
         let unsigned_leaves_call = render_call || encodes_json;
+        // A `{v:.N}` precision writes an integer's digits, so a `u64` there
+        // reads as unsigned as it does when rendered; nothing else changes.
+        let precision_call = Self::callee_is_named(callee, "__fmt_prec");
         // `__debug` is the `{:?}` channel and answers through `impl Debug`;
         // every other rendering callee is `{}` and answers through
         // `impl Display`.
@@ -393,7 +421,13 @@ impl<'tcx> FnBuilder<'tcx> {
             "to_string"
         };
         let callee_param_tys = self.callee_param_tys(callee);
-        let mut takes = CallTakes::default();
+        // A program function, or a callable value, takes a captured binding's
+        // place for a `&mut` parameter; a std function named directly takes a
+        // write-back cell.
+        let mut takes = CallTakes {
+            cell_args: callee_param_tys.is_some() || direct_global_idx.is_none(),
+            ..CallTakes::default()
+        };
         let pending = self.lower_args(
             args,
             !unsigned_leaves_call,
@@ -403,7 +437,9 @@ impl<'tcx> FnBuilder<'tcx> {
                 if render_call && let Some(reg) = this.compile_user_rendering(arg, render_method)? {
                     return Ok(reg);
                 }
-                if unsigned_leaves_call && this.expr_has_uint_display_provenance(arg) {
+                if (unsigned_leaves_call && this.expr_has_uint_display_provenance(arg))
+                    || (precision_call && this.is_unsigned64_ty(arg.ty))
+                {
                     let tr = this.compile_expr_ex(arg)?;
                     let src_i = this.as_i64(tr);
                     let dst_v = this.alloc_reg();
@@ -594,6 +630,16 @@ impl<'tcx> FnBuilder<'tcx> {
         takes: &mut CallTakes<'a>,
     ) -> RuntimeResult<Option<Reg>> {
         let arg = &args[i];
+        if takes.cell_args
+            && let HirExprKind::Unary {
+                op: HirUnaryOp::RefMut,
+                operand,
+            } = &arg.kind
+            && crate::compile::is_mut_ref_writeback(self.tcx, expected_ty.unwrap_or(arg.ty))
+            && let Some(place) = self.capture_place_arg(operand)
+        {
+            return Ok(Some(place));
+        }
         if let Some(home) = self.mut_ref_arg_home(arg, expected_ty) {
             // `&mut <local Vec>`: move the local into the cell when no
             // sibling argument reads it, giving the callee unique
@@ -1019,12 +1065,12 @@ impl<'tcx> FnBuilder<'tcx> {
             && args.len() == 2
             && args
                 .iter()
-                .all(|arg| matches!(self.tcx.kind(arg.ty), Some(TyKind::Int(_))))
+                .all(|arg| matches!(self.tcx.kind(arg.ty), Some(TyKind::Int(it)) if !it.is_wide()))
             && self.tcx.struct_field_tys(*def).is_some_and(|tys| {
                 tys.len() == 2
-                    && tys
-                        .iter()
-                        .all(|ty| matches!(self.tcx.kind(*ty), Some(TyKind::Int(_))))
+                    && tys.iter().all(
+                        |ty| matches!(self.tcx.kind(*ty), Some(TyKind::Int(it)) if !it.is_wide()),
+                    )
             })
             && let Some(type_name) = self.tcx.def_name(*def)
             && matches!(self.tcx.kind(result_ty), Some(TyKind::Adt { def: result_def, .. }) if *result_def == *def)
@@ -1052,15 +1098,15 @@ impl<'tcx> FnBuilder<'tcx> {
             && args.len() == 2
             && args
                 .iter()
-                .all(|arg| matches!(self.tcx.kind(arg.ty), Some(TyKind::Int(_))))
+                .all(|arg| matches!(self.tcx.kind(arg.ty), Some(TyKind::Int(it)) if !it.is_wide()))
             && let Some((def, field_names)) = self.layouts.iter().find(|(def, names)| {
                 names.len() == 2 && self.tcx.def_name(**def) == Some(segment.name.as_str())
             })
             && self.tcx.struct_field_tys(*def).is_some_and(|tys| {
                 tys.len() == 2
-                    && tys
-                        .iter()
-                        .all(|ty| matches!(self.tcx.kind(*ty), Some(TyKind::Int(_))))
+                    && tys.iter().all(
+                        |ty| matches!(self.tcx.kind(*ty), Some(TyKind::Int(it)) if !it.is_wide()),
+                    )
             })
             && matches!(self.tcx.kind(result_ty), Some(TyKind::Adt { def: result_def, .. }) if *result_def == *def)
         {
@@ -1091,11 +1137,11 @@ impl<'tcx> FnBuilder<'tcx> {
             && field_tys.len() == 2
             && field_tys
                 .iter()
-                .all(|ty| matches!(self.tcx.kind(*ty), Some(TyKind::Int(_))))
+                .all(|ty| matches!(self.tcx.kind(*ty), Some(TyKind::Int(it)) if !it.is_wide()))
             && args.len() == 2
             && args
                 .iter()
-                .all(|arg| matches!(self.tcx.kind(arg.ty), Some(TyKind::Int(_))))
+                .all(|arg| matches!(self.tcx.kind(arg.ty), Some(TyKind::Int(it)) if !it.is_wide()))
             && let Some(field_names) = self.layouts.get(def).filter(|names| names.len() == 2)
             && let Some(type_name) = self.tcx.def_name(*def)
             && matches!(self.tcx.kind(result_ty), Some(TyKind::Adt { def: result_def, .. }) if result_def == def)
@@ -1136,8 +1182,8 @@ impl<'tcx> FnBuilder<'tcx> {
         else {
             return Ok(None);
         };
-        if !matches!(self.tcx.kind(args[2].ty), Some(TyKind::Int(_)))
-            || !matches!(self.tcx.kind(args[4].ty), Some(TyKind::Int(_)))
+        if !matches!(self.tcx.kind(args[2].ty), Some(TyKind::Int(it)) if !it.is_wide())
+            || !matches!(self.tcx.kind(args[4].ty), Some(TyKind::Int(it)) if !it.is_wide())
         {
             return Ok(None);
         }
@@ -1177,6 +1223,15 @@ impl<'tcx> FnBuilder<'tcx> {
                 "__concat" | "__debug" | "println" | "print" | "eprintln" | "format"
             )
         })
+    }
+
+    /// Whether `callee` is the bare intrinsic `name`.
+    fn callee_is_named(callee: &HirExpr, name: &str) -> bool {
+        matches!(
+            &callee.kind,
+            HirExprKind::Path { segments, def: None, .. }
+                if segments.last().is_some_and(|s| s.name.as_str() == name)
+        )
     }
 
     /// Whether `callee` encodes its argument as JSON text, which reads an
@@ -1593,13 +1648,23 @@ impl<'tcx> FnBuilder<'tcx> {
         expected_ty: Option<Ty>,
     ) -> Option<&'a HirExpr> {
         let typed_as_mut_ref = crate::compile::is_mut_ref_writeback(tcx, arg.ty);
-        let (place, explicit_mut_place) = match &arg.kind {
+        let (mut place, explicit_mut_place) = match &arg.kind {
             HirExprKind::Unary {
                 op: HirUnaryOp::RefMut,
                 operand,
             } => (operand.as_ref(), true),
             _ => (arg, false),
         };
+        // `&mut *r` lends what `r` lends: the write lands in `r`'s place,
+        // which `r`'s own write-back carries on.
+        while let HirExprKind::Unary {
+            op: HirUnaryOp::Deref,
+            operand,
+        } = &place.kind
+            && matches!(tcx.kind(operand.ty), Some(TyKind::Ref { .. }))
+        {
+            place = operand;
+        }
         // The callee unwraps an incoming cell for exactly the parameters
         // its own declared type marks as write-back, so the declared type
         // decides here too; the argument's own shape answers only when the
@@ -1634,6 +1699,9 @@ pub(crate) struct CallTakes<'a> {
     pub(crate) places: Vec<(&'a HirExpr, Reg)>,
     /// Windows spliced back into the range they named.
     pub(crate) windows: Vec<WindowTake>,
+    /// Whether the call reaches a program function, which takes a captured
+    /// binding's place for a `&mut` argument.
+    pub(crate) cell_args: bool,
 }
 
 /// A call's arguments with the `&mut` places still to read.

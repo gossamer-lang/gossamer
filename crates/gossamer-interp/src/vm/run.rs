@@ -226,6 +226,35 @@ fn flat_receiver_len(value: &Value) -> usize {
     }
 }
 
+/// `lhs / rhs` (or `lhs % rhs` when `rem`) for a signed type narrower than
+/// `i64`, whose `MIN / -1` fits `i64` but not the type.
+fn checked_narrow_division(
+    lhs: i64,
+    rhs: i64,
+    ty: gossamer_types::IntTy,
+    rem: bool,
+) -> RuntimeResult<i64> {
+    use gossamer_types::IntTy;
+
+    if rhs == 0 {
+        return Err(RuntimeError::Panic("divide by zero".to_string()));
+    }
+    let min = match ty {
+        IntTy::I8 => i64::from(i8::MIN),
+        IntTy::I16 => i64::from(i16::MIN),
+        IntTy::I32 => i64::from(i32::MIN),
+        _ => i64::MIN,
+    };
+    if lhs == min && rhs == -1 {
+        return Err(if rem {
+            crate::vm::remainder_overflow()
+        } else {
+            crate::vm::divide_overflow()
+        });
+    }
+    Ok(if rem { lhs % rhs } else { lhs / rhs })
+}
+
 #[inline(always)]
 fn checked_integer_arithmetic(
     lhs: i64,
@@ -600,7 +629,15 @@ impl Vm {
                     // value's refcount at one and the first field write mutates
                     // in place. `publish_ref_cells` repopulates the cell on
                     // return.
-                    registers[slot] = std::mem::replace(&mut *cell.lock(), Value::Unit);
+                    let inner = std::mem::replace(&mut *cell.lock(), Value::Unit);
+                    // A cell body reads and writes each `&mut` parameter
+                    // through a capture cell; one of its own stands in for an
+                    // argument that is no captured binding.
+                    registers[slot] = if chunk.cell_params {
+                        Value::CaptureCell(Arc::new(parking_lot::Mutex::new(inner)))
+                    } else {
+                        inner
+                    };
                     ref_cells.push((slot, cell));
                 }
             }
@@ -635,8 +672,18 @@ impl Vm {
         // A user-defined method resolves to `Global::Fn`; it must use the
         // same suspended-frame protocol as `Op::Call`, not recurse through
         // `apply` from this dispatch frame.
+        // The capture cell `CaptureCellTake` locked for the instruction now
+        // running, and the cell whose lock was given up because that
+        // instruction went on to run program code.
+        let mut held_capture: Option<HeldCapture> = None;
+        let mut released_capture: Option<usize> = None;
         macro_rules! apply_or_suspend_bytecode {
-            ($dst:expr, $target:expr, $call_args:expr) => {
+            ($dst:expr, $target:expr, $call_args:expr) => {{
+                // Program code may read the binding through a closure, so the
+                // cell gets its value back before that code runs.
+                if let Some(held) = held_capture.take() {
+                    released_capture = Some(held.release(registers));
+                }
                 match $target {
                     Global::Fn(next_chunk) if allow_explicit_frames => {
                         if self.call_depth.get() < crate::vm::DIRECT_BYTECODE_CALL_DEPTH {
@@ -663,7 +710,7 @@ impl Vm {
                     }
                     target => self.apply(target, $call_args)?,
                 }
-            };
+            }};
         }
         // The fault a landing pad is running this frame's pending deferred
         // expressions for, and the call-stack depth the pad started at.
@@ -693,15 +740,15 @@ impl Vm {
                         // exceed `instr_count` at this point. We keep a
                         // `debug_assert!` so a corrupted chunk fails loudly
                         // in debug builds, but skip the runtime branch in
-                        // release. `Op` is `Copy`, so dereferencing gives
-                        // us a by-value copy of the enum for destructuring
-                        // without invoking `<Op as Clone>::clone`.
+                        // release. The match reads each arm's operands from the
+                        // instruction in place, so dispatch decodes only the fields
+                        // the taken arm uses rather than every variant's layout.
                         debug_assert!((pc as usize) < instr_count, "fell off end of bytecode");
                         let _ = instr_count;
-                        let op = unsafe { *instrs.get_unchecked(pc as usize) };
-                        crate::profile::record_op(chunk.name, op);
+                        let op = unsafe { instrs.get_unchecked(pc as usize) };
+                        crate::profile::record_op(chunk.name, *op);
                         pc += 1;
-                        match op {
+                        match *op {
                             Op::LoadConst { dst, idx } => {
                                 registers[dst as usize] = chunk.consts[idx as usize].clone();
                             }
@@ -838,6 +885,34 @@ impl Vm {
                             }
                             Op::Not { dst, operand } => {
                                 registers[dst as usize] = not(&registers[operand as usize])?;
+                            }
+                            Op::WideArith {
+                                dst,
+                                lhs,
+                                rhs,
+                                op,
+                                unsigned,
+                                wrapping,
+                            } => {
+                                let (a, b) = (&registers[lhs as usize], &registers[rhs as usize]);
+                                registers[dst as usize] = if wrapping {
+                                    crate::value::wide::wrapping(op, a, b, unsigned)?
+                                } else {
+                                    crate::value::wide::binary(op, a, b, unsigned)?
+                                };
+                            }
+                            Op::WideUnary {
+                                dst,
+                                operand,
+                                neg,
+                                unsigned,
+                            } => {
+                                let value = &registers[operand as usize];
+                                registers[dst as usize] = if neg {
+                                    crate::value::wide::negate(value)?
+                                } else {
+                                    crate::value::wide::complement(value, unsigned)?
+                                };
                             }
                             Op::Eq { dst, lhs, rhs } => {
                                 // `values_equal` already auto-derefs `__Cell`.
@@ -1207,22 +1282,22 @@ impl Vm {
                                     // write-back cells (free builtins take aggregates by
                                     // value) and return the pooled arg buffer - both
                                     // things `apply`'s builtin arm does, minus the alloc.
-                                    let call_args = crate::value::unwrap_mut_cells_unless_writer(
+                                    let (r, call_args) = crate::value::call_builtin(
                                         callee_name.unwrap_or_default(),
                                         arg_values,
+                                        call_fn,
                                     );
-                                    let r = call_fn(&call_args)?;
                                     self.pool.borrow_mut().give_args(call_args);
-                                    r
+                                    r?
                                 } else if let Some((entry, name)) = cached_native {
-                                    let call_args = crate::value::unwrap_mut_cells_unless_writer(
-                                        name, arg_values,
-                                    );
                                     let mut dispatch =
                                         super::native_dispatch::VmDispatch::new(self);
-                                    let r = entry.invoke(&mut dispatch, &call_args)?;
+                                    let (r, call_args) =
+                                        crate::value::call_builtin(name, arg_values, |args| {
+                                            entry.invoke(&mut dispatch, args)
+                                        });
                                     self.pool.borrow_mut().give_args(call_args);
-                                    r
+                                    r?
                                 } else if let Some(g) = cached {
                                     self.apply(g, arg_values)?
                                 } else if token != 0 {
@@ -1497,7 +1572,7 @@ impl Vm {
                                 byte_reg,
                             } => {
                                 // Super-instruction for `<stream>.write_byte(<b>)`.
-                                // Hot path: receiver is a `Value::Struct{name="Stream",
+                                // Hot path: receiver is a `Value::Struct{name="io::Stream",
                                 // fields=[("fd", Int(fd))]}`, byte is a
                                 // `Value::Int`. Inline the same work
                                 // `builtins::builtin_stream_write_byte` does
@@ -1507,7 +1582,7 @@ impl Vm {
                                 let byte_val = &registers[byte_reg as usize];
                                 let stream_match = matches!(
                                     recv,
-                                    Value::Struct(inner) if inner.name == "Stream"
+                                    Value::Struct(inner) if inner.name == "io::Stream"
                                 );
                                 let byte_match = matches!(byte_val, Value::Int(_));
                                 if stream_match && byte_match {
@@ -1699,7 +1774,7 @@ impl Vm {
                                 };
                                 let fast = match (&registers[recv_reg as usize], bounds) {
                                     (Value::String(s), Some((a, b))) => {
-                                        Some(crate::builtins::str_substring_inline(s, a, b))
+                                        Some(crate::builtins::str_substring_checked(s, a, b)?)
                                     }
                                     _ => None,
                                 };
@@ -1838,6 +1913,30 @@ impl Vm {
                                 // for every non-wide op.
                                 let wide = unsafe { chunk.wide_ops.get_unchecked(idx as usize) };
                                 match wide {
+                                    crate::bytecode::WideOp::CapturePlace { dst, cell, steps } => {
+                                        let place = match &registers[*cell as usize] {
+                                            Value::CaptureCell(c) => crate::value::CapturePlace {
+                                                cell: Arc::clone(c),
+                                                steps: Arc::clone(steps),
+                                            },
+                                            Value::CapturePlace(outer) => {
+                                                crate::value::CapturePlace {
+                                                    cell: Arc::clone(&outer.cell),
+                                                    steps: outer
+                                                        .steps
+                                                        .iter()
+                                                        .chain(steps.iter())
+                                                        .cloned()
+                                                        .collect(),
+                                                }
+                                            }
+                                            _ => {
+                                                return Err(capture_cell_expected("CapturePlace"));
+                                            }
+                                        };
+                                        registers[*dst as usize] =
+                                            Value::CapturePlace(Arc::new(place));
+                                    }
                                     crate::bytecode::WideOp::PlaceSet { root, path, value } => {
                                         let new_value = registers[*value as usize].clone();
                                         let indices = place_indices(path, registers)?;
@@ -1848,6 +1947,43 @@ impl Vm {
                                             &chunk.consts,
                                             new_value,
                                         )?;
+                                    }
+                                    crate::bytecode::WideOp::PlaceVecPush { root, path, value } => {
+                                        let new_value = registers[*value as usize].clone();
+                                        let indices = place_indices(path, registers)?;
+                                        let target = place_mut(
+                                            &mut registers[*root as usize],
+                                            path,
+                                            &indices,
+                                            &chunk.consts,
+                                        )?;
+                                        crate::stdlib_builtins::iter::note_vec_structural_mutation(
+                                            target,
+                                        );
+                                        vec_push_value(target, new_value);
+                                    }
+                                    crate::bytecode::WideOp::PlaceVecSwap { root, path, a, b } => {
+                                        let a = super::index_value(&registers[*a as usize])?;
+                                        let b = super::index_value(&registers[*b as usize])?;
+                                        let indices = place_indices(path, registers)?;
+                                        let target = place_mut(
+                                            &mut registers[*root as usize],
+                                            path,
+                                            &indices,
+                                            &chunk.consts,
+                                        )?;
+                                        vec_swap_value(target, a, b)?;
+                                    }
+                                    crate::bytecode::WideOp::PlaceVecPop { dst, root, path } => {
+                                        let indices = place_indices(path, registers)?;
+                                        let target = place_mut(
+                                            &mut registers[*root as usize],
+                                            path,
+                                            &indices,
+                                            &chunk.consts,
+                                        )?;
+                                        let popped = vec_pop_value(target);
+                                        registers[*dst as usize] = popped;
                                     }
                                     crate::bytecode::WideOp::PlaceVecResize {
                                         root,
@@ -2445,53 +2581,8 @@ impl Vm {
                                 registers[dst as usize] = Value::String(out.into());
                             }
                             Op::VecPop { dst, receiver } => {
-                                let has_item = match &registers[receiver as usize] {
-                                    Value::Array(items) => !items.is_empty(),
-                                    Value::IntArray(data) => !data.is_empty(),
-                                    Value::ByteArray(data) => !data.is_empty(),
-                                    Value::InlineByteArray(data) => !data.is_empty(),
-                                    Value::ByteVec(data) => !data.is_empty(),
-                                    Value::FloatVec(data) => !data.is_empty(),
-                                    _ => false,
-                                };
-                                if has_item {
-                                    crate::stdlib_builtins::iter::note_vec_structural_mutation(
-                                        &registers[receiver as usize],
-                                    );
-                                }
-                                let popped = match &mut registers[receiver as usize] {
-                                    Value::Array(items) => Arc::make_mut(items).pop(),
-                                    Value::IntArray(data) => {
-                                        Arc::make_mut(data).pop().map(Value::Int)
-                                    }
-                                    Value::ByteArray(data) => {
-                                        let mut values = data.to_vec();
-                                        let popped =
-                                            values.pop().map(|value| Value::Int(i64::from(value)));
-                                        registers[receiver as usize] =
-                                            Value::ByteVec(Arc::new(values));
-                                        popped
-                                    }
-                                    Value::InlineByteArray(data) => {
-                                        let mut values = data.to_vec();
-                                        let popped =
-                                            values.pop().map(|value| Value::Int(i64::from(value)));
-                                        registers[receiver as usize] =
-                                            Value::ByteVec(Arc::new(values));
-                                        popped
-                                    }
-                                    Value::ByteVec(data) => Arc::make_mut(data)
-                                        .pop()
-                                        .map(|value| Value::Int(i64::from(value))),
-                                    Value::FloatVec(data) => {
-                                        Arc::make_mut(data).pop().map(Value::Float)
-                                    }
-                                    _ => None,
-                                };
-                                registers[dst as usize] = match popped {
-                                    Some(v) => Value::variant("Some", vec![v]),
-                                    None => Value::variant("None", vec![]),
-                                };
+                                registers[dst as usize] =
+                                    vec_pop_value(&mut registers[receiver as usize]);
                             }
                             Op::VecInsert {
                                 dst,
@@ -2591,45 +2682,7 @@ impl Vm {
                             } => {
                                 let a = super::index_value(&registers[a as usize])?;
                                 let b = super::index_value(&registers[b as usize])?;
-                                let len = match &registers[receiver as usize] {
-                                    Value::Array(values) => values.len(),
-                                    Value::IntArray(values) => values.len(),
-                                    Value::ByteArray(values) => values.len(),
-                                    Value::InlineByteArray(values) => values.len(),
-                                    Value::ByteVec(values) => values.len(),
-                                    Value::FloatVec(values) => values.len(),
-                                    _ => 0,
-                                };
-                                let valid = a >= 0
-                                    && b >= 0
-                                    && usize::try_from(a).is_ok_and(|index| index < len)
-                                    && usize::try_from(b).is_ok_and(|index| index < len);
-                                if !valid {
-                                    return Err(RuntimeError::Panic(format!(
-                                        "vec swap index out of bounds: the len is {len} but the index is {}",
-                                        if a < 0 || a as usize >= len { a } else { b }
-                                    )));
-                                }
-                                let (a, b) = (a as usize, b as usize);
-                                match &mut registers[receiver as usize] {
-                                    Value::Array(values) => Arc::make_mut(values).swap(a, b),
-                                    Value::IntArray(values) => Arc::make_mut(values).swap(a, b),
-                                    Value::ByteArray(values) => {
-                                        let mut owned = values.to_vec();
-                                        owned.swap(a, b);
-                                        registers[receiver as usize] =
-                                            Value::ByteVec(Arc::new(owned));
-                                    }
-                                    Value::InlineByteArray(values) => {
-                                        let mut owned = values.to_vec();
-                                        owned.swap(a, b);
-                                        registers[receiver as usize] =
-                                            Value::ByteVec(Arc::new(owned));
-                                    }
-                                    Value::ByteVec(values) => Arc::make_mut(values).swap(a, b),
-                                    Value::FloatVec(values) => Arc::make_mut(values).swap(a, b),
-                                    _ => {}
-                                }
+                                vec_swap_value(&mut registers[receiver as usize], a, b)?;
                                 registers[dst as usize] = Value::Unit;
                             }
                             Op::VecSwapDiscard { receiver, a, b } => {
@@ -3298,7 +3351,29 @@ impl Vm {
                                 if r == 0 {
                                     return Err(RuntimeError::Panic("divide by zero".to_string()));
                                 }
-                                ints[dst_i as usize] = ints[lhs_i as usize].wrapping_div(r);
+                                ints[dst_i as usize] = ints[lhs_i as usize]
+                                    .checked_div(r)
+                                    .ok_or_else(crate::vm::divide_overflow)?;
+                            }
+                            Op::CheckedDivI64 {
+                                dst_i,
+                                lhs_i,
+                                rhs_i,
+                                overflow_ty,
+                            }
+                            | Op::CheckedRemI64 {
+                                dst_i,
+                                lhs_i,
+                                rhs_i,
+                                overflow_ty,
+                            } => {
+                                let rem = matches!(op, Op::CheckedRemI64 { .. });
+                                ints[dst_i as usize] = checked_narrow_division(
+                                    ints[lhs_i as usize],
+                                    ints[rhs_i as usize],
+                                    overflow_ty,
+                                    rem,
+                                )?;
                             }
                             Op::RemI64 {
                                 dst_i,
@@ -3309,7 +3384,9 @@ impl Vm {
                                 if r == 0 {
                                     return Err(RuntimeError::Panic("divide by zero".to_string()));
                                 }
-                                ints[dst_i as usize] = ints[lhs_i as usize].wrapping_rem(r);
+                                ints[dst_i as usize] = ints[lhs_i as usize]
+                                    .checked_rem(r)
+                                    .ok_or_else(crate::vm::remainder_overflow)?;
                             }
                             Op::DivU64 {
                                 dst_i,
@@ -4322,33 +4399,108 @@ impl Vm {
                                     Value::CaptureCell(Arc::new(parking_lot::Mutex::new(inner)));
                             }
                             Op::CaptureCellGet { dst, cell } => {
-                                let Value::CaptureCell(c) = &registers[cell as usize] else {
+                                let Some((c, steps)) =
+                                    super::capture_place::target(&registers[cell as usize])
+                                else {
                                     return Err(capture_cell_expected("CaptureCellGet"));
                                 };
-                                let loaded = c.lock().clone();
+                                let loaded = super::capture_place::read(&c.lock(), steps)?;
                                 registers[dst as usize] = loaded;
                             }
                             Op::CaptureCellTake { dst, cell } => {
-                                // Exclusive borrow for one instruction: the value moves
-                                // out so an in-place mutation sees a refcount of one, and
-                                // the paired `CaptureCellSet` returns it.
-                                let Value::CaptureCell(c) = &registers[cell as usize] else {
+                                let Some((c, steps)) =
+                                    super::capture_place::target(&registers[cell as usize])
+                                else {
                                     return Err(capture_cell_expected("CaptureCellTake"));
                                 };
-                                let taken = std::mem::replace(&mut *c.lock(), Value::Unit);
-                                registers[dst as usize] = taken;
+                                let steps: Arc<[crate::value::CaptureStep]> = Arc::from(steps);
+                                let mut guard = parking_lot::Mutex::lock_arc(c);
+                                registers[dst as usize] =
+                                    super::capture_place::take(&mut guard, &steps)?;
+                                held_capture = Some(HeldCapture {
+                                    home: dst,
+                                    guard,
+                                    steps,
+                                });
+                            }
+                            Op::CaptureCellIndexSet {
+                                cell,
+                                home,
+                                index,
+                                value,
+                            } => {
+                                let Some((c, steps)) =
+                                    super::capture_place::target(&registers[cell as usize])
+                                else {
+                                    return Err(capture_cell_expected("CaptureCellIndexSet"));
+                                };
+                                let c = Arc::clone(c);
+                                let steps: Arc<[crate::value::CaptureStep]> = Arc::from(steps);
+                                let index = registers[index as usize].clone();
+                                let new_value = registers[value as usize].clone();
+                                registers[home as usize] = Value::Void;
+                                let mut guard = c.lock();
+                                let held = super::capture_place::slot(&mut guard, &steps)?;
+                                if super::range_index_bounds(&index).is_some() {
+                                    super::index_range_set(held, &index, &new_value)?;
+                                } else {
+                                    let raw = super::index_value(&index)?;
+                                    crate::stdlib_builtins::iter::note_vec_element_replacement(
+                                        held, raw, &new_value,
+                                    );
+                                    index_set_value(held, raw, new_value)?;
+                                }
+                            }
+                            Op::CaptureCellFieldSet {
+                                cell,
+                                home,
+                                name_idx,
+                                value,
+                            } => {
+                                let Value::String(field_name) = &chunk.consts[name_idx as usize]
+                                else {
+                                    return Err(RuntimeError::Panic(
+                                        "CaptureCellFieldSet: name must be string const"
+                                            .to_string(),
+                                    ));
+                                };
+                                let Some((c, steps)) =
+                                    super::capture_place::target(&registers[cell as usize])
+                                else {
+                                    return Err(capture_cell_expected("CaptureCellFieldSet"));
+                                };
+                                let c = Arc::clone(c);
+                                let steps: Arc<[crate::value::CaptureStep]> = Arc::from(steps);
+                                let new_value = registers[value as usize].clone();
+                                registers[home as usize] = Value::Void;
+                                let mut guard = c.lock();
+                                let held = super::capture_place::slot(&mut guard, &steps)?;
+                                field_set(held, field_name.as_str(), new_value)?;
                             }
                             Op::CaptureCellSet { cell, src } => {
                                 // Move (not clone) the value home: leaving the register a
                                 // second owner would copy-on-write the whole aggregate on
                                 // the next mutation. Every later read of the binding is
                                 // preceded by its own load.
-                                let Value::CaptureCell(c) = &registers[cell as usize] else {
+                                let value =
+                                    std::mem::replace(&mut registers[src as usize], Value::Unit);
+                                let Some((c, steps)) =
+                                    super::capture_place::target(&registers[cell as usize])
+                                else {
                                     return Err(capture_cell_expected("CaptureCellSet"));
                                 };
-                                let c = Arc::clone(c);
-                                *c.lock() =
-                                    std::mem::replace(&mut registers[src as usize], Value::Unit);
+                                let key = Arc::as_ptr(c) as usize;
+                                if let Some(held) =
+                                    held_capture.take_if(|held| held.cell_key() == key)
+                                {
+                                    held.store(value)?;
+                                } else if released_capture == Some(key) {
+                                    // The cell got its value back before program code
+                                    // ran, and that code may have stored a newer one.
+                                    released_capture = None;
+                                } else {
+                                    super::capture_place::put(&mut c.lock(), steps, value)?;
+                                }
                             }
                             Op::CellTake { dst, cell } => {
                                 // Last use of the cell, so move its inner out rather than
@@ -5109,6 +5261,10 @@ impl Vm {
                     }
                 })(),
             };
+            if let Some(held) = held_capture.take() {
+                held.release(registers);
+            }
+            released_capture = None;
             let err = match outcome {
                 Ok(control) => return Ok(control),
                 Err(err) => err,
@@ -5146,7 +5302,14 @@ impl Vm {
                 }
                 Some(entry) => {
                     if let Some(held) = unwinding.take() {
-                        unwinding.set(held.with_unwind_note(&err));
+                        // A deferred expression that exits replaces the fault
+                        // in flight; the frame's other deferred expressions
+                        // still run before the exit leaves it.
+                        if matches!(err, RuntimeError::Exit(_)) {
+                            unwinding.set(err);
+                        } else {
+                            unwinding.set(held.with_unwind_note(&err));
+                        }
                     }
                     self.call_stack.borrow_mut().truncate(pad_stack_len);
                     pc = entry.landing;
@@ -5190,6 +5353,14 @@ fn promote_scalar_push(recv: &Value, new_value: &Value) -> Option<Value> {
             wide.extend(data.iter().map(|n| *n as f64));
             wide.push(*f);
             Some(Value::FloatVec(Arc::new(wide)))
+        }
+        // A 128-bit value wider than a word does not fit the packed store, so
+        // the elements move to one that holds any value.
+        (Value::IntArray(data), Value::Wide(_) | Value::WideInline(..)) => {
+            let mut items = Vec::with_capacity(data.capacity().max(data.len() + 1));
+            items.extend(data.iter().map(|n| Value::Int(*n)));
+            items.push(new_value.clone());
+            Some(Value::Array(Arc::new(items)))
         }
         _ => None,
     }
@@ -5343,6 +5514,10 @@ pub(super) fn index_set_value(b: &mut Value, raw: i64, new_value: Value) -> Runt
     // float storage before the store below.
     if let (Value::IntArray(data), Value::Float(_)) = (&*b, &new_value) {
         *b = Value::FloatVec(Arc::new(data.iter().map(|n| *n as f64).collect()));
+    }
+    // A 128-bit value wider than a word does not fit the packed store.
+    if let (Value::IntArray(data), Value::Wide(_) | Value::WideInline(..)) = (&*b, &new_value) {
+        *b = Value::Array(Arc::new(data.iter().map(|n| Value::Int(*n)).collect()));
     }
     match b {
         Value::Array(items) | Value::Tuple(items) => {
@@ -5543,6 +5718,117 @@ fn capture_cell_expected(op: &str) -> RuntimeError {
     RuntimeError::Panic(format!("{op}: operand does not hold a capture cell"))
 }
 
+/// `v.swap(a, b)` in place.
+fn vec_swap_value(v: &mut Value, a: i64, b: i64) -> RuntimeResult<()> {
+    let len = match &*v {
+        Value::Array(values) => values.len(),
+        Value::IntArray(values) => values.len(),
+        Value::ByteArray(values) => values.len(),
+        Value::InlineByteArray(values) => values.len(),
+        Value::ByteVec(values) => values.len(),
+        Value::FloatVec(values) => values.len(),
+        _ => 0,
+    };
+    let in_bounds = |index: i64| usize::try_from(index).is_ok_and(|index| index < len);
+    if !in_bounds(a) || !in_bounds(b) {
+        return Err(swap_out_of_bounds(a, b, len));
+    }
+    let (a, b) = (a as usize, b as usize);
+    match v {
+        Value::Array(values) => Arc::make_mut(values).swap(a, b),
+        Value::IntArray(values) => Arc::make_mut(values).swap(a, b),
+        Value::ByteArray(values) => {
+            let mut owned = values.to_vec();
+            owned.swap(a, b);
+            *v = Value::ByteVec(Arc::new(owned));
+        }
+        Value::InlineByteArray(values) => {
+            let mut owned = values.to_vec();
+            owned.swap(a, b);
+            *v = Value::ByteVec(Arc::new(owned));
+        }
+        Value::ByteVec(values) => Arc::make_mut(values).swap(a, b),
+        Value::FloatVec(values) => Arc::make_mut(values).swap(a, b),
+        _ => {}
+    }
+    Ok(())
+}
+
+/// `v.pop()` in place: the last element as `Some`, or `None` when `v` is
+/// empty.
+fn vec_pop_value(v: &mut Value) -> Value {
+    let has_item = match &*v {
+        Value::Array(items) => !items.is_empty(),
+        Value::IntArray(data) => !data.is_empty(),
+        Value::ByteArray(data) => !data.is_empty(),
+        Value::InlineByteArray(data) => !data.is_empty(),
+        Value::ByteVec(data) => !data.is_empty(),
+        Value::FloatVec(data) => !data.is_empty(),
+        _ => false,
+    };
+    if has_item {
+        crate::stdlib_builtins::iter::note_vec_structural_mutation(v);
+    }
+    let popped = match v {
+        Value::Array(items) => Arc::make_mut(items).pop(),
+        Value::IntArray(data) => Arc::make_mut(data).pop().map(Value::Int),
+        Value::ByteArray(data) => {
+            let mut values = data.to_vec();
+            let popped = values.pop().map(|value| Value::Int(i64::from(value)));
+            *v = Value::ByteVec(Arc::new(values));
+            popped
+        }
+        Value::InlineByteArray(data) => {
+            let mut values = data.to_vec();
+            let popped = values.pop().map(|value| Value::Int(i64::from(value)));
+            *v = Value::ByteVec(Arc::new(values));
+            popped
+        }
+        Value::ByteVec(data) => Arc::make_mut(data)
+            .pop()
+            .map(|value| Value::Int(i64::from(value))),
+        Value::FloatVec(data) => Arc::make_mut(data).pop().map(Value::Float),
+        _ => None,
+    };
+    match popped {
+        Some(value) => Value::variant("Some", vec![value]),
+        None => Value::variant("None", vec![]),
+    }
+}
+
+/// A capture cell locked across one instruction, the binding's value moved
+/// out of it into the binding's home register.
+struct HeldCapture {
+    home: crate::bytecode::Reg,
+    guard: parking_lot::ArcMutexGuard<parking_lot::RawMutex, Value>,
+    /// The steps from the cell's value to the binding.
+    steps: Arc<[crate::value::CaptureStep]>,
+}
+
+impl HeldCapture {
+    /// The identity of the locked cell, as `CaptureCellSet` names it.
+    fn cell_key(&self) -> usize {
+        Arc::as_ptr(parking_lot::ArcMutexGuard::mutex(&self.guard)) as usize
+    }
+
+    /// Returns `value` to the binding and unlocks the cell.
+    fn store(self, value: Value) -> RuntimeResult<()> {
+        let mut guard = self.guard;
+        super::capture_place::put(&mut guard, &self.steps, value)
+    }
+
+    /// Returns a copy of the home register's value to the binding and unlocks
+    /// the cell, answering the cell's identity.
+    fn release(self, registers: &[Value]) -> usize {
+        let key = self.cell_key();
+        let value = registers[self.home as usize].clone();
+        // The steps led to this slot when the value was taken, and nothing
+        // else could reach the cell since.
+        let _ = self.store(value);
+        key
+    }
+}
+
 /// Publishes the final values of `&mut` parameter registers back into their
 /// caller-provided write-back cells, on every path a frame leaves by: a
 /// return, or a fault, whose writes reach the caller as a write through a
@@ -5556,7 +5842,11 @@ fn publish_ref_cells(cells: &[(usize, Arc<ThreadConfinedCell>)], registers: &mut
     // turning a build loop into O(n^2). The frame is exiting, so emptying
     // the register is safe.
     for (slot, cell) in cells {
-        *cell.lock() = std::mem::replace(&mut registers[*slot], Value::Unit);
+        let value = match std::mem::replace(&mut registers[*slot], Value::Unit) {
+            Value::CaptureCell(own) => std::mem::replace(&mut *own.lock(), Value::Unit),
+            value => value,
+        };
+        *cell.lock() = value;
     }
 }
 

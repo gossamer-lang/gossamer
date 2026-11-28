@@ -37,7 +37,7 @@ use gossamer_hir::{
     HirLiteral, HirMatchArm, HirPat, HirPatKind, HirProgram, HirStmt, HirStmtKind, HirUnaryOp,
 };
 use gossamer_lex::Span;
-use gossamer_types::{Ty, TyCtxt};
+use gossamer_types::{Ty, TyCtxt, TyKind};
 
 use crate::ir::{
     BasicBlock, BinOp, BlockId, Body, ConstValue, Local, LocalDecl, Operand, Place, Rvalue,
@@ -643,11 +643,11 @@ impl<'a> Builder<'a> {
             && let Some(desc) = self.ensure_enum_eq_desc(key_ty)
         {
             let _ = self.ensure_aggr_struct_meta(val_ty);
-            if self.is_inline_aggregate_ty(val_ty) {
+            if self.map_value_is_copied(val_ty) {
                 let _ = self.ensure_aggr_copy_meta(val_ty);
             }
             ("gos_rt_map_insert_ekey_opt", Some(desc))
-        } else if self.is_inline_aggregate_ty(val_ty) || self.map_value_is_carrier(map_ty) {
+        } else if self.map_value_is_copied(val_ty) || self.map_value_is_carrier(map_ty) {
             // An aggregate value crosses an insert as one handle word whose
             // blob owns the heap children the structural meta names, the
             // shape `m.insert(k, v)` gives it.
@@ -752,7 +752,7 @@ impl<'a> Builder<'a> {
         // `insert` method dispatch does.
         if let Some(value_ty) = self.hash_map_value_ty(map_ty) {
             let _ = self.ensure_aggr_struct_meta(value_ty);
-            if self.is_inline_aggregate_ty(value_ty) || self.map_value_is_carrier(map_ty) {
+            if self.map_value_is_copied(value_ty) || self.map_value_is_carrier(map_ty) {
                 let _ = self.ensure_aggr_copy_meta(value_ty);
             }
             self.ensure_map_carrier_box_meta(value_ty);
@@ -877,6 +877,157 @@ impl<'a> Builder<'a> {
             return None;
         };
         let joined = Self::stdlib_free_path(segments);
+        // `runtime::Guard::new(f)`: the guard keeps the closure until its
+        // cleanup runs, so it crosses as the `Fn()` environment the runtime
+        // calls, one that captures nothing included.
+        if matches!(
+            joined.as_str(),
+            "runtime::Guard::new" | "Guard::new" | "std::runtime::Guard::new"
+        ) && let [cleanup] = args
+        {
+            let raw = self.lower_expr(cleanup)?;
+            let unit = self.tcx.unit();
+            let fn_ty = self.tcx.intern(TyKind::FnTrait(gossamer_types::FnSig {
+                inputs: Vec::new(),
+                output: unit,
+            }));
+            let env = self.coerce_to_fn_trait_if_needed(raw, fn_ty, span);
+            let guard_ty = self.sync_handle_ty(49);
+            let guard = self.fresh(guard_ty);
+            let next = self.new_block(span);
+            self.terminate(Terminator::Call {
+                callee: Operand::Const(ConstValue::Str("gos_rt_runtime_guard_new".to_string())),
+                args: vec![Operand::Copy(Place::local(env))],
+                destination: Place::local(guard),
+                target: Some(next),
+            });
+            self.set_current(next);
+            self.fresh_results.insert(guard);
+            return Some(guard);
+        }
+        // An arm's release of the temporary `Option` / `Result` its `match`
+        // reads, once the arm's bindings hold their own shares of the payload.
+        if joined == "__gos_release_scrutinee"
+            && let [id] = args
+            && let HirExprKind::Literal(HirLiteral::Int(text)) = &id.kind
+        {
+            if let Ok(id) = text.parse::<u32>()
+                && let Some(&scrutinee) = self.temp_scrutinees.get(&id)
+            {
+                let unit = self.tcx.unit();
+                let out = self.fresh(unit);
+                self.emit_assign(
+                    Place::local(out),
+                    Rvalue::CallIntrinsic {
+                        name: crate::lower::RELEASE_TEMP_MARKER,
+                        args: vec![Operand::Copy(Place::local(scrutinee))],
+                    },
+                    span,
+                );
+            }
+            let unit = self.tcx.unit();
+            return Some(self.fresh(unit));
+        }
+        // A cleanup point: the guards released since the last one run their
+        // cleanups here.
+        if joined == "__gos_run_cleanups" {
+            // The temporaries of the statements before this point that hold
+            // a cleanup are given back here, as their bindings are.
+            let bound: std::collections::HashSet<Local> = self
+                .scopes
+                .iter()
+                .flat_map(|scope| scope.values().copied())
+                .chain(self.named_locals.iter().copied())
+                .collect();
+            // A carrier copied whole into another local hands that local its
+            // value, and the receiving local is given back on its own.
+            let handed_on: std::collections::HashSet<Local> = self
+                .blocks
+                .iter()
+                .flat_map(|block| &block.stmts)
+                .filter_map(|stmt| match &stmt.kind {
+                    StatementKind::Assign {
+                        place,
+                        rvalue: Rvalue::Use(Operand::Copy(source)),
+                    } if source.projection.is_empty() && place.local != source.local => {
+                        Some(source.local)
+                    }
+                    _ => None,
+                })
+                .collect();
+            let temps: Vec<Local> = (self.statement_locals_start..self.locals.len())
+                .map(|index| Local(u32::try_from(index).expect("local overflow")))
+                .filter(|local| {
+                    // A counted handle is given back at its last use already:
+                    // what is left is an aggregate, a sequence, or an `Option`
+                    // or `Result` carrier that holds a cleanup by value.
+                    let ty = self.locals[local.0 as usize].ty;
+                    let held_by_value = match self.tcx.kind_of(ty) {
+                        TyKind::Tuple(_) | TyKind::Vec(_) => true,
+                        _ if self.tcx.is_two_word_value(ty) => !handed_on.contains(local),
+                        TyKind::Adt { def, .. } => self.tcx.struct_field_tys(*def).is_some(),
+                        _ => false,
+                    };
+                    !bound.contains(local) && held_by_value && self.tcx.is_scope_bound(ty)
+                })
+                .collect();
+            for temp in temps {
+                let unit = self.tcx.unit();
+                let out = self.fresh(unit);
+                self.emit_assign(
+                    Place::local(out),
+                    Rvalue::CallIntrinsic {
+                        name: crate::lower::RELEASE_TEMP_MARKER,
+                        args: vec![Operand::Copy(Place::local(temp))],
+                    },
+                    span,
+                );
+            }
+            let unit = self.tcx.unit();
+            let out = self.fresh(unit);
+            self.emit_assign(
+                Place::local(out),
+                Rvalue::CallIntrinsic {
+                    name: "gos_rt_runtime_run_cleanups",
+                    args: Vec::new(),
+                },
+                span,
+            );
+            return Some(out);
+        }
+        // A scope-bound binding's release: a marker the last drop pass turns
+        // into the binding's release, once every other release is placed.
+        if joined == "__gos_release_binding"
+            && let [released] = args
+        {
+            let value = self.lower_expr(released)?;
+            let unit = self.tcx.unit();
+            let out = self.fresh(unit);
+            self.emit_assign(
+                Place::local(out),
+                Rvalue::CallIntrinsic {
+                    name: crate::lower::RELEASE_BINDING_MARKER,
+                    args: vec![Operand::Copy(Place::local(value))],
+                },
+                span,
+            );
+            return Some(out);
+        }
+        // The read that keeps a parameter to the end of its call: a copy, so
+        // no earlier point is its last use.
+        if joined == "__gos_keep"
+            && let [kept] = args
+        {
+            let value = self.lower_expr(kept)?;
+            let copy = self.fresh(kept.ty);
+            self.emit_assign(
+                Place::local(copy),
+                Rvalue::Use(Operand::Copy(Place::local(value))),
+                span,
+            );
+            let unit = self.tcx.unit();
+            return Some(self.fresh(unit));
+        }
         if matches!(
             joined.as_str(),
             "BTreeSet::new" | "collections::BTreeSet::new"
@@ -1150,7 +1301,6 @@ impl<'a> Builder<'a> {
         resolved = resolved.or_else(|| self.lower_collections_free(joined, args));
         resolved = resolved.or_else(|| self.lower_collections_2_free(joined, args));
         resolved = resolved.or_else(|| self.lower_url_runtime_misc_free(joined, args));
-        resolved = resolved.or_else(|| self.lower_image_free(joined, args));
         resolved = resolved.or_else(|| self.lower_http_free(joined, args));
         resolved = resolved.or_else(|| self.lower_http_2_free(joined, args));
         resolved = resolved.or_else(|| self.lower_http_3_free(joined, args));
@@ -1164,6 +1314,74 @@ impl<'a> Builder<'a> {
     /// already assembled. The scalar bound methods (`n.max(m)`) name the
     /// same operations, so they share this entry rather than duplicating
     /// the symbol and return-type selection.
+    /// `text.to_i128()` / `text.to_u128()` (`unsigned`): `Some` of the
+    /// 128-bit integer the string spells in full, else `None`. The runtime
+    /// answers whether it does and then its bits, so only the `Some` arm
+    /// boxes a payload.
+    pub(crate) fn lower_str_to_wide(&mut self, text: Local, unsigned: bool, span: Span) -> Local {
+        use gossamer_types::IntTy;
+        let wide_ty = self
+            .tcx
+            .int_ty(if unsigned { IntTy::U128 } else { IntTy::I128 });
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let option_ty = self.tcx.intern(TyKind::Adt {
+            def: gossamer_resolve::DefId::local(u32::MAX - 1),
+            substs: gossamer_types::Substs::from_types([wide_ty]),
+        });
+        let flag = Operand::Const(ConstValue::Int(i128::from(unsigned)));
+        let valid = self.fresh(i64_ty);
+        let checked = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_rt_str_wide_valid".to_string())),
+            args: vec![Operand::Copy(Place::local(text)), flag.clone()],
+            destination: Place::local(valid),
+            target: Some(checked),
+        });
+        self.set_current(checked);
+        let dest = self.fresh(option_ty);
+        let some = self.new_block(span);
+        let none = self.new_block(span);
+        let join = self.new_block(span);
+        self.terminate(Terminator::SwitchInt {
+            discriminant: Operand::Copy(Place::local(valid)),
+            arms: vec![(0, none)],
+            default: some,
+        });
+        self.set_current(some);
+        let bits = self.fresh(wide_ty);
+        let read = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_rt_str_wide_bits".to_string())),
+            args: vec![Operand::Copy(Place::local(text)), flag],
+            destination: Place::local(bits),
+            target: Some(read),
+        });
+        self.set_current(read);
+        let disc = self.fresh(i64_ty);
+        self.emit_assign(
+            Place::local(disc),
+            Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+            span,
+        );
+        self.lower_result_ctor_into(dest, disc, bits, span);
+        self.terminate(Terminator::Goto { target: join });
+        self.set_current(none);
+        self.emit_assign(
+            Place::local(dest),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_result_new",
+                args: vec![
+                    Operand::Const(ConstValue::Int(1)),
+                    Operand::Const(ConstValue::Int(0)),
+                ],
+            },
+            span,
+        );
+        self.terminate(Terminator::Goto { target: join });
+        self.set_current(join);
+        dest
+    }
+
     pub(crate) fn lower_stdlib_free_by_name(
         &mut self,
         name: &str,
@@ -1200,6 +1418,19 @@ impl<'a> Builder<'a> {
         // the callable's code/env must be extracted before the
         // runtime call. A user-defined `fn spawn` (non-None `def`)
         // shadows the prelude builtin.
+        if !callee_def_some
+            && args.len() == 1
+            && let Some(unsigned) = match joined {
+                "strings::to_i128" => Some(false),
+                "strings::to_u128" => Some(true),
+                _ => None,
+            }
+        {
+            let Some(text) = self.lower_expr(&args[0]) else {
+                return ControlFlow::Break(None);
+            };
+            return ControlFlow::Break(Some(self.lower_str_to_wide(text, unsigned, span)));
+        }
         if !callee_def_some && seg_len == 1 && joined == "spawn" && matches!(args.len(), 1 | 2) {
             return ControlFlow::Break(self.lower_spawn(&args[0], args.get(1), span));
         }
@@ -1569,6 +1800,16 @@ impl<'a> Builder<'a> {
                 "gos_rt_time_format_in_raw",
                 self.result_string_error_adt_ty(),
             ),
+            "__gos_time_strftime_raw" => (
+                "gos_rt_time_strftime_raw",
+                self.result_string_error_adt_ty(),
+            ),
+            "__gos_time_strptime_raw" => {
+                let i = self.tcx.int_ty(gossamer_types::IntTy::I64);
+                let s = self.tcx.string_ty();
+                let tuple = self.tcx.intern(gossamer_types::TyKind::Tuple(vec![i, s]));
+                ("gos_rt_time_strptime_raw", self.result_of(tuple))
+            }
             "__gos_time_format_rfc3339_raw" => (
                 "gos_rt_time_format_rfc3339_raw",
                 self.result_string_error_adt_ty(),
@@ -1580,6 +1821,128 @@ impl<'a> Builder<'a> {
             "__gos_fs_temp_dir_raw" => {
                 ("gos_rt_fs_temp_dir_raw", self.result_string_error_adt_ty())
             }
+            "__gos_fs_chown_raw" => ("gos_rt_fs_chown_raw", self.result_unit_error_adt_ty()),
+            "__gos_net_dns_raw" => ("gos_rt_net_dns_raw", self.result_vec_string_error_ty()),
+            "__gos_tls_server_config_new_raw" => (
+                "gos_rt_tls_server_config_new_raw",
+                self.result_i64_error_adt_ty(),
+            ),
+            "__gos_tls_server_config_add_sni_raw" => (
+                "gos_rt_tls_server_config_add_sni_raw",
+                self.result_unit_error_adt_ty(),
+            ),
+            "__gos_tls_server_config_reload_raw" => (
+                "gos_rt_tls_server_config_reload_raw",
+                self.result_unit_error_adt_ty(),
+            ),
+            "__gos_tls_server_config_release_raw" => (
+                "gos_rt_tls_server_config_release_raw",
+                self.result_unit_error_adt_ty(),
+            ),
+            "__gos_fs_disk_space_raw" => {
+                let i = self.tcx.int_ty(gossamer_types::IntTy::I64);
+                let tuple = self.tcx.intern(gossamer_types::TyKind::Tuple(vec![i; 3]));
+                ("gos_rt_fs_disk_space_raw", self.result_of(tuple))
+            }
+            "__gos_ecdh_keypair_raw"
+            | "__gos_mlkem_keypair_raw"
+            | "__gos_mlkem_encapsulate_raw" => {
+                let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::U8);
+                let bytes = self.tcx.intern(gossamer_types::TyKind::Vec(u8_ty));
+                let pair = self
+                    .tcx
+                    .intern(gossamer_types::TyKind::Tuple(vec![bytes, bytes]));
+                let name = match joined {
+                    "__gos_ecdh_keypair_raw" => "gos_rt_ecdh_keypair_raw",
+                    "__gos_mlkem_keypair_raw" => "gos_rt_mlkem_keypair_raw",
+                    _ => "gos_rt_mlkem_encapsulate_raw",
+                };
+                (name, self.result_of(pair))
+            }
+            "__gos_netip_prefix_raw" => {
+                let s = self.tcx.string_ty();
+                let i = self.tcx.int_ty(gossamer_types::IntTy::I64);
+                let pair = self.tcx.intern(gossamer_types::TyKind::Tuple(vec![s, i]));
+                ("gos_rt_netip_prefix_raw", self.result_of(pair))
+            }
+            "__gos_rational_from_f64_raw" => {
+                let s = self.tcx.string_ty();
+                let pair = self.tcx.intern(gossamer_types::TyKind::Tuple(vec![s, s]));
+                ("gos_rt_rational_from_f64_raw", self.result_of(pair))
+            }
+            "__gos_rational_to_f64_raw" => (
+                "gos_rt_rational_to_f64_raw",
+                self.result_string_error_adt_ty(),
+            ),
+            "__gos_netip_prefix_op_raw" => (
+                "gos_rt_netip_prefix_op_raw",
+                self.result_string_error_adt_ty(),
+            ),
+            "__gos_netip_prefix_contains_raw" | "__gos_netip_prefix_overlaps_raw" => {
+                let b = self.tcx.bool_ty();
+                let name = if joined == "__gos_netip_prefix_contains_raw" {
+                    "gos_rt_netip_prefix_contains_raw"
+                } else {
+                    "gos_rt_netip_prefix_overlaps_raw"
+                };
+                (name, self.result_of(b))
+            }
+            "__gos_ecdh_agree_raw" => ("gos_rt_ecdh_agree_raw", self.result_vec_u8_error_ty()),
+            "__gos_mlkem_decapsulate_raw" => (
+                "gos_rt_mlkem_decapsulate_raw",
+                self.result_vec_u8_error_ty(),
+            ),
+            "__gos_template_new_raw" => {
+                let i = self.tcx.int_ty(gossamer_types::IntTy::I64);
+                ("gos_rt_template_new_raw", self.result_of(i))
+            }
+            "__gos_template_render_raw" => (
+                "gos_rt_template_render_raw",
+                self.result_string_error_adt_ty(),
+            ),
+            "__gos_template_render_source_raw" => (
+                "gos_rt_template_render_source_raw",
+                self.result_string_error_adt_ty(),
+            ),
+            "__gos_template_release_raw" => (
+                "gos_rt_template_release_raw",
+                self.result_unit_error_adt_ty(),
+            ),
+            "__gos_image_decode_raw" => {
+                let i = self.tcx.int_ty(gossamer_types::IntTy::I64);
+                let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::U8);
+                let bytes = self.tcx.intern(gossamer_types::TyKind::Vec(u8_ty));
+                let tuple = self
+                    .tcx
+                    .intern(gossamer_types::TyKind::Tuple(vec![i, i, bytes]));
+                ("gos_rt_image_decode_raw", self.result_of(tuple))
+            }
+            "__gos_image_filled_raw"
+            | "__gos_image_resize_raw"
+            | "__gos_image_encode_png_raw"
+            | "__gos_image_encode_jpeg_raw" => {
+                let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::U8);
+                let bytes = self.tcx.intern(gossamer_types::TyKind::Vec(u8_ty));
+                let name = match joined {
+                    "__gos_image_filled_raw" => "gos_rt_image_filled_raw",
+                    "__gos_image_resize_raw" => "gos_rt_image_resize_raw",
+                    "__gos_image_encode_png_raw" => "gos_rt_image_encode_png_raw",
+                    _ => "gos_rt_image_encode_jpeg_raw",
+                };
+                (name, self.result_of(bytes))
+            }
+            "__gos_image_check_raw" => ("gos_rt_image_check_raw", self.result_unit_error_adt_ty()),
+            "__gos_image_set_max_pixels_raw" => (
+                "gos_rt_image_set_max_pixels_raw",
+                self.result_unit_error_adt_ty(),
+            ),
+            "__gos_mail_address_raw" => {
+                ("gos_rt_mail_address_raw", self.result_string_error_adt_ty())
+            }
+            "__gos_mail_address_list_raw" => (
+                "gos_rt_mail_address_list_raw",
+                self.result_string_error_adt_ty(),
+            ),
             "__gos_bufio_buffer_writes_raw" => (
                 "gos_rt_bufio_buffer_writes_raw",
                 self.result_unit_error_adt_ty(),
@@ -1631,8 +1994,6 @@ impl<'a> Builder<'a> {
             // free-function exports, so a direct call needs its own arm.
             "time::__sleep_ns" => ("gos_rt_sleep_ns", self.tcx.unit()),
             "time::__sleep_ns_ctx" => ("gos_rt_sleep_ns_ctx", self.tcx.bool_ty()),
-            "smtp::send" => ("gos_rt_smtp_send", self.result_unit_error_adt_ty()),
-            "smtp::send_auth" => ("gos_rt_smtp_send_auth", self.result_unit_error_adt_ty()),
             "time::freeze" => ("gos_rt_time_freeze", self.tcx.unit()),
             "time::advance" => (
                 "gos_rt_time_advance",
@@ -1754,6 +2115,10 @@ impl<'a> Builder<'a> {
             "yaml::parse" | "encoding::yaml::parse" => {
                 ("gos_rt_yaml_parse", self.result_json_value_error_adt_ty())
             }
+            "yaml::__parse_with" | "encoding::yaml::__parse_with" => (
+                "gos_rt_yaml_parse_with",
+                self.result_json_value_error_adt_ty(),
+            ),
             "yaml::parse_all" | "encoding::yaml::parse_all" => (
                 "gos_rt_yaml_parse_all",
                 self.result_vec_json_value_error_ty(),
@@ -1866,16 +2231,11 @@ impl<'a> Builder<'a> {
             "rand::Rng::new" | "math::rand::Rng::new" | "Rng::new" => {
                 ("gos_rt_math_rng_new", self.sync_handle_ty(42))
             }
-            "validate::FieldError::new" | "FieldError::new" => (
-                "gos_rt_field_error_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
-            "validate::Errors::new" | "Errors::new" => (
-                "gos_rt_validate_errors_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
             "sync::RwLock::new" | "RwLock::new" => ("gos_rt_rwlock_new", self.sync_handle_ty(35)),
             "sync::Shared::new" | "Shared::new" => ("gos_rt_shared_new", self.sync_handle_ty(46)),
+            "runtime::Guard::new" | "Guard::new" => {
+                ("gos_rt_runtime_guard_new", self.sync_handle_ty(49))
+            }
             "context::Context::background" | "Context::background" => {
                 ("gos_rt_ctx_background", self.sync_handle_ty(11))
             }
@@ -1915,10 +2275,6 @@ impl<'a> Builder<'a> {
                 let ty = self.result_unit_error_adt_ty();
                 ("gos_rt_metrics_serve", ty)
             }
-            "trace::Tracer::new" | "Tracer::new" => (
-                "gos_rt_trace_tracer_new",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
             _ => return None,
         })
     }
@@ -2119,7 +2475,7 @@ impl<'a> Builder<'a> {
                 // A struct, tuple, or array element reaches the runtime as the
                 // address of its slot block, as in the method form.
                 let elem = self.vec_receiver_elem_ty(args[0].ty);
-                let symbol = if self.is_inline_slot_block(elem) {
+                let symbol = if self.is_inline_slot_block(elem) || self.tcx.is_wide_int(elem) {
                     "gos_rt_vec_insert_slots_safe"
                 } else {
                     "gos_rt_vec_insert_safe"
@@ -2250,37 +2606,6 @@ impl<'a> Builder<'a> {
         })
     }
 
-    fn lower_image_free(
-        &mut self,
-        joined: &str,
-        _args: &[HirExpr],
-    ) -> Option<(&'static str, gossamer_types::Ty)> {
-        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-        Some(match joined {
-            "image::new" => ("gos_rt_image_new", i64_ty),
-            "image::filled" => ("gos_rt_image_filled", i64_ty),
-            "image::decode_base64" => ("gos_rt_image_decode_base64", i64_ty),
-            "image::width" => ("gos_rt_image_width", i64_ty),
-            "image::height" => ("gos_rt_image_height", i64_ty),
-            "image::pixel" => ("gos_rt_image_pixel", i64_ty),
-            "image::release" => ("gos_rt_image_release", self.tcx.bool_ty()),
-            "image::set_pixel" => ("gos_rt_image_set_pixel", self.tcx.bool_ty()),
-            "image::from_rgba_bytes" => ("gos_rt_image_from_rgba_bytes", i64_ty),
-            "image::to_rgba_bytes" => {
-                let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::U8);
-                (
-                    "gos_rt_image_to_rgba_bytes",
-                    self.tcx.intern(gossamer_types::TyKind::Vec(u8_ty)),
-                )
-            }
-            "image::encode_png_base64" => ("gos_rt_image_encode_png_base64", self.tcx.string_ty()),
-            "image::encode_jpeg_base64" => {
-                ("gos_rt_image_encode_jpeg_base64", self.tcx.string_ty())
-            }
-            _ => return None,
-        })
-    }
-
     /// The class of C-ABI return a Gossamer type is carried in, for the
     /// three distinctions that decide how a caller reads the value: a
     /// two-word carrier, a float register, and nothing at all. The
@@ -2349,6 +2674,7 @@ impl<'a> Builder<'a> {
                 self.tcx.kind_of(rendered_args[0].ty),
                 gossamer_types::TyKind::Int(int)
                     if !matches!(int, gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize)
+                        && !int.is_wide()
             )
         {
             let mut locals = Vec::with_capacity(4);
@@ -2458,6 +2784,32 @@ impl<'a> Builder<'a> {
                 | "gos_rt_crypto_sha512_digest"
                 | "gos_rt_crypto_blake3_digest"
                 | "gos_rt_crypto_hmac_sha256_mac"
+                | "gos_rt_ecdh_agree_raw"
+                | "gos_rt_mlkem_encapsulate_raw"
+                | "gos_rt_mlkem_decapsulate_raw"
+                | "gos_rt_crypto_sha384_digest"
+                | "gos_rt_crypto_sha384_hex"
+                | "gos_rt_crypto_hmac_sha384_mac"
+                | "gos_rt_crypto_hmac_sha384_hex"
+                | "gos_rt_crypto_hmac_sha512_mac"
+                | "gos_rt_crypto_hmac_sha512_hex"
+                | "gos_rt_crypto_hmac_sha3_256_mac"
+                | "gos_rt_crypto_hmac_sha3_256_hex"
+                | "gos_rt_crypto_hmac_sha3_512_mac"
+                | "gos_rt_crypto_hmac_sha3_512_hex"
+                | "gos_rt_crypto_hmac_verify_sha256"
+                | "gos_rt_crypto_hmac_verify_sha384"
+                | "gos_rt_crypto_hmac_verify_sha512"
+                | "gos_rt_crypto_hmac_verify_sha3_256"
+                | "gos_rt_crypto_hmac_verify_sha3_512"
+                | "gos_rt_crypto_insecure_hmac_sha1"
+                | "gos_rt_crypto_insecure_hmac_sha1_hex"
+                | "gos_rt_crypto_insecure_verify_hmac_sha1"
+                | "gos_rt_crypto_ecdsa_der_to_fixed"
+                | "gos_rt_crypto_ecdsa_fixed_to_der"
+                | "gos_rt_crypto_ecdsa_p384_der_to_fixed"
+                | "gos_rt_crypto_ecdsa_p384_fixed_to_der"
+                | "gos_rt_crypto_hkdf_sha384"
                 | "gos_rt_crypto_md5"
                 | "gos_rt_crypto_sha1"
                 | "gos_rt_compress_flate_compress"
@@ -2594,11 +2946,10 @@ impl<'a> Builder<'a> {
             }
             "gos_rt_sync_map_new" => Some("sync::Map"),
             "gos_rt_math_rng_new" => Some("math::rand::Rng"),
-            "gos_rt_field_error_new" => Some("validate::FieldError"),
-            "gos_rt_validate_errors_new" => Some("validate::Errors"),
             "gos_rt_once_new" => Some("sync::Once"),
             "gos_rt_rwlock_new" => Some("sync::RwLock"),
             "gos_rt_shared_new" => Some("sync::Shared"),
+            "gos_rt_runtime_guard_new" => Some("runtime::Guard"),
             "gos_rt_atomic_bool_new" => Some("sync::AtomicBool"),
             "gos_rt_ctx_background" | "gos_rt_ctx_with_cancel" | "gos_rt_ctx_with_timeout" => {
                 Some("context::Context")
@@ -2607,7 +2958,6 @@ impl<'a> Builder<'a> {
             "gos_rt_metrics_gauge_new" => Some("metrics::Gauge"),
             "gos_rt_metrics_histogram_new" => Some("metrics::Histogram"),
             "gos_rt_metrics_registry_new" => Some("metrics::Registry"),
-            "gos_rt_trace_tracer_new" => Some("trace::Tracer"),
             "gos_rt_bytes_builder_new" | "gos_rt_bytes_builder_with_capacity" => {
                 Some("bytes::Builder")
             }
@@ -2620,7 +2970,7 @@ impl<'a> Builder<'a> {
             "gos_rt_fs_file_open" | "gos_rt_fs_file_create" | "gos_rt_fs_file_from_raw" => {
                 Some("fs::File")
             }
-            "gos_rt_fs_temp_file" => Some("fs::temp_file_pair"),
+            "gos_rt_fs_temp_file_raw" => Some("fs::temp_file_pair"),
             "gos_rt_fs_open_options_new" => Some("fs::OpenOptions"),
             "gos_rt_unix_listener_bind" => Some("net::UnixListener"),
             "gos_rt_unix_stream_connect" => Some("net::UnixStream"),

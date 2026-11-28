@@ -2708,7 +2708,7 @@ fn repl_iter_take_rejects_negative_counts() {
 #[test]
 fn repl_rejects_negative_size_arguments_across_stdlib() {
     let out = run_repl(
-        "use std::{image, iter, strings, time}\n\
+        "use std::{iter, strings, time}\n\
          strings::repeat(\"x\", -1)\n\
          strings::splitn(\"a,b\", -1, \",\")\n\
          strings::pad_left(\"x\", -1, ' ')\n\
@@ -2721,7 +2721,6 @@ fn repl_rejects_negative_size_arguments_across_stdlib() {
          let v: Vec<i64> = Vec::with_capacity(-1)\n\
          String::with_capacity(-1)\n\
          let m: Map<String, i64> = Map::with_capacity(-1)\n\
-         image::new(-1, 1)\n\
          time::sleep(-1)\n",
     );
     assert!(out.success, "repl should exit zero; stderr: {}", out.stderr);
@@ -2737,7 +2736,6 @@ fn repl_rejects_negative_size_arguments_across_stdlib() {
         "Vec::with_capacity: capacity must be non-negative",
         "String::with_capacity: capacity must be non-negative",
         "Map::with_capacity: capacity must be non-negative",
-        "image::new: width must be non-negative",
         "time::sleep: duration_ms must be non-negative",
     ] {
         assert!(
@@ -2954,17 +2952,11 @@ fn repl_meta_help_covers_builtin_receiver_types() {
         "%info Option::map -d\n\
          %info Result::map_err -d\n\
          %info AtomicI64::new -d\n\
-         %info validate::Errors::new -d\n\
          %info Option -d\n\
          %info http::Response -d\n",
     );
     assert!(out.success, "repl should exit zero; stderr: {}", out.stderr);
-    for expected in [
-        "Option::map<",
-        "Result::map_err<",
-        "AtomicI64::new(",
-        "validate::Errors::new(",
-    ] {
+    for expected in ["Option::map<", "Result::map_err<", "AtomicI64::new("] {
         assert!(
             out.stdout.contains(expected),
             "missing `{expected}` from builtin receiver metadata output: {}",
@@ -4043,6 +4035,7 @@ fn repl_info_answers_every_language_supplied_trait() {
         ("Add", "fn add(&self, other: Self) -> Self"),
         ("Not", "fn not(&self) -> Self"),
         ("Index", "fn index(&self, index: I) -> T"),
+        ("Drop", "fn drop(&mut self)"),
     ] {
         let out = run_repl(&format!("%i {name}\n"));
         assert!(out.success, "repl should exit zero; stderr: {}", out.stderr);
@@ -4057,11 +4050,10 @@ fn repl_info_answers_every_language_supplied_trait() {
 
 #[test]
 fn repl_info_says_what_to_write_instead_of_a_language_supplied_trait() {
-    let out = run_repl("%i Hash\n%i Drop\n%i Into\n");
+    let out = run_repl("%i Hash\n%i Into\n");
     assert!(out.success, "repl should exit zero; stderr: {}", out.stderr);
     for (name, guidance) in [
         ("Hash", "Hashing is structural and automatic"),
-        ("Drop", "defer"),
         ("Into", "impl From<Source> for"),
     ] {
         assert!(

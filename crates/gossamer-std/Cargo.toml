@@ -98,8 +98,8 @@ unicode-width = { workspace = true }
 # OS sockets/signals/poll/fs primitives (mio, socket2, signal-hook,
 # notify, memmap2, nix), pull an OS RNG (getrandom, uuid,
 # ed25519-dalek, p256, aes-gcm, chacha20poly1305, rand_core), or drive
-# the native HTTP/TLS/QUIC stack (rustls, ureq, h2, tokio, tokio-rustls,
-# gossamer-http3) - none of which build for wasm32-unknown-unknown. The
+# the native HTTP/TLS stack (rustls, ureq, h2, tokio, tokio-rustls) - none
+# of which build for wasm32-unknown-unknown. The
 # stdlib modules that use them are gated out of the wasm build; native
 # (cfg-not-wasm always true) keeps the identical set.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -125,15 +125,10 @@ zstd = "0.14"
 notify = "8"
 memmap2 = "0.9"
 
-# RSA verify / sign for `std::jwt` and constant-time crypto primitives.
-ring = "0.17"
-
 # HTTP/2 stack (h2 crate, io-util traits only).
 h2 = "0.4"
 tokio = { version = "1", default-features = false, features = ["io-util"] }
 
-# HTTP/3 stack (`std::http_h3`) - QUIC + h3 engine.
-gossamer-http3 = { workspace = true }
 
 # OS-RNG-backed crypto (`std::crypto`) and UUID v4/v7 generation.
 # argon2/pbkdf2/scrypt pull a salt RNG (getrandom) via `password-hash`.
@@ -150,12 +145,6 @@ uuid = { version = "1", features = ["v4", "v7"] }
 
 # HTTP client surface (`std::http::Client`). HTTPS, redirects, pool.
 ureq = { workspace = true, features = ["cookies", "json"] }
-
-# Raster image model and PNG/JPEG codecs (`std::image`). Keep the codecs
-# narrowly scoped instead of enabling a broad image-format umbrella.
-png = { workspace = true }
-jpeg-decoder = "0.3"
-jpeg-encoder = { workspace = true }
 
 # POSIX user / group lookup (`std::os::user`).
 nix = { version = "0.31", default-features = false, features = ["user", "fs", "process", "signal"] }

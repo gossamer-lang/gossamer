@@ -72,11 +72,63 @@ use super::*;
 pub const MATH_RAND: StdModule = StdModule {
     path: "std::math::rand",
     summary: "Deterministic pseudo-random number generation.",
-    items: &[StdItem {
-        name: "Rng",
-        kind: StdItemKind::Type,
-        doc: "SplitMix64-based RNG.",
-    }],
+    items: &[
+        StdItem {
+            name: "Rng",
+            kind: StdItemKind::Type,
+            doc: "SplitMix64-based RNG.",
+        },
+        StdItem {
+            name: "range",
+            kind: StdItemKind::Function,
+            doc: "`range(rng, low, high) -> i64`: a uniform integer in `low..high`, unbiased (Go's `rand.IntN`, Python's `randrange`).",
+        },
+        StdItem {
+            name: "range_f64",
+            kind: StdItemKind::Function,
+            doc: "`range_f64(rng, low, high) -> f64`: a uniform float in `low..high`.",
+        },
+        StdItem {
+            name: "chance",
+            kind: StdItemKind::Function,
+            doc: "`chance(rng, p) -> bool`: true with probability `p`.",
+        },
+        StdItem {
+            name: "choose",
+            kind: StdItemKind::Function,
+            doc: "`choose(rng, xs) -> Option<T>`: one element at random; `None` for an empty sequence.",
+        },
+        StdItem {
+            name: "shuffle",
+            kind: StdItemKind::Function,
+            doc: "`shuffle(rng, &mut xs)`: puts `xs` in a uniformly random order (Fisher-Yates).",
+        },
+        StdItem {
+            name: "sample",
+            kind: StdItemKind::Function,
+            doc: "`sample(rng, xs, k) -> Vec<T>`: `k` distinct elements at random, in the order drawn (Python's `random.sample`).",
+        },
+        StdItem {
+            name: "weighted",
+            kind: StdItemKind::Function,
+            doc: "`weighted(rng, weights) -> Option<i64>`: an index drawn with probability proportional to its weight; `None` when no weight is positive or one is negative.",
+        },
+        StdItem {
+            name: "normal",
+            kind: StdItemKind::Function,
+            doc: "`normal(rng, mean, stdev) -> f64`: a normally distributed value (Box-Muller).",
+        },
+        StdItem {
+            name: "exponential",
+            kind: StdItemKind::Function,
+            doc: "`exponential(rng, rate) -> f64`: an exponentially distributed value with the given rate.",
+        },
+        StdItem {
+            name: "from_os",
+            kind: StdItemKind::Function,
+            doc: "`from_os() -> Result<Rng, errors::Error>`: a generator seeded from the host's random source.",
+        },
+    ],
 };
 
 pub const MATH: StdModule = StdModule {
@@ -84,9 +136,89 @@ pub const MATH: StdModule = StdModule {
     summary: "Mathematical constants and f64 functions (Go's math package shape).",
     items: &[
         StdItem {
+            name: "mean",
+            kind: StdItemKind::Function,
+            doc: "`mean(xs) -> Option<f64>`: the arithmetic mean, with a compensated sum; `None` for no data.",
+        },
+        StdItem {
+            name: "median",
+            kind: StdItemKind::Function,
+            doc: "`median(xs) -> Option<f64>`: the middle value, or the mean of the two middle values; `None` for no data.",
+        },
+        StdItem {
+            name: "variance",
+            kind: StdItemKind::Function,
+            doc: "`variance(xs) -> Option<f64>`: the sample variance (divides by n - 1), two-pass; `None` below two values.",
+        },
+        StdItem {
+            name: "stdev",
+            kind: StdItemKind::Function,
+            doc: "`stdev(xs) -> Option<f64>`: the sample standard deviation.",
+        },
+        StdItem {
+            name: "pvariance",
+            kind: StdItemKind::Function,
+            doc: "`pvariance(xs) -> Option<f64>`: the population variance (divides by n).",
+        },
+        StdItem {
+            name: "pstdev",
+            kind: StdItemKind::Function,
+            doc: "`pstdev(xs) -> Option<f64>`: the population standard deviation.",
+        },
+        StdItem {
+            name: "quantiles",
+            kind: StdItemKind::Function,
+            doc: "`quantiles(xs, n = 4) -> Option<Vec<f64>>`: the n - 1 cut points dividing the data into n groups, Python's exclusive method; `None` below two values.",
+        },
+        StdItem {
+            name: "erf",
+            kind: StdItemKind::Function,
+            doc: "`erf(x) -> f64`: the error function.",
+        },
+        StdItem {
+            name: "erfc",
+            kind: StdItemKind::Function,
+            doc: "`erfc(x) -> f64`: the complementary error function, `1 - erf(x)` without its cancellation.",
+        },
+        StdItem {
+            name: "gamma",
+            kind: StdItemKind::Function,
+            doc: "`gamma(x) -> f64`: the gamma function; exact for whole numbers up to 21, NaN at zero and the negative integers.",
+        },
+        StdItem {
+            name: "lgamma",
+            kind: StdItemKind::Function,
+            doc: "`lgamma(x) -> f64`: the natural logarithm of the absolute value of the gamma function.",
+        },
+        StdItem {
+            name: "factorial",
+            kind: StdItemKind::Function,
+            doc: "`factorial(n) -> i64`: n!, panicking past `i64::MAX`.",
+        },
+        StdItem {
+            name: "comb",
+            kind: StdItemKind::Function,
+            doc: "`comb(n, k) -> i64`: the number of ways to choose k of n without order.",
+        },
+        StdItem {
+            name: "perm",
+            kind: StdItemKind::Function,
+            doc: "`perm(n, k) -> i64`: the number of ways to choose k of n in order.",
+        },
+        StdItem {
+            name: "Complex",
+            kind: StdItemKind::Type,
+            doc: "A complex number of two `f64` parts: `Complex::new(re, im)`, `from_polar(r, theta)`, `+ - * /` and unary `-`, `==`, `abs` (the modulus), `arg`, `conj`, `exp`, `ln`, `sqrt`, `powf`. Prints as `1+2i`.",
+        },
+        StdItem {
             name: "Decimal",
             kind: StdItemKind::Type,
             doc: "Exact decimal number (`0.1 + 0.2 == 0.3`): `Decimal::parse(text)` (a `Result`), `Decimal::from_i64(n)`, `+ - * /` and unary `-`, comparison and ordering, `round(digits)` and `div_scaled(other, digits)` rounding half to even, `abs`, `is_zero`, `to_f64`; `/` keeps 28 digits after the point. Prints in its shortest exact form.",
+        },
+        StdItem {
+            name: "Rational",
+            kind: StdItemKind::Type,
+            doc: "Exact rational number: `Rational::new(numerator, denominator)` over `big::Int`s, `from_i64`, `from_int`, `from_decimal`, `from_f64(x)` (the float's exact value; an `Err` for NaN and the infinities), and `Rational::parse(text)`, which reads `\"3/4\"`, `\"-3/4\"`, and decimal text such as `\"1.25\"` (a `Result`). `+ - * /` and unary `-`, comparison and ordering, `numerator()` and `denominator()` (lowest terms, the denominator positive; both grow without bound under arithmetic), `abs`, `recip`, `is_zero`, `is_integer`, and `to_f64`, the nearest float with ties to even. A zero denominator, from `new`, `/`, or `recip`, panics as integer division by zero does. Prints as `n/d`, or `n` when the denominator is 1.",
         },
         StdItem {
             name: "PI",

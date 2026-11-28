@@ -1,0 +1,34 @@
+// Checked casts and `try_into` at the edges of `i128` and `u128`: a value
+// that fits converts, `as%` keeps the low bits or saturates a float, and a
+// `u128` past `i128::MAX` makes `as` panic with the value it held. The
+// constant bounds cast at their full width, written in place or bound first.
+use std::{env, errors}
+
+fn wide_err(v: u128) -> bool {
+    let r: Result<i128, errors::Error> = v.try_into()
+    r.is_err()
+}
+
+fn narrow_ok(v: i128) -> bool {
+    let r: Result<u128, errors::Error> = v.try_into()
+    r.is_ok()
+}
+
+fn main() {
+    let n = env::args().len()
+    let top = i128::MAX
+    let big: u128 = u128::MAX - n as u128
+    let half: u128 = (top as u128) - n as u128
+    let low: i128 = i128::MIN + n as i128
+    println(f"{half as i128} {low as f64} {big as f64}")
+    println(f"{big as% i128} {wide_err(big)} {wide_err(half)} {narrow_ok(low)} {narrow_ok(top)}")
+    let f = 1.7e38 + n as f64
+    println(f"{f as u128} {(f * 2.0) as% u128}")
+    println(f"{(big >> 1) as i128}")
+    for _ in 0..2 {
+        println(f"{i128::MAX as f64} {i128::MIN as f64} {u128::MAX as f64} {i128::MAX as u128}")
+        let past = 3.4e38 + n as f64
+        println(f"{-past as% i128} {past as% i128} {past as% u128} {-past as% u128}")
+    }
+    println(big as i128)
+}

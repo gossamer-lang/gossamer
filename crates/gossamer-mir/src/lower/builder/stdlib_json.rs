@@ -95,6 +95,8 @@ impl<'a> Builder<'a> {
         let helper = match self.tcx.kind_of(ty) {
             TyKind::JsonValue => return Some(arg_local),
             TyKind::Char => return self.build_json_value(arg_local, ty, span),
+            TyKind::Int(gossamer_types::IntTy::I128) => "gos_rt_json_value_i128",
+            TyKind::Int(gossamer_types::IntTy::U128) => "gos_rt_json_value_u128",
             TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize) => {
                 "gos_rt_json_value_uint"
             }
@@ -434,6 +436,10 @@ impl<'a> Builder<'a> {
     ) -> Option<Local> {
         let (rt_name, ret_ty) = match last {
             "parse" => ("gos_rt_json_parse", self.result_json_value_error_adt_ty()),
+            "__parse_with" => (
+                "gos_rt_json_parse_with",
+                self.result_json_value_error_adt_ty(),
+            ),
             "encode" => ("gos_rt_json_render", self.tcx.string_ty()),
             "encode_pretty" => ("gos_rt_json_render_pretty", self.tcx.string_ty()),
             "is_valid" => ("gos_rt_json_valid", self.tcx.bool_ty()),
@@ -576,6 +582,8 @@ impl<'a> Builder<'a> {
             let json_local = match self.tcx.kind_of(flat_fty) {
                 TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::String => {
                     let json_helper = match self.tcx.kind_of(flat_fty) {
+                        TyKind::Int(gossamer_types::IntTy::I128) => "gos_rt_json_value_i128",
+                        TyKind::Int(gossamer_types::IntTy::U128) => "gos_rt_json_value_u128",
                         TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize) => {
                             "gos_rt_json_value_uint"
                         }
@@ -782,8 +790,11 @@ impl<'a> Builder<'a> {
             self.tcx.kind_of(elem_ty),
             TyKind::Adt { def, .. } if self.tcx.struct_field_tys(*def).is_some()
         );
+        // A 128-bit element is its two slots, read whole.
         let reader = if inline_aggregate {
             "gos_rt_vec_get_ptr"
+        } else if self.tcx.is_wide_int(elem_ty) {
+            "gos_rt_vec_get_i128"
         } else {
             "gos_rt_vec_get_i64"
         };
@@ -921,6 +932,8 @@ impl<'a> Builder<'a> {
             }
             TyKind::Int(_) | TyKind::Bool | TyKind::Float(_) | TyKind::String => {
                 let helper = match self.tcx.kind_of(ty) {
+                    TyKind::Int(gossamer_types::IntTy::I128) => "gos_rt_json_value_i128",
+                    TyKind::Int(gossamer_types::IntTy::U128) => "gos_rt_json_value_u128",
                     TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize) => {
                         "gos_rt_json_value_uint"
                     }
@@ -1106,9 +1119,27 @@ impl<'a> Builder<'a> {
         });
         self.set_current(next);
 
+        let lends = matches!(
+            value_reader,
+            "gos_rt_map_get_str_i64" | "gos_rt_map_get_i64"
+        );
+        if lends && !self.is_lent_handle_ty(value_ty) {
+            self.share_lent_fields(value_local, value_ty, span);
+        }
         let member = self
             .build_json_value(value_local, value_ty, span)
             .unwrap_or_else(|| self.build_json_null(span));
+        // The word readers lend the stored value: the map keeps its share. A
+        // handle's local takes the sentinel, so the drop pass releases no
+        // share it never took; an aggregate's took shares of its fields above.
+        // The string readers answer a copy the local owns.
+        if lends && self.is_lent_handle_ty(value_ty) {
+            self.emit_assign(
+                Place::local(value_local),
+                Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                span,
+            );
+        }
 
         for pushed in [key_local, member] {
             let push_dest = self.fresh(unit_ty);
@@ -1192,6 +1223,45 @@ impl<'a> Builder<'a> {
         );
 
         Some(json_obj)
+    }
+
+    /// Takes a copy of each container field of the aggregate in `local`, which
+    /// a map lent. A container field (a map, a set, a deque, a heap, a
+    /// `json::Value`) carries no count of its own, so the local's drop frees
+    /// its storage; the copy is what that drop frees. Counted fields are
+    /// released only by their holder, so they need nothing here.
+    pub(crate) fn share_lent_fields(&mut self, local: Local, ty: gossamer_types::Ty, span: Span) {
+        let unit_ty = self.tcx.unit();
+        for (path, kind) in crate::lower::aggregate_rc_field_paths(self.tcx, ty) {
+            let Some((clone, _)) = kind.value_container_helpers() else {
+                continue;
+            };
+            let dest = self.fresh(unit_ty);
+            self.emit_assign(
+                Place::local(dest),
+                Rvalue::CallIntrinsic {
+                    name: clone,
+                    args: vec![Operand::Copy(Place {
+                        local,
+                        projection: path
+                            .iter()
+                            .map(|i| crate::ir::Projection::Field(*i))
+                            .collect(),
+                    })],
+                },
+                span,
+            );
+        }
+    }
+
+    /// Whether a value of `ty` read out of a map is one handle word the drop
+    /// pass frees, so a zero sentinel in its local releases nothing.
+    pub(crate) fn is_lent_handle_ty(&self, ty: gossamer_types::Ty) -> bool {
+        use gossamer_types::TyKind;
+        matches!(
+            self.tcx.kind_of(ty),
+            TyKind::HashMap { .. } | TyKind::Vec(_)
+        )
     }
 
     /// Builds the `json::Value` array a tuple renders as. Its elements may
@@ -1348,6 +1418,8 @@ impl<'a> Builder<'a> {
             TyKind::JsonValue => arg_local,
             TyKind::Int(_) | TyKind::Bool | TyKind::Float(_) | TyKind::String => {
                 let helper = match self.tcx.kind_of(value_ty) {
+                    TyKind::Int(gossamer_types::IntTy::I128) => "gos_rt_json_value_i128",
+                    TyKind::Int(gossamer_types::IntTy::U128) => "gos_rt_json_value_u128",
                     TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize) => {
                         "gos_rt_json_value_uint"
                     }
@@ -1379,6 +1451,9 @@ impl<'a> Builder<'a> {
                     TyKind::String => 2,
                     TyKind::Bool => 3,
                     TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize) => 4,
+                    // A 128-bit element is two slots, which the typed encoder
+                    // writes as a number or a string of digits.
+                    TyKind::Int(int) if int.is_wide() => return None,
                     // Int, or an unresolved `Var` left by the typer on
                     // an integer array literal (`encode([1, 2, 3])`):
                     // default to the i64 slot reading. Numeric literals

@@ -1699,13 +1699,6 @@ const STDLIB_SUPPORT: &[StdlibSupport] = &[
         "args, env, exit, read_file, write_file, mkdir, mkdir_all, read_dir.",
     ),
     item(
-        "std::os::exec",
-        Coverage::Full,
-        Coverage::Full,
-        Coverage::Full,
-        "Command builder + output / status / spawn / kill / wait. Wired through interp builtins, MIR lower, and C ABI.",
-    ),
-    item(
         "std::os::signal",
         Coverage::Full,
         Coverage::Full,
@@ -1745,7 +1738,7 @@ const STDLIB_SUPPORT: &[StdlibSupport] = &[
         Coverage::Full,
         Coverage::Full,
         Coverage::Full,
-        "HTTP/1.1 + HTTP/2 server + client (push + trailers); HTTP/3 via std::http_h3.",
+        "HTTP/1.1 + HTTP/2 server + client (push + trailers).",
     ),
     item(
         "std::encoding::json",

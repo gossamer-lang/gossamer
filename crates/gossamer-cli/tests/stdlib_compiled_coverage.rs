@@ -41,16 +41,16 @@ const DISPATCH_SOURCES: &[&str] = &[
 /// function must not be added here to silence the gate - wire its MIR
 /// dispatch instead.
 const COMPILED_VIA_SPECIAL_MECHANISM: &[&str] = &[
+    // `render` is rewritten in HIR (`template_render`) to encode its data at
+    // the call and hand the JSON to a wrapper over the template registry.
+    "html::template::render",
+    "text::template::render",
     // Directory walks and process runs answer real structs, so their spellings
     // are rewritten to injected Gossamer wrappers (`stdlib_wrappers.rs`) that
     // fold the `__gos_*_raw` leaf each tier implements, rather than matching a
     // per-function dispatch pattern.
-    "exec::pipeline_run",
-    "exec::run",
     "fs::read_dir",
     "fs::walk_dir",
-    "os::exec::pipeline_run",
-    "os::exec::run",
     "path::walk",
     "process::pipeline_run",
     "process::run",
@@ -58,8 +58,6 @@ const COMPILED_VIA_SPECIAL_MECHANISM: &[&str] = &[
     // `spawn_piped` builds a `process::Command` with every stream piped, in
     // the injected wrapper source, over the `gos_rt_command_*` entries every
     // tier calls as foreign functions.
-    "exec::spawn_piped",
-    "os::exec::spawn_piped",
     "process::spawn_piped",
     // The middleware wrappers are lowered by `lower_middleware_kind`
     // (`stdlib_free.rs`), which binds the inner handler's serve address into a
@@ -149,8 +147,9 @@ const COMPILED_VIA_SPECIAL_MECHANISM: &[&str] = &[
     "encoding::pem::encode",
     "fs::metadata",
     // `FS_TEMP_DIR_WRAPPERS` carries the `parent` default into the
-    // `__gos_fs_temp_dir_raw` leaf.
+    // `__gos_fs_temp_dir_raw` and `__gos_fs_temp_file_raw` leaves.
     "fs::temp_dir",
+    "fs::temp_file",
     // `JSON_ENTRIES_WRAPPERS` walks an object through `json::keys` / `get`.
     "encoding::json::entries",
     "json::entries",
@@ -197,6 +196,12 @@ const COMPILED_VIA_SPECIAL_MECHANISM: &[&str] = &[
     "process::abort",
     "process::exit",
     "process::id",
+    // A `duplicate_keys:` argument rewrites `parse` to this leaf
+    // (`rewrite_duplicate_keys` in `parse_rewrites.rs`), and the TLS server
+    // call is rewritten onto its handler-taking leaf (`rewrite_serve_tls_config`).
+    "encoding::json::__parse_with",
+    "http::serve_tls_config",
+    "json::__parse_with",
     // Channel construction destructured at the binding site.
     "channel::new",
     "channel::unbounded",
@@ -260,6 +265,40 @@ fn is_free_function(path: &str) -> bool {
     })
 }
 
+/// The `(module, item)` pairs of the parser's `MANGLED_STDLIB_NAMES` table.
+/// A call spelled that way is rewritten to an injected Gossamer wrapper,
+/// which every tier compiles as ordinary source over its runtime leaves.
+fn mangled_wrapper_pairs(root: &std::path::Path) -> BTreeSet<(String, String)> {
+    let rel = "crates/gossamer-parse/src/autoderive/parse_rewrites.rs";
+    let text = source_texts(root, rel).concat();
+    let start = text
+        .find("const MANGLED_STDLIB_NAMES")
+        .unwrap_or_else(|| panic!("{rel} no longer declares MANGLED_STDLIB_NAMES"));
+    let table = &text[start
+        ..text[start..]
+            .find("];")
+            .map_or(text.len(), |end| start + end)];
+    table
+        .lines()
+        .filter_map(|line| {
+            let row = line.trim().strip_prefix("(\"")?;
+            let mut cells = row.split('"').step_by(2);
+            let module = cells.next()?;
+            let item = cells.next()?;
+            Some((module.to_string(), item.to_string()))
+        })
+        .collect()
+}
+
+/// Whether a stdlib path's last two segments name a mangled wrapper.
+fn has_wrapper(path: &str, wrappers: &BTreeSet<(String, String)>) -> bool {
+    let mut segments = path.rsplit("::");
+    match (segments.next(), segments.next()) {
+        (Some(item), Some(module)) => wrappers.contains(&(module.to_string(), item.to_string())),
+        _ => false,
+    }
+}
+
 /// Whether a stdlib path reaches a compiled-tier dispatch arm, directly or
 /// through the canonical spelling its call site folds to.
 fn has_compiled_dispatch(path: &str, reachable: &BTreeSet<String>) -> bool {
@@ -313,12 +352,13 @@ fn stdlib_compiled_coverage() {
     for entry in COMPILED_VIA_SPECIAL_MECHANISM {
         reachable.insert((*entry).to_string());
     }
+    let wrappers = mangled_wrapper_pairs(&root);
 
     let vm_only: Vec<&str> = gossamer_resolve::STDLIB_QUALIFIED
         .iter()
         .copied()
         .filter(|p| is_free_function(p))
-        .filter(|p| !has_compiled_dispatch(p, &reachable))
+        .filter(|p| !has_compiled_dispatch(p, &reachable) && !has_wrapper(p, &wrappers))
         .collect();
 
     assert!(

@@ -50,6 +50,30 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize};
 /// [`Goroutine::new`].
 pub struct GosPanic(pub String);
 
+/// Payload of `process::exit(code)` unwinding the calling goroutine: the
+/// deferred expressions of every frame it leaves run on the way out, and the
+/// goroutine's root then ends the process with `code` through the handler
+/// the runtime installs.
+pub struct GosExit(pub i32);
+
+/// What ends the process once an exit has unwound a goroutine.
+static EXIT_HANDLER: std::sync::OnceLock<fn(i32) -> !> = std::sync::OnceLock::new();
+
+/// Installs what ends the process for a [`GosExit`]. The first wins.
+pub fn install_exit_handler(handler: fn(i32) -> !) {
+    let _ = EXIT_HANDLER.set(handler);
+}
+
+/// Ends the process when `payload` is a [`GosExit`] that unwound a
+/// goroutine to its root; any other payload is left to the caller.
+fn exit_on_request(payload: &(dyn std::any::Any + Send)) {
+    if let Some(GosExit(code)) = payload.downcast_ref::<GosExit>()
+        && let Some(handler) = EXIT_HANDLER.get()
+    {
+        handler(*code);
+    }
+}
+
 /// Set to `true` whenever any spawned goroutine has panicked.
 /// Tests / runtime status helpers read this flag via
 /// [`any_goroutine_panicked`] to assert that long-running services
@@ -403,6 +427,7 @@ impl Goroutine {
             // assert clean execution.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(main));
             if let Err(payload) = result {
+                exit_on_request(payload.as_ref());
                 // The panic's `error[GX0005]` report was already printed
                 // eagerly by `gos_rt_panic` for an unobserved goroutine (and
                 // suppressed for a joinable one, whose `join()` handle delivers
@@ -515,7 +540,8 @@ impl Goroutine {
             {
                 drop_word(local);
             }
-            if result.is_err() {
+            if let Err(payload) = &result {
+                exit_on_request(payload.as_ref());
                 GOROUTINE_PANICKED.store(true, Ordering::Release);
             }
             self.done = true;

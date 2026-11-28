@@ -1,0 +1,15 @@
+// A `CivilTime` literal may leave `nanosecond`, `offset_seconds`, and
+// `weekday` out: `resolve` reads the date and time fields alone.
+use std::time
+
+fn main() {
+    let ny = time::Location::lookup("America/New_York").unwrap()
+    let spring = time::CivilTime { year: 2024, month: 3, day: 10, hour: 2, minute: 30, second: 0 }
+    println(f"{ny.resolve(spring).unwrap()}")
+    let fall = time::CivilTime { year: 2024, month: 11, day: 3, hour: 1, minute: 30, second: 0 }
+    println(f"{ny.resolve(fall).unwrap()}")
+    let noon = time::CivilTime { year: 2024, month: 6, day: 1, hour: 12, minute: 0, second: 0 }
+    println(f"{ny.resolve(noon).unwrap()}")
+    let back = ny.civil(1717257600000).unwrap()
+    println(f"{back.year}-{back.month}-{back.day} {back.hour}h offset {back.offset_seconds} weekday {back.weekday}")
+}

@@ -587,11 +587,13 @@ fn lower_inline_result_carrier_call(
                         let carrier_meta = match arg {
                             Operand::Copy(place) if place.projection.is_empty() => {
                                 let ty = body.local_ty(place.local);
+                                // A 128-bit integer payload is boxed into its
+                                // counted copy the same way.
                                 let is_carrier = matches!(
                                     tcx.kind_of(ty),
                                     TyKind::Adt { def, .. }
                                         if def.local == u32::MAX || def.local == u32::MAX - 1
-                                );
+                                ) || tcx.is_wide_int(ty);
                                 let structural = format!("gos_rc_meta_boxaggr_{}", ty.as_u32());
                                 let carrier_box = format!("gos_rc_meta_carrierbox_{}", ty.as_u32());
                                 is_carrier
@@ -690,7 +692,7 @@ fn lower_inline_result_carrier_call(
                     Some(types::I128),
                     intrinsics,
                 )?,
-                None => builder.ins().iconst(types::I128, 0),
+                None => super::lowering_rvalue::int_const(builder, types::I128, 0),
             };
             let carrier = coerce_arg_to(builder, carrier, types::I128)?;
             builder.ins().ireduce(types::I64, carrier)
@@ -707,54 +709,80 @@ fn lower_inline_result_carrier_call(
                     Some(types::I128),
                     intrinsics,
                 )?,
-                None => builder.ins().iconst(types::I128, 0),
+                None => super::lowering_rvalue::int_const(builder, types::I128, 0),
             };
             let carrier = coerce_arg_to(builder, carrier, types::I128)?;
             let (_disc, payload) = builder.ins().isplit(carrier);
-            // A payload read out of a carrier's box takes the words into its
-            // own slot: the destination holds shares of its own and gives them
-            // back on its next overwrite, which may come after the box is gone,
-            // and the map-field helpers must reach the copy rather than the box.
+            // A 128-bit payload is boxed, and the word is the box's address;
+            // `None` carries a null word, which reads as zero.
             if name == "gos_rt_result_payload"
-                && destination.projection.is_empty()
-                && intrinsics.stack_slotted.contains(&destination.local)
-                && !super::lowering_stmt_term::storage_leaves_through_return(
-                    body,
-                    intrinsics,
-                    destination.local,
-                )
-                && super::lowering_stmt_term::payload_takes_own_storage(
-                    tcx,
-                    body,
-                    destination.local,
-                )
+                && tcx.is_wide_int(resolve_place_ty(tcx, body, destination))
             {
-                if super::ty_layout::type_is_zero_sized(tcx, body.local_ty(destination.local)) {
-                    return Ok(true);
-                }
                 let ptr_ty = module.target_config().pointer_type();
-                let slots =
-                    super::ty_layout::type_slot_count(tcx, body.local_ty(destination.local)).max(1);
-                let dst_var = locals
-                    .get(&destination.local)
-                    .copied()
-                    .ok_or_else(|| anyhow!("payload destination has no slot"))?;
-                let dst_raw = builder.use_var(dst_var);
-                let dst_ptr = coerce_arg_to(builder, dst_raw, ptr_ty)?;
-                let src_ptr = coerce_arg_to(builder, payload, ptr_ty)?;
-                for slot_idx in 0..slots {
-                    let off = ir::immediates::Offset32::new((slot_idx as i32) * 8);
-                    let word =
+                let boxed = builder.create_block();
+                let join = builder.create_block();
+                builder.append_block_param(join, types::I128);
+                let zero = super::lowering_rvalue::int_const(builder, types::I128, 0);
+                builder
+                    .ins()
+                    .brif(payload, boxed, &[], join, &[ir::BlockArg::Value(zero)]);
+                builder.switch_to_block(boxed);
+                builder.seal_block(boxed);
+                let addr = coerce_arg_to(builder, payload, ptr_ty)?;
+                let value = builder
+                    .ins()
+                    .load(types::I128, MemFlagsData::trusted(), addr, 0);
+                builder.ins().jump(join, &[ir::BlockArg::Value(value)]);
+                builder.switch_to_block(join);
+                builder.seal_block(join);
+                builder.block_params(join)[0]
+            } else {
+                // A payload read out of a carrier's box takes the words into its
+                // own slot: the destination holds shares of its own and gives them
+                // back on its next overwrite, which may come after the box is gone,
+                // and the map-field helpers must reach the copy rather than the box.
+                if name == "gos_rt_result_payload"
+                    && destination.projection.is_empty()
+                    && intrinsics.stack_slotted.contains(&destination.local)
+                    && !super::lowering_stmt_term::storage_leaves_through_return(
+                        body,
+                        intrinsics,
+                        destination.local,
+                    )
+                    && super::lowering_stmt_term::payload_takes_own_storage(
+                        tcx,
+                        body,
+                        destination.local,
+                    )
+                {
+                    if super::ty_layout::type_is_zero_sized(tcx, body.local_ty(destination.local)) {
+                        return Ok(true);
+                    }
+                    let ptr_ty = module.target_config().pointer_type();
+                    let slots =
+                        super::ty_layout::type_slot_count(tcx, body.local_ty(destination.local))
+                            .max(1);
+                    let dst_var = locals
+                        .get(&destination.local)
+                        .copied()
+                        .ok_or_else(|| anyhow!("payload destination has no slot"))?;
+                    let dst_raw = builder.use_var(dst_var);
+                    let dst_ptr = coerce_arg_to(builder, dst_raw, ptr_ty)?;
+                    let src_ptr = coerce_arg_to(builder, payload, ptr_ty)?;
+                    for slot_idx in 0..slots {
+                        let off = ir::immediates::Offset32::new((slot_idx as i32) * 8);
+                        let word =
+                            builder
+                                .ins()
+                                .load(types::I64, MemFlagsData::trusted(), src_ptr, off);
                         builder
                             .ins()
-                            .load(types::I64, MemFlagsData::trusted(), src_ptr, off);
-                    builder
-                        .ins()
-                        .store(MemFlagsData::trusted(), word, dst_ptr, off);
+                            .store(MemFlagsData::trusted(), word, dst_ptr, off);
+                    }
+                    return Ok(true);
                 }
-                return Ok(true);
+                payload
             }
-            payload
         }
         "gos_rt_result_payload_f64" => {
             let carrier = match args.first() {
@@ -768,7 +796,7 @@ fn lower_inline_result_carrier_call(
                     Some(types::I128),
                     intrinsics,
                 )?,
-                None => builder.ins().iconst(types::I128, 0),
+                None => super::lowering_rvalue::int_const(builder, types::I128, 0),
             };
             let carrier = coerce_arg_to(builder, carrier, types::I128)?;
             let (_disc, payload) = builder.ins().isplit(carrier);
@@ -809,7 +837,7 @@ pub(super) fn lower_key_by_address(
         _ => None,
     };
     let spill_bytes = key_ty.and_then(|ty| {
-        if is_carrier_ty(tcx, ty) {
+        if is_carrier_ty(tcx, ty) || tcx.is_wide_int(ty) {
             Some(16)
         } else if matches!(
             tcx.kind_of(ty),
@@ -888,6 +916,114 @@ pub(super) fn lower_elem_by_address(
     Ok(slot_addr)
 }
 
+/// A 128-bit `min` / `max` / `clamp` as compares and selects at 128 bits,
+/// unsigned for a `u128`; a `clamp` whose bounds are out of order raises the
+/// panic every tier raises.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the call-lowering context every runtime-call lowering takes"
+)]
+fn lower_wide_bound(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    locals: &mut HashMap<Local, Variable>,
+    body: &Body,
+    tcx: &TyCtxt,
+    args: &[Operand],
+    intrinsics: &mut IntrinsicContext,
+    destination: &gossamer_mir::Place,
+    name: &'static str,
+) -> Result<()> {
+    let unsigned = matches!(
+        tcx.kind_of(resolve_place_ty(tcx, body, destination)),
+        TyKind::Int(gossamer_types::IntTy::U128)
+    );
+    let mut values = Vec::with_capacity(args.len());
+    for arg in args {
+        let v = lower_operand(
+            module,
+            builder,
+            locals,
+            body,
+            tcx,
+            arg,
+            Some(types::I128),
+            intrinsics,
+        )?;
+        values.push(coerce_arg_to(builder, v, types::I128)?);
+    }
+    let (less, greater) = if unsigned {
+        (IntCC::UnsignedLessThan, IntCC::UnsignedGreaterThan)
+    } else {
+        (IntCC::SignedLessThan, IntCC::SignedGreaterThan)
+    };
+    // A choice between two 128-bit values is a branch: the mid-end folds a
+    // compare-and-select into `smin` / `smax`, which no backend selects at
+    // 128 bits.
+    let choose =
+        |builder: &mut FunctionBuilder<'_>, cond: ir::Value, yes: ir::Value, no: ir::Value| {
+            let join = builder.create_block();
+            builder.append_block_param(join, types::I128);
+            builder.ins().brif(
+                cond,
+                join,
+                &[ir::BlockArg::Value(yes)],
+                join,
+                &[ir::BlockArg::Value(no)],
+            );
+            builder.switch_to_block(join);
+            builder.seal_block(join);
+            builder.block_params(join)[0]
+        };
+    let result = match (name, values.as_slice()) {
+        ("gos_rt_min_i64", [a, b]) => {
+            let pick = builder.ins().icmp(less, *a, *b);
+            choose(builder, pick, *a, *b)
+        }
+        ("gos_rt_max_i64", [a, b]) => {
+            let pick = builder.ins().icmp(greater, *a, *b);
+            choose(builder, pick, *a, *b)
+        }
+        ("gos_rt_clamp_i64", [x, lo, hi]) => {
+            let crossed = builder.ins().icmp(greater, *lo, *hi);
+            let fail = builder.create_block();
+            let ok = builder.create_block();
+            builder.ins().brif(crossed, fail, &[], ok, &[]);
+            builder.switch_to_block(fail);
+            builder.seal_block(fail);
+            let (lo_low, lo_high) = builder.ins().isplit(*lo);
+            let (hi_low, hi_high) = builder.ins().isplit(*hi);
+            let flag = builder.ins().iconst(types::I64, i64::from(unsigned));
+            emit_rt_call_by_name(
+                module,
+                builder,
+                intrinsics,
+                "gos_rt_clamp_bounds_wide",
+                &[lo_low, lo_high, hi_low, hi_high, flag],
+            )?;
+            builder.ins().trap(ir::TrapCode::user(4).unwrap());
+            builder.switch_to_block(ok);
+            builder.seal_block(ok);
+            let below = builder.ins().icmp(less, *x, *lo);
+            let raised = choose(builder, below, *lo, *x);
+            let above = builder.ins().icmp(greater, raised, *hi);
+            choose(builder, above, *hi, raised)
+        }
+        _ => bail!(
+            "{name} on 128-bit operands takes {} arguments",
+            values.len()
+        ),
+    };
+    define_var_to(
+        builder,
+        locals,
+        &intrinsics.body_cl_types,
+        destination.local,
+        result,
+    );
+    Ok(())
+}
+
 pub(super) fn lower_generic_rt_call(
     module: &mut dyn Module,
     builder: &mut FunctionBuilder<'_>,
@@ -899,6 +1035,23 @@ pub(super) fn lower_generic_rt_call(
     destination: &gossamer_mir::Place,
     name: &'static str,
 ) -> Result<()> {
+    if matches!(
+        name,
+        "gos_rt_min_i64" | "gos_rt_max_i64" | "gos_rt_clamp_i64"
+    ) && tcx.is_wide_int(resolve_place_ty(tcx, body, destination))
+    {
+        return lower_wide_bound(
+            module,
+            builder,
+            locals,
+            body,
+            tcx,
+            args,
+            intrinsics,
+            destination,
+            name,
+        );
+    }
     if lower_inline_result_carrier_call(
         module,
         builder,
@@ -934,7 +1087,32 @@ pub(super) fn lower_generic_rt_call(
     let mut arg_values = Vec::with_capacity(params.len());
     let stored_value = map_stored_value_arg(name);
     let mut minted = None;
+    // A 128-bit operand crosses as its low and high words when the row lists
+    // both, the shape every runtime helper that takes one declares.
+    let operand_is_wide = |a: &Operand| match a {
+        Operand::Copy(place) => tcx.is_wide_int(resolve_place_ty(tcx, body, place)),
+        _ => false,
+    };
+    let wide_args = args.iter().filter(|a| operand_is_wide(a)).count();
+    let split_wide = wide_args > 0 && params.len() == args.len() + wide_args;
+    if split_wide {
+        for a in args {
+            let at = arg_values.len();
+            let v = lower_operand(module, builder, locals, body, tcx, a, None, intrinsics)?;
+            if operand_is_wide(a) {
+                let v = coerce_arg_to(builder, v, types::I128)?;
+                let (low, high) = builder.ins().isplit(v);
+                arg_values.push(low);
+                arg_values.push(high);
+            } else {
+                arg_values.push(coerce_arg_to(builder, v, params[at])?);
+            }
+        }
+    }
     for (i, param_ty) in params.iter().enumerate() {
+        if split_wide {
+            break;
+        }
         let v = match args.get(i) {
             Some(a) if i == 1 && gossamer_abi::takes_elem_by_address(name) => {
                 lower_elem_by_address(module, builder, locals, body, tcx, a, intrinsics)?
@@ -983,10 +1161,37 @@ pub(super) fn lower_generic_rt_call(
             }
             _ => v,
         };
+        // A 128-bit value a helper takes by pointer goes as the address of
+        // its two words.
+        let v = if *param_ty == ptr_ty && value_type(v, builder) == types::I128 {
+            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                16,
+                4,
+            ));
+            builder.ins().stack_store(ptr_ty, v, slot, 0);
+            builder.ins().stack_addr(ptr_ty, slot, 0)
+        } else {
+            v
+        };
         let coerced = coerce_arg_to(builder, v, *param_ty)?;
         arg_values.push(coerced);
     }
     let result = emit_win64_rt_call(module, builder, intrinsics, name, params, ret, &arg_values)?;
+    // An element address read into a 128-bit integer is the value it
+    // addresses, as the element's two slots hold it.
+    let result = match result {
+        Some(addr)
+            if ret == Some(ptr_ty) && tcx.is_wide_int(resolve_place_ty(tcx, body, destination)) =>
+        {
+            Some(
+                builder
+                    .ins()
+                    .load(types::I128, MemFlagsData::trusted(), addr, 0),
+            )
+        }
+        other => other,
+    };
     if let Some(blob) = minted {
         release_map_value_copy(module, builder, intrinsics, blob)?;
     }

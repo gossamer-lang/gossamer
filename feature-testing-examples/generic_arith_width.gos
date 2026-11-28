@@ -1,0 +1,21 @@
+// A generic function doing arithmetic on its type parameter checks overflow
+// at the width each call instantiates it with, on every tier: `u8` sums stop
+// at 255 where the same body over `i64` does not.
+fn add<T: Add<Output = T>>(a: T, b: T) -> T { a + b }
+fn neg<T: Neg<Output = T>>(a: T) -> T { -a }
+
+fn main() {
+    println(add(250u8, 5u8))
+    println(add(9223372036854775800, 7))
+    println(add(1.5, 2.25))
+    println(add(18446744073709551000u64, 615u64))
+    println(neg(-5i32))
+    println(add(100i8, 27i8))
+    // A running `u8` total overflows on its fourth step, inside a loop the
+    // JIT compiles.
+    let mut total = 0u8
+    for step in #[100u8, 60u8, 60u8, 60u8] {
+        total = add(total, step)
+        println(total)
+    }
+}

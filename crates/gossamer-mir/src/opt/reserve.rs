@@ -1605,7 +1605,8 @@ fn vec_local_owns_its_storage(
                 if destination.local == local {
                     let fresh = match callee {
                         Operand::Const(ConstValue::Str(name)) => {
-                            gossamer_abi::mints_owned_vec(name) || user_fns.contains(name)
+                            crate::uniqueness::runtime_answers_fresh(name)
+                                || user_fns.contains(name)
                         }
                         Operand::FnRef { .. } => true,
                         _ => false,
@@ -1656,6 +1657,9 @@ fn vec_call_keeps_no_handle(name: &str) -> bool {
             | "gos_rt_vec_get_ptr"
             | "gos_rt_vec_swap_safe"
             | "gos_rt_vec_swap_unchecked"
+            // Record the element layout the vector's own frees walk.
+            | "gos_rt_vec_set_slot_children"
+            | "gos_rt_vec_set_elem_meta"
     )
 }
 

@@ -380,7 +380,7 @@ impl<'tcx> FnBuilder<'tcx> {
             // A user type's `[]` is its `index` method, which the general
             // path below calls; only a built-in sequence takes the fast path.
             HirExprKind::Index { base, index }
-                if matches!(self.tcx.kind(expr.ty), Some(TyKind::Int(_)))
+                if matches!(self.tcx.kind(expr.ty), Some(TyKind::Int(it)) if !it.is_wide())
                     && self.adt_type_name(base.ty).is_none() =>
             {
                 let base_reg = self.compile_expr(base)?;
@@ -574,7 +574,10 @@ impl<'tcx> FnBuilder<'tcx> {
 
     fn compile_expr_inner(&mut self, expr: &HirExpr) -> RuntimeResult<Reg> {
         match &expr.kind {
-            HirExprKind::Literal(lit) => self.compile_literal(lit),
+            HirExprKind::Literal(lit) => match self.wide_int_ty(self.static_ty(expr)) {
+                Some(unsigned) => self.compile_wide_literal(lit, unsigned),
+                None => self.compile_literal(lit),
+            },
             HirExprKind::Path { segments, def, .. } => match self.dispatched_path(expr) {
                 Some(HirExpr {
                     kind:
@@ -1180,11 +1183,69 @@ impl<'tcx> FnBuilder<'tcx> {
         dst
     }
 
+    /// Whether `ty` is `i128` (`Some(false)`) or `u128` (`Some(true)`).
+    pub(crate) fn wide_int_ty(&self, ty: Ty) -> Option<bool> {
+        match self.tcx.kind(self.unwrap_ref(ty)) {
+            Some(TyKind::Int(it)) if it.is_wide() => Some(*it == gossamer_types::IntTy::U128),
+            _ => None,
+        }
+    }
+
+    /// Loads an integer literal written at a 128-bit type.
+    pub(crate) fn compile_wide_literal(
+        &mut self,
+        lit: &HirLiteral,
+        unsigned: bool,
+    ) -> RuntimeResult<Reg> {
+        let HirLiteral::Int(text) = lit else {
+            return self.compile_literal(lit);
+        };
+        let value = super::parse_wide_literal(text, unsigned).ok_or_else(|| {
+            RuntimeError::Type(format!(
+                "integer literal `{text}` does not fit its 128-bit type"
+            ))
+        })?;
+        let key = match &value {
+            Value::Wide(_) | Value::WideInline(..) => ConstKey::Wide(
+                value
+                    .wide_int()
+                    .unwrap_or(crate::value::wide::WideInt::I(0)),
+            ),
+            Value::Uint(n) => ConstKey::String(format!("__wide_uint_{n}")),
+            Value::Int(n) => ConstKey::Int(*n),
+            _ => unreachable!("a 128-bit literal is an integer value"),
+        };
+        let idx = self.const_idx(key, value);
+        let dst = self.alloc_reg();
+        self.emit(Op::LoadConst { dst, idx });
+        Ok(dst)
+    }
+
+    /// A pattern's literal, read at the width of the value it matches: a
+    /// 128-bit one holds bits no 64-bit constant does.
+    pub(crate) fn compile_pattern_literal(
+        &mut self,
+        lit: &HirLiteral,
+        ty: Ty,
+    ) -> RuntimeResult<Reg> {
+        match self.wide_int_ty(ty) {
+            Some(unsigned) => self.compile_wide_literal(lit, unsigned),
+            None => self.compile_literal(lit),
+        }
+    }
+
     pub(crate) fn compile_literal_ex(
         &mut self,
         lit: &HirLiteral,
-        _ty: Ty,
+        ty: Ty,
     ) -> RuntimeResult<TypedReg> {
+        if let Some(unsigned) = self.wide_int_ty(ty) {
+            let reg = self.compile_wide_literal(lit, unsigned)?;
+            return Ok(TypedReg {
+                reg,
+                kind: RegKind::Value,
+            });
+        }
         match lit {
             HirLiteral::Float(text) => {
                 let value = float_literal_value(text);
@@ -1513,6 +1574,32 @@ impl<'tcx> FnBuilder<'tcx> {
             return Ok(false);
         }
         match (name.name.as_str(), args.len()) {
+            // Grown where it lives: read into a register first, the Vec would
+            // be shared, and every push would copy it whole.
+            ("push", 1) => {
+                let Some((root, path)) = self.compile_place_path(receiver, 1)? else {
+                    return Ok(false);
+                };
+                let value = self.compile_expr(&args[0])?;
+                let value = self.stored_value_reg(&args[0], value);
+                let idx = u16::try_from(self.wide_ops.len()).expect("wide_ops index overflow");
+                self.wide_ops
+                    .push(crate::bytecode::WideOp::PlaceVecPush { root, path, value });
+                self.emit(Op::Wide { idx });
+                Ok(true)
+            }
+            ("swap", 2) => {
+                let Some((root, path)) = self.compile_place_path(receiver, 1)? else {
+                    return Ok(false);
+                };
+                let a = self.compile_expr(&args[0])?;
+                let b = self.compile_expr(&args[1])?;
+                let idx = u16::try_from(self.wide_ops.len()).expect("wide_ops index overflow");
+                self.wide_ops
+                    .push(crate::bytecode::WideOp::PlaceVecSwap { root, path, a, b });
+                self.emit(Op::Wide { idx });
+                Ok(true)
+            }
             ("resize", 2) => {
                 let len = self.compile_expr(&args[0])?;
                 let fill = self.compile_expr(&args[1])?;

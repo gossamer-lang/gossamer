@@ -63,7 +63,9 @@ pub(crate) fn shape_char(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -
             It::U16 => 'K',
             It::I32 => 'j',
             It::U32 => 'J',
-            It::I64 | It::U64 | It::Isize | It::Usize | It::I128 | It::U128 => 'i',
+            It::I64 | It::U64 | It::Isize | It::Usize => 'i',
+            // Two words by value, in the register pair a carrier uses.
+            It::I128 | It::U128 => 'r',
         },
         TyKind::Float(f) => match f {
             Ft::F32 => 'g',
@@ -80,7 +82,8 @@ pub(crate) fn shape_char(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -
         // by value. The thunk bridges the two by loading, and this is the
         // shape that says so.
         TyKind::Ref { inner, .. }
-            if crate::lower::carrier_ref::is_two_word_carrier(tcx, *inner) =>
+            if crate::lower::carrier_ref::is_two_word_carrier(tcx, *inner)
+                || tcx.is_wide_int(*inner) =>
         {
             'q'
         }

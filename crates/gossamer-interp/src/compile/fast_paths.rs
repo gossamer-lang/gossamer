@@ -650,6 +650,39 @@ impl<'tcx> FnBuilder<'tcx> {
                     kind: RegKind::I64,
                 })
             }
+            HirBinaryOp::Div | HirBinaryOp::Rem
+                if !cmp_unsigned
+                    && matches!(
+                        overflow_ty,
+                        Some(
+                            gossamer_types::IntTy::I8
+                                | gossamer_types::IntTy::I16
+                                | gossamer_types::IntTy::I32
+                        )
+                    ) =>
+            {
+                let dst = self.alloc_int();
+                let overflow_ty = overflow_ty.unwrap_or(gossamer_types::IntTy::I64);
+                self.emit(if matches!(op, HirBinaryOp::Div) {
+                    Op::CheckedDivI64 {
+                        dst_i: dst,
+                        lhs_i,
+                        rhs_i,
+                        overflow_ty,
+                    }
+                } else {
+                    Op::CheckedRemI64 {
+                        dst_i: dst,
+                        lhs_i,
+                        rhs_i,
+                        overflow_ty,
+                    }
+                });
+                Ok(TypedReg {
+                    reg: dst,
+                    kind: RegKind::I64,
+                })
+            }
             HirBinaryOp::Div => {
                 let dst = self.alloc_int();
                 self.emit(if cmp_unsigned {

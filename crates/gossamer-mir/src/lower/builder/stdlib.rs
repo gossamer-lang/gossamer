@@ -505,6 +505,33 @@ impl<'a> Builder<'a> {
         Some(dest)
     }
 
+    /// `http::__serve_tls_live(addr, config_id, handler)`: serves TLS with
+    /// the live configuration the id names, which the runtime reads for each
+    /// accepted connection.
+    pub(crate) fn lower_http_serve_tls_live(
+        &mut self,
+        addr_expr: &HirExpr,
+        id_expr: &HirExpr,
+        handler_expr: &HirExpr,
+        span: Span,
+    ) -> Option<Local> {
+        let addr_local = self.lower_expr(addr_expr)?;
+        let id_local = self.lower_expr(id_expr)?;
+        let handler_local = self.lower_expr(handler_expr)?;
+        let fn_addr_local = self.handler_fn_addr_local(handler_local, "serve", span)?;
+        let result_ty = self.result_unit_error_adt_ty();
+        let dest = self.terminate_handler_dispatch(
+            "gos_rt_http_serve_tls_live",
+            &[addr_local, id_local],
+            handler_local,
+            fn_addr_local,
+            HandlerReturn::Carrier,
+            result_ty,
+            span,
+        );
+        Some(dest)
+    }
+
     /// Terminates the current block with a handler-dispatch call to
     /// `symbol`: the `leading` arguments, then the handler's environment
     /// and its dispatch address, answering the call's destination local.
@@ -628,6 +655,9 @@ impl<'a> Builder<'a> {
                     crate::lower::helpers::handler_env_wrap_name(&fn_name)
                 } else if let Some(closure_name) = self.local_closure.get(&handler_local).cloned() {
                     self.handler_dispatch_symbol(closure_name)
+                } else if let Some(fn_addr_local) = self.callable_handler_code(handler_local, span)
+                {
+                    return Some(fn_addr_local);
                 } else {
                     let handler_ty = self.locals[handler_local.0 as usize].ty;
                     let handler_struct = self.struct_name_of(handler_ty)?;
@@ -646,36 +676,6 @@ impl<'a> Builder<'a> {
             span,
         );
         Some(fn_addr_local)
-    }
-
-    /// `http_h3::serve(addr, cert_path, key_path, handler)` - HTTP/3
-    /// variant of [`Self::lower_http_serve`]. Threads the TLS keypair
-    /// file paths ahead of the handler env + serve-method address.
-    pub(crate) fn lower_http3_serve(
-        &mut self,
-        addr_expr: &HirExpr,
-        cert_expr: &HirExpr,
-        key_expr: &HirExpr,
-        handler_expr: &HirExpr,
-        _ty: Ty,
-        span: Span,
-    ) -> Option<Local> {
-        let addr_local = self.lower_expr(addr_expr)?;
-        let cert_local = self.lower_expr(cert_expr)?;
-        let key_local = self.lower_expr(key_expr)?;
-        let handler_local = self.lower_expr(handler_expr)?;
-        let fn_addr_local = self.handler_fn_addr_local(handler_local, "serve", span)?;
-        let result_ty = self.result_unit_error_adt_ty();
-        let dest = self.terminate_handler_dispatch(
-            "gos_rt_http3_serve",
-            &[addr_local, cert_local, key_local],
-            handler_local,
-            fn_addr_local,
-            HandlerReturn::Carrier,
-            result_ty,
-            span,
-        );
-        Some(dest)
     }
 
     /// `websocket::serve(addr, handler)` - binds a WebSocket listener and
@@ -1530,12 +1530,11 @@ impl<'a> Builder<'a> {
                 )))),
                 span,
             );
-            // A two-word carrier field owns both of its words in the node,
-            // so its write takes the store sized for it.
-            let wide = crate::lower::carrier_ref::is_two_word_carrier(
-                self.tcx,
-                self.locals[payload_local.0 as usize].ty,
-            );
+            // A two-word carrier field, or a 128-bit integer, owns both of
+            // its words in the node, so its write takes the store sized for it.
+            let payload_ty = self.locals[payload_local.0 as usize].ty;
+            let wide = crate::lower::carrier_ref::is_two_word_carrier(self.tcx, payload_ty)
+                || self.tcx.is_wide_int(payload_ty);
             let payload_dest = self.fresh(unit_ty);
             self.emit_assign(
                 Place::local(payload_dest),
@@ -1741,6 +1740,11 @@ impl<'a> Builder<'a> {
             && !self.tcx.is_inline_enum_ty(payload_ty)
         {
             let _ = self.ensure_aggr_struct_meta(payload_ty);
+        }
+        // A 128-bit payload is boxed the same way, into a copy with no
+        // children.
+        if self.tcx.is_wide_int(payload_ty) {
+            let _ = self.ensure_aggr_copy_meta(payload_ty);
         }
         if self.type_slot_bytes(payload_ty) > 8 && aggregate_payload {
             let _ = self.ensure_aggr_copy_meta(payload_ty);

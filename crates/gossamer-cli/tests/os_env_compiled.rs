@@ -3,7 +3,7 @@
 //! Regression coverage for the 2026-05-07 daemon-launch report:
 //! the compiled tier silently no-op'd `env::set_var` because MIR
 //! had no dispatch arm for the call, so a daemon spawned via
-//! `exec::spawn` after `set_env("LD_LIBRARY_PATH", ...)` couldn't
+//! `process::spawn` after `set_env("LD_LIBRARY_PATH", ...)` couldn't
 //! find its libraries (the env var the parent thought it set was
 //! never actually written to the process env table). The VM
 //! routed through `safe_env::set_env` correctly, so behaviour
@@ -189,11 +189,11 @@ fn os_set_env_propagates_to_a_spawned_child_in_all_tiers() {
     // shared-library-dependent child).
     let src = r#"
 use std::env
-use std::os::exec
+use std::process
 fn main() {
     env::set_var("GOS_PROBE_CHILD_2026", "propagated")
     let args: Vec<String> = Vec::from([])
-    match exec::run("/usr/bin/env", args) {
+    match process::run("/usr/bin/env", args) {
         Ok(o) => {
             for line in o.stdout.lines() {
                 if line.starts_with("GOS_PROBE_CHILD_2026=") {
@@ -219,11 +219,11 @@ fn os_set_env_propagates_to_a_spawned_child_in_all_tiers_windows() {
     // `GOS_PROBE_CHILD_2026=propagated` if the var is in the environment.
     let src = r#"
 use std::env
-use std::os::exec
+use std::process
 fn main() {
     env::set_var("GOS_PROBE_CHILD_2026", "propagated")
     let args: Vec<String> = ["/c", "set", "GOS_PROBE_CHILD_2026"].to_vec()
-    match exec::run("cmd", args) {
+    match process::run("cmd", args) {
         Ok(o) => {
             for line in o.stdout.lines() {
                 if line.starts_with("GOS_PROBE_CHILD_2026=") {

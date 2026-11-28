@@ -201,6 +201,9 @@ extend(&mut items)     // items is now #[1, 2, 1]
   order, or names a binding or field path (`"{total}"`); a template built
   once and filled from several places. Specs: `{:*>8}`, `{:08}`,
   `{:x}` `{:b}` `{:o}`, `{:.2}`, `{:+}`, `{:e}`; no positional `{0}`.
+  `.N` applies to a number (an integer keeps its digits: `7.00`) or a
+  `String` (its first N characters); on an `Option` it is GT0147, so
+  unwrap first.
 - `{}` renders any value, nested collections, structs, enums, and `Option`s
   included, each in the spelling that builds it (`#[1, 2]`, `{"a": 1}`,
   `Some("x")`, `P { n: 1 }`), the same on every tier. `Stack`, `Queue`,
@@ -218,7 +221,8 @@ extend(&mut items)     // items is now #[1, 2, 1]
 - `"""` strings dedent to their closing delimiter; `f"""..."""` interpolates.
 - Two index spaces: `s.len()`, `s[i]` (a `char`), and `for c in s` count
   Unicode scalars; `s.byte_len()`, `s.byte_at(i)` (an `i64`), `s.bytes()`,
-  `s.substring(a, b)` use byte offsets. Never mix them. `s[i] = c` is
+  `s.substring(a, b)` use byte offsets (an offset inside a character panics).
+  Never mix them. `s[i] = c` is
   GT0130: build new text (`s.replacen(old, new, 1)`). Neither is a
   grapheme cluster (`"👍🏽"` is two scalars): cut display text with
   `unicode::graphemes(s).take(n).join("")`.
@@ -242,8 +246,9 @@ extend(&mut items)     // items is now #[1, 2, 1]
   error (`gos check --fix` writes `n % 2 != 0`).
 - `+ - *` panic on overflow on every tier and profile; `+%` `-%` `*%` (and
   `+%=`...) wrap at the declared width, and are the only way to wrap. Divide
-  by zero panics, and so does a shift amount outside `0..BITS`; `<<%` /
-  `>>%` take it modulo the width.
+  by zero panics, and so do a signed `MIN / -1` and `MIN % -1`
+  (`x.checked_div(y)` answers `None` there) and a shift amount outside
+  `0..BITS`; `<<%` / `>>%` take it modulo the width.
 - `==` / `!=` between a computed float and a literal it cannot hold
   exactly (`a + b == 0.3`) is GT0142: compare within a tolerance,
   `(a - 0.3).abs() < 1e-9`. Exact literals (`0.5`, `0.0`, `1.0`) compare as
@@ -259,13 +264,17 @@ extend(&mut items)     // items is now #[1, 2, 1]
   `char::from_u32`; floats answer `mul_add` (one rounding) and `total_cmp`
   (a sign, for `sort_by`, NaN included). Limits: `i64::MAX`, `u8::MIN`,
   `f64::EPSILON`, `f64::NAN`.
-- Past 64 bits, `math::big::Int` (`big::int_from_i64(n)`, then `+ - * / %`
-  and comparisons); exact decimals, `math::Decimal`
-  (`Decimal::parse("0.1")?`; `0.1 + 0.2 == 0.3`).
+- Past 64 bits, `i128` / `u128`; past 128, `math::big::Int`
+  (`big::int_from_i64(n)`, then `+ - * / %` and comparisons); exact
+  decimals, `math::Decimal`
+  (`Decimal::parse("0.1")?`; `0.1 + 0.2 == 0.3`); exact ratios,
+  `math::Rational` (`Rational::parse("1/3")?`, `r.to_f64()`).
 
 **Types**
-- `bool char i8..i64 u8..u64 isize usize f32 f64 String [T] [T; N] (A, B)
-  Option<T> Result<T, E> &mut T`, user types, `Simd<T, N>`. No `i128`.
+- `bool char i8..i128 u8..u128 isize usize f32 f64 String [T] [T; N]
+  (A, B) Option<T> Result<T, E> &mut T`, user types, `Simd<T, N>`.
+  `i128` / `u128` are checked like the other widths; `s.to_i128()` /
+  `s.to_u128()` parse, and serde writes a value past 64 bits as a string.
 - Structs build by their declared shape: `Unit`, `Pair(a, b)`,
   `Point { x: 1, y: 2 }`, and `Point { x, y }` fills each field from the
   binding of its name. A field may declare a default
@@ -286,6 +295,14 @@ extend(&mut items)     // items is now #[1, 2, 1]
   Conversions and operators are `impl From` / `TryFrom` / `Add` / `Mul` /
   `Index` ...; an operator takes one impl per right-hand type
   (`impl Mul<f64> for V2` beside `impl Mul for V2`).
+- A struct with `impl Drop` (`fn drop(&mut self)`) is a shared handle:
+  `let b = a` shares one value, a write through either name shows through
+  both, and `drop` runs once, when the last reference goes. A binding holding
+  one (or a `runtime::Guard`, or a container of either) lives to the end of
+  its block; the cleanup runs when the statement that released the last
+  reference ends. `let _g = lock()` keeps it, `let _ = lock()` releases it at
+  once. No `clone()` of one (GT0146); a generic type or an enum holds a
+  `runtime::Guard::new(|| ..)` field instead (GT0145).
 - `type Id = i64` is transparent; `newtype UserId = i64` is a distinct type
   with its own methods, converted by `.into()`.
 - Generics monomorphise: `fn f<T: A + B>(x: T)`, `where` clauses, generic
@@ -330,7 +347,9 @@ extend(&mut items)     // items is now #[1, 2, 1]
   `pop_first`, and `range(lo..hi)`. A `Set`'s own order is unspecified: sort,
   or use `BTreeSet`, when order matters.
 - Sorting: `xs.sort()`, `xs.sort_by_key(|p| p.score)` (`Reverse(k)` to
-  descend), `sort_by` with a comparator answering a sign.
+  descend), `sort_by` with a comparator answering a sign
+  (`|a, b| a.name.cmp(b.name)`; integers, `char`, and `String` answer
+  `cmp`). Every sort is stable: equal elements keep their order.
 - Parallel twins of the eager walks: `par_map`, `par_filter`, `par_sum`,
   `par_reduce(identity, combine)`, with pure callbacks (GT0090 otherwise);
   answers do not depend on the machine. `img.par_chunks_mut(w, |row, px| ..)`
@@ -372,7 +391,9 @@ fn load(path: String) -> Result<String, errors::Error> {
 `errors::new(msg)` / `wrap(cause, msg)` / `is(err, needle)`; `{}` on an
 error prints its whole chain, `.message()` the top; `runtime::backtrace()`
 answers the call stack as text. A panic ends its
-goroutine; in `main` it exits 101. Recursion is bounded by memory, not a
+goroutine; in `main` it exits 101. `process::exit(code)` runs the pending
+`defer`s of the calling goroutine's frames before the process ends
+(`process::abort()` does not). Recursion is bounded by memory, not a
 frame count: `main`'s stack and every goroutine's grow on demand to 1 GiB
 (half the memory available where that is less), and past it a runaway
 recursion is `GX0008` on every tier.
@@ -471,12 +492,15 @@ Discover signatures with `hover` / `gos doc std::<module>`. Areas:
   `output`) answers a `Child` that reads, writes, and waits;
   `process::look_path(name)` answers the `PATH` match or `None`.
   `time::Instant`, `Duration`, `time::Time` (an instant with its UTC offset,
-  RFC 3339; `t.add_date(0, 0, 1)?` is the next calendar day, while
+  RFC 3339; `t.format("%Y-%m-%d %H:%M")?` and `time::parse(layout, text,
+  location: Some(loc))?` use strftime directives; `t.add_date(0, 0, 1)?` is the next calendar day, while
   `t + Duration` of whole days is GL0069). `bufio::Writer::new(file)`
   buffers writes, flushed before any other call on the file, at its last
   release, and at exit; `bufio::Reader::new(file)` answers `read_line` /
   `lines`. `fs::read_dir` entries carry `is_file`, `size`, `path` -
-  do not re-query. `fs::temp_dir(prefix, parent: Some(dir))` makes a fresh
+  do not re-query. `fs::copy_dir`, `fs::move` (across filesystems too), `fs::symlink` /
+  `read_link`, and `fs::disk_space(path)?.available` cover tree work;
+  `fs::temp_dir(prefix, parent: Some(dir))` makes a fresh
   folder (in the system temp root without `parent`).
 - Text: `strings strconv utf8 unicode regex`.
 - Encoding: `json yaml toml xml csv base64 base32 hex pem binary`. Typed
@@ -488,18 +512,38 @@ Discover signatures with `hover` / `gos doc std::<module>`. Areas:
   navigate dynamically and finish with `json::from_value::<T>(sub)?`. Fields
   take `#[rename("key")]`, `#[skip]`, `#[default]`, `#[default(value)]`;
   types take `#[rename_all("camelCase")]`, enums `#[tag("type")]`, variants
-  `#[rename]`; `Option<Option<T>>` tells missing from `null`. Encoding keeps
+  `#[rename]`; `Option<Option<T>>` tells missing from `null`. A NaN or an infinity has no JSON number, so
+  encoding a value holding one answers `Err`. Encoding keeps
   declaration order (`sort: true` sorts) and answers a `Result`
   (`json::encode(v)?`); encode where the type is concrete, not over a type
   parameter (GT0126). Errors name the path: `current.temp: expected f64,
-  found string`. Untyped: `json::parse` + `get`/`at` (both `Option`) and
+  found string`. A repeated object key is an `Err` naming it, on
+  `json::parse`, `decode`, and their YAML twins, unless
+  `duplicate_keys: json::DuplicateKeys::UseFirst` (or `UseLast`) picks one. Untyped: `json::parse` + `get`/`at` (both `Option`) and
   `as_f64`, `json::pointer(doc, "/a/b/0")`, `json::entries(obj)` (an
-  `Option` of the `(key, value)` pairs); `json::to_value(v)?`. `yaml::` and `toml::` mirror
+  `Option` of the `(key, value)` pairs); `json::to_value(v)?`. A stream of
+  values (NDJSON, a large export) reads one value at a time:
+  `let mut d = json::Decoder::new(file)`, then
+  `while let Some(v) = d.next()? { .. }`, or `d.next_text()?` handed to
+  `json::decode::<T>`. `yaml::` and `toml::` mirror
   it (`parse`, `encode`, `decode::<T>`, `encode::<T>`); `to_json_text` /
   `from_json_text` convert text. No size cap by default
   (`json::set_max_size(n)`).
-- Web: `net`, `http` (client `http::get`, server `http::serve(addr,
-  handler)`, `http::router`), `http::websocket`, `html`, `mime`.
+- Web: `net` (`lookup`, `net::netip::Prefix` for CIDR ranges,
+  `net::mail::parse_address` / `parse_address_list` with `{}` on an
+  `Address` writing its header form, and `lookup_mx` / `lookup_txt` / `lookup_srv` /
+  `lookup_cname` / `lookup_addr` for DNS records), `http` (client `http::get`, server `http::serve(addr,
+  handler)`, `http::router`; HTTPS with mutual TLS, SNI, and live
+  certificate reloads through `http::serve_tls_config(addr,
+  tls::ServerConfig::new(cert, key, client_ca: Some(ca))?, handler)`), `http::websocket`, `mime`, and
+  `text::template` / `html::template` (`Template::parse(src)?` then
+  `t.render(value)?`, Go template syntax; a missing field is an `Err`;
+  `html::template` escapes by context). HTML parsing into a browser-shaped
+  tree is the `html-parsing-gos` package (`html_parsing::parse(text)?`,
+  `html_parsing::select(text, "a[href]")?`), not std.
+  Sessions, CSRF checks, JWTs, field validation, and HTTP/3 are the
+  `web-gos` package (`use web::{session, csrf, jwt, validate, h3}`), and
+  tracing is `trace-gos` (`use trace`), not std.
 - Terminal: `term` (`is_terminal(fd)` tests the descriptor it is given;
   `size`, `enter_raw`, `read_input`, and `resized` take one optionally,
   `STDOUT` for `size` / `resized` and `STDIN` otherwise). A descriptor is an
@@ -511,10 +555,26 @@ Discover signatures with `hover` / `gos doc std::<module>`. Areas:
   `fd::Borrowed::from_raw(n)`, never closed), `os::signal`
   (`on(signal::SIGWINCH)`; `n.wait()` answers false once its cohort is
   cancelled or `n.stop()` runs), `process::run_inherit` (hand the terminal
-  to a child), `unicode::char_width` / `str_width`. Restore state with
+  to a child), `process::exec` (hand over the process), `term::read_password(prompt)`, `unicode::char_width` / `str_width`. Restore state with
   `runtime::at_exit(f)`.
-- Also: `sort`, `math`, `crypto::{sha256, hmac, aead, ed25519, password,
-  rand}`, `hash`, `uuid`, `jwt`, `compress`, `archive`, `metrics`, `slog`,
+- Scratch space: `fs::TempDir::new(prefix)?` / `fs::TempFile::new(prefix)?`
+  (`parent: Some(dir)` makes either inside a chosen folder)
+  remove themselves at their last release (`keep()` to retain). Limits:
+  `sync::Semaphore::new(n)`, `let _p = sem.acquire()`. Periodic work:
+  `time::Ticker::new(d)`, `while let Some(n) = t.recv()`. Commands:
+  `strings::shell_split` / `shell_quote`. Numbers: `math::mean`, `median`,
+  `stdev`, `quantiles`, `erf`, `gamma`, `comb`, `math::Complex`;
+  `rand::range(rng, lo, hi)`, `rand::choose(rng, xs)`, `rand::shuffle`.
+- Also: `sort`, `math`, `crypto::{sha256, sha384, sha3_256, hmac (with
+  constant-time `verify_*`), aead, ed25519, ecdsa (P-256 / P-384), ecdh
+  (X25519 / P-256 / P-384), mlkem (768 / 1024), rsa (sign / verify,
+  encrypt_oaep_sha256, generate), kdf (hkdf_sha256 / sha384), x509
+  (self_signed, issue, csr, `extensions:`, PKCS#1 / SEC1 / encrypted PKCS#8
+  import), password, rand}` (an ECDH or ML-KEM secret is a `SharedSecret`
+  that prints redacted: derive keys with `hkdf_sha256(..)`), `hash`, `uuid`, `compress`, `archive`, `metrics`, `slog`,
+  `image` (`image::decode(bytes)?` PNG / JPEG / GIF into an `Image` value;
+  `img.pixel(x, y)`, `img.resize(w, h)?`, `img.encode_png()?`;
+  `image::set_max_pixels(n)` bounds every image),
   `testing`, `runtime`, `pprof`, `database::sql` (drivers via bindings),
   `ffi` (C types and strings for foreign calls).
 

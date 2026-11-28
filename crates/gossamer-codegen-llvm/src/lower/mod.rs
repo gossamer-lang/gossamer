@@ -200,6 +200,10 @@ pub(crate) struct Lowerer<'a> {
     /// of its shape, so the redirect to `name$cabi` keys on the site rather
     /// than on the name. Empty off Windows.
     pub(crate) cabi_thunk_sites: std::collections::BTreeSet<gossamer_mir::Local>,
+    /// Locals of this body that read a handler address out of a closure env
+    /// for a handler registration, mapped to the handler's arity: on Win64
+    /// each holds the env trampoline's address instead.
+    pub(crate) cabi_env_trampoline_sites: std::collections::BTreeMap<gossamer_mir::Local, usize>,
     /// `alloca` lines for the call-scoped temporaries the body needs, spliced
     /// into the entry block once the blocks are lowered.
     ///
@@ -358,6 +362,8 @@ pub(super) enum ConcatKind {
     /// `gos_rt_print_u64` / `gos_rt_concat_u64` so values
     /// `>= 2^63` print without a leading `-`.
     Uint,
+    /// `i128` (`false`) or `u128` (`true`), handed over as two words.
+    Wide(bool),
     Float,
     /// An `f32` held at double width, rendered with the digits of its
     /// single-precision value; `true` for the `{:?}` spelling.
@@ -652,6 +658,9 @@ fn const_llvm_ty(cv: &ConstValue) -> &'static str {
     match cv {
         ConstValue::Unit => "void",
         ConstValue::Bool(_) => "i1",
+        // A constant outside both the `i64` and the `u64` range is a 128-bit
+        // value; every narrower one is a word.
+        ConstValue::Int(n) if i64::try_from(*n).is_err() && u64::try_from(*n).is_err() => "i128",
         ConstValue::Int(_) => "i64",
         ConstValue::Float(_) => "double",
         ConstValue::Char(_) => "i32",

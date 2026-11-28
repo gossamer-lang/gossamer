@@ -36,7 +36,6 @@ pub mod encoding_toml;
 /// (Rust `std::env` shape).
 pub mod env;
 pub mod errors;
-pub mod exec;
 pub mod flag;
 pub mod fmt;
 pub mod fs;
@@ -49,17 +48,11 @@ pub mod http;
 pub mod http_chunked;
 /// HTTP cookie parsing + builder (RFC 6265).
 pub mod http_cookie;
-/// CSRF protection (double-submit cookie + Origin/Referer).
-#[cfg(not(target_arch = "wasm32"))]
-pub mod http_csrf;
 /// Form parsing (`application/x-www-form-urlencoded`).
 pub mod http_form;
 /// HTTP/2 server (h2 crate over goroutine future-driver).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod http_h2;
-/// HTTP/3 server + client (quinn + h3 over a private tokio runtime).
-#[cfg(not(target_arch = "wasm32"))]
-pub mod http_h3;
 /// Operational health, readiness, and liveness handlers.
 pub mod http_health;
 /// HTTP middleware suite (logger, recoverer, request-id, CORS, basic-auth, gzip,
@@ -79,31 +72,18 @@ pub mod http_proxy;
 pub mod http_query;
 /// HTTP router (Go 1.22-class ServeMux with captures + method gating).
 pub mod http_router;
-/// HTTP session management (signed-cookie store by default).
-#[cfg(not(target_arch = "wasm32"))]
-pub mod http_session;
 /// Server-Sent Events (`text/event-stream`).
 pub mod http_sse;
-/// Application state container (TypeMap, dependency injection).
-pub mod http_state;
 /// HTTP static file server (ETag, Last-Modified, Range, MIME sniff).
 pub mod http_static_files;
 /// WebSocket (RFC 6455) - first-party stdlib support.
 pub mod http_websocket;
-/// In-memory RGBA image model with PNG and JPEG codecs.
-#[cfg(not(target_arch = "wasm32"))]
-pub mod image;
 pub mod io;
 pub mod io_handles;
 pub mod iter;
-/// JWT (JSON Web Tokens, RFC 7519) - HS256/384/512, ES256, EdDSA.
-#[cfg(not(target_arch = "wasm32"))]
-pub mod jwt;
 /// Process lifecycle: graceful-shutdown hooks, signal handling, sd_notify.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lifecycle;
-/// Go-style `log` package: flat `Println` / `Printf` / `Fatal`.
-pub mod log;
 /// Goroutine-driven future polling (no tokio runtime). Always
 /// compiled - drives HTTP/2 + future async stacks.
 #[cfg(not(target_arch = "wasm32"))]
@@ -174,10 +154,6 @@ pub mod thread;
 pub mod time;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tls;
-/// W3C trace-context tracing primitives + OTLP JSON exporter
-/// (`std::trace`).
-#[cfg(not(target_arch = "wasm32"))]
-pub mod trace;
 pub mod unicode;
 pub mod url;
 pub mod utf16;
@@ -185,8 +161,6 @@ pub mod utf8;
 /// UUID generation (v4 random, v7 timestamp-ordered) plus parse/normalize.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod uuid;
-/// Validation framework: `Validate` trait, builtins (length, range, email, regex, ...).
-pub mod validate;
 
 pub use registry::{
     StdItem, StdItemKind, StdItemRecord, StdModule, item, item_records, module, modules,

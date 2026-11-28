@@ -1039,7 +1039,7 @@ fn validate_test_file(file: &Path) -> Result<()> {
 
 /// A source map over the assembled unit that reports each span against the
 /// module file it was written in, as `gos run` and `gos build` do.
-fn unit_source_map(
+pub(crate) fn unit_source_map(
     file: &Path,
     unit: &crate::paths::EntryUnit,
     source: String,
@@ -1350,7 +1350,7 @@ fn run_tests_isolated(
                         break (Some(status), false);
                     }
                     if started.elapsed() >= timeout {
-                        let _ = gossamer_std::exec::send_group_term(i64::from(child.id()));
+                        let _ = gossamer_std::process::send_group_term(i64::from(child.id()));
                         let _ = child.kill();
                         let _ = child.wait();
                         break (None, true);

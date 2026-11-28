@@ -115,7 +115,17 @@ pub const ENCODING_YAML: StdModule = StdModule {
         StdItem {
             name: "parse",
             kind: StdItemKind::Function,
-            doc: "Parses a YAML document into a Value.",
+            doc: "Parses a YAML document into a Value. A key a mapping repeats is an error naming it (YAML 1.2 requires unique keys) unless `duplicate_keys: DuplicateKeys::UseFirst` or `UseLast` says which value stands; `yaml::decode::<T>` takes the same argument.",
+        },
+        StdItem {
+            name: "DuplicateKeys",
+            kind: StdItemKind::Type,
+            doc: "`json::DuplicateKeys` under this module's name: `Error` (the default), `UseFirst`, or `UseLast`, for a key a mapping repeats.",
+        },
+        StdItem {
+            name: "__parse_with",
+            kind: StdItemKind::Function,
+            doc: "Internal: `yaml::parse(text, duplicate_keys: d)`, the policy as its index.",
         },
         StdItem {
             name: "encode",
@@ -170,6 +180,16 @@ pub const ENCODING_JSON: StdModule = StdModule {
     summary: "JSON parser, emitter, and derive support.",
     items: &[
         StdItem {
+            name: "DuplicateKeys",
+            kind: StdItemKind::Type,
+            doc: "What a key an object repeats reads as, for `json::parse`, `json::decode::<T>`, `yaml::parse`, and `yaml::decode::<T>` (`duplicate_keys:`): `Error`, the default, refuses the document naming the key; `UseFirst` keeps its first value; `UseLast` its last. JSON leaves a repeated key's meaning open (RFC 8259), and readers that disagree read one document two ways.",
+        },
+        StdItem {
+            name: "__parse_with",
+            kind: StdItemKind::Function,
+            doc: "Internal: `json::parse(text, duplicate_keys: d)`, the policy as its index.",
+        },
+        StdItem {
             name: "Serialize",
             kind: StdItemKind::Trait,
             doc: "Trait for converting a value to JSON.",
@@ -212,7 +232,7 @@ pub const ENCODING_JSON: StdModule = StdModule {
         StdItem {
             name: "parse",
             kind: StdItemKind::Function,
-            doc: "Parses JSON text into a dynamic Value.",
+            doc: "Parses JSON text into a dynamic Value. A key an object repeats is an error naming it unless `duplicate_keys: DuplicateKeys::UseFirst` or `UseLast` says which value stands; `json::decode::<T>` takes the same argument.",
         },
         StdItem {
             name: "encode_pretty",
@@ -289,6 +309,11 @@ pub const ENCODING_JSON: StdModule = StdModule {
             name: "entries",
             kind: StdItemKind::Function,
             doc: "An object's members as (key, value) pairs in key order; None for any other value.",
+        },
+        StdItem {
+            name: "Decoder",
+            kind: StdItemKind::Type,
+            doc: "Reads the JSON values of an `fs::File` one at a time, separated by whitespace (NDJSON included), holding only the value being read: `Decoder::new(file)`, then `next()` (a `json::Value`, `Ok(None)` at the end) or `next_text()` (the value's text, for `json::decode::<T>`), and `offset()` (the byte where the last value began). A value cut off by the end of the file is an `Err`.",
         },
         StdItem {
             name: "pointer",

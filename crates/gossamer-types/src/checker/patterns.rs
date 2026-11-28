@@ -2165,15 +2165,6 @@ impl TypeChecker<'_> {
     pub(super) fn type_of_int_literal(&mut self, text: &str, span: Span) -> Ty {
         for (suffix, int_ty) in INT_SUFFIXES {
             if text.ends_with(suffix) {
-                if matches!(int_ty, IntTy::I128 | IntTy::U128) {
-                    self.emit(
-                        TypeError::Int128Unsupported {
-                            ty: (*suffix).to_string(),
-                        },
-                        span,
-                    );
-                    return self.tcx.error_ty();
-                }
                 if !int_literal_fits(text, *int_ty) {
                     self.emit(
                         TypeError::IntLiteralOverflow {
@@ -2204,8 +2195,7 @@ impl TypeChecker<'_> {
         // type-mismatch diagnostic. Only literals whose
         // magnitude is genuinely impossible to represent in any
         // Gossamer integer type get the GT0009 here.
-        let literal_too_wide =
-            parse_int_magnitude(text).is_none_or(|magnitude| magnitude > u128::from(u64::MAX));
+        let literal_too_wide = parse_int_magnitude(text).is_none();
         if literal_too_wide {
             self.emit(
                 TypeError::IntLiteralOverflow {

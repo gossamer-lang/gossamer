@@ -6,15 +6,21 @@
 //! ends, so a write the program made is never dropped unwritten.
 
 use std::io::Write;
+use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
 
+use crate::file_lock::{HeldLocks, Span};
+
 /// An open file and the bytes written to it that have not reached it yet.
 #[derive(Debug)]
 pub struct OpenFile {
-    file: std::fs::File,
+    /// Taken only by `drop`, which hands it to `locks` to close.
+    file: ManuallyDrop<std::fs::File>,
+    /// The advisory locks this file holds.
+    locks: HeldLocks,
     /// Held by every call that moves or depends on the cursor.
     cursor: Mutex<Pending>,
     /// Whether `cursor` holds bytes, so positional calls skip its lock
@@ -49,7 +55,8 @@ impl OpenFile {
     #[must_use]
     pub fn new(file: std::fs::File) -> Arc<Self> {
         Arc::new(Self {
-            file,
+            file: ManuallyDrop::new(file),
+            locks: HeldLocks::default(),
             cursor: Mutex::new(Pending::default()),
             pending: AtomicBool::new(false),
         })
@@ -61,6 +68,31 @@ impl OpenFile {
         &self.file
     }
 
+    /// Takes an advisory lock over `span` without waiting; `Ok(false)` when
+    /// another holder, in this process or another, has a conflicting one.
+    ///
+    /// # Errors
+    /// The system refused the lock for another reason.
+    pub fn try_lock(&self, span: Span, exclusive: bool) -> std::io::Result<bool> {
+        self.locks.try_lock(&self.file, span, exclusive)
+    }
+
+    /// Releases the advisory lock over `span`.
+    ///
+    /// # Errors
+    /// The system refused the release.
+    pub fn unlock(&self, span: Span) -> std::io::Result<()> {
+        self.locks.unlock(&self.file, span)
+    }
+
+    /// Releases every advisory lock this file holds.
+    ///
+    /// # Errors
+    /// The first release the system refused.
+    pub fn unlock_all(&self) -> std::io::Result<()> {
+        self.locks.unlock_all(&self.file)
+    }
+
     /// Runs `op` holding the cursor lock, once the buffered bytes are written.
     ///
     /// # Errors
@@ -68,7 +100,7 @@ impl OpenFile {
     pub fn with_cursor<T>(&self, op: impl FnOnce(&mut &std::fs::File) -> T) -> std::io::Result<T> {
         let mut pending = self.cursor.lock();
         self.drain(&mut pending)?;
-        Ok(op(&mut &self.file))
+        Ok(op(&mut &*self.file))
     }
 
     /// Runs `op`, which reads or writes at an offset, once the buffered
@@ -81,7 +113,7 @@ impl OpenFile {
         if cfg!(windows) || self.pending.load(Ordering::Acquire) {
             return self.with_cursor(op);
         }
-        Ok(op(&mut &self.file))
+        Ok(op(&mut &*self.file))
     }
 
     /// Buffers later writes up to `capacity` bytes; zero writes through.
@@ -111,13 +143,13 @@ impl OpenFile {
     pub fn write_all(&self, bytes: &[u8]) -> std::io::Result<()> {
         let mut pending = self.cursor.lock();
         if pending.capacity == 0 {
-            return (&self.file).write_all(bytes);
+            return (&*self.file).write_all(bytes);
         }
         if pending.bytes.len() + bytes.len() > pending.capacity {
             self.drain(&mut pending)?;
         }
         if bytes.len() >= pending.capacity {
-            return (&self.file).write_all(bytes);
+            return (&*self.file).write_all(bytes);
         }
         pending.bytes.extend_from_slice(bytes);
         self.pending.store(true, Ordering::Release);
@@ -164,6 +196,9 @@ impl OpenFile {
 impl Drop for OpenFile {
     fn drop(&mut self) {
         self.write_out_last();
+        // SAFETY: `file` is taken once, here, and nothing reads it afterwards.
+        let file = unsafe { ManuallyDrop::take(&mut self.file) };
+        self.locks.close(file);
     }
 }
 

@@ -33,9 +33,9 @@ impl<'tcx> FnBuilder<'tcx> {
     /// the type is unknown (an unresolved / error type) we default to
     /// `Value` so the generic path handles it.
     pub(crate) fn expr_kind(&self, expr: &HirExpr) -> RegKind {
-        match self.tcx.kind(expr.ty) {
+        match self.tcx.kind(self.static_ty(expr)) {
             Some(TyKind::Float(FloatTy::F64)) => RegKind::F64,
-            Some(TyKind::Int(_)) => RegKind::I64,
+            Some(TyKind::Int(it)) if !it.is_wide() => RegKind::I64,
             _ => RegKind::Value,
         }
     }
@@ -421,8 +421,12 @@ impl<'tcx> FnBuilder<'tcx> {
     /// reaches the caller.
     pub(crate) fn impl_target_names(&self, ty: gossamer_types::Ty) -> Vec<String> {
         let ty = self.unwrap_ref(ty);
-        if self.tcx.kind(ty).is_none() {
-            return Vec::new();
+        match self.tcx.kind(ty) {
+            None => return Vec::new(),
+            // A standard type is a sentinel definition no program `impl`
+            // targets, whatever its last segment shares with a program type.
+            Some(TyKind::Adt { def, .. }) if def.local >= u32::MAX - 64 => return Vec::new(),
+            Some(_) => {}
         }
         let rendered = gossamer_types::printer::render_ty(self.tcx, ty);
         let unparameterized = rendered.split('<').next().unwrap_or(&rendered);
@@ -728,7 +732,7 @@ impl<'tcx> FnBuilder<'tcx> {
         };
         Some(matches!(
             self.tcx.kind(*key),
-            Some(TyKind::Int(IntTy::U64 | IntTy::Usize))
+            Some(TyKind::Int(IntTy::U64 | IntTy::U128 | IntTy::Usize))
         ))
     }
 

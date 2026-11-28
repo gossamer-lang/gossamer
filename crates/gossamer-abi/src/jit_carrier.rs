@@ -33,10 +33,15 @@ pub enum CarrierNode {
     /// slots, holding a share of it. Its layout is the shape's
     /// [`CarrierShape::struct_shape`].
     Struct,
+    /// An `i128` payload: the word is a counted copy blob of its two slots,
+    /// low then high, holding a share of it.
+    I128,
+    /// A `u128` payload, kept as [`Self::I128`] is.
+    U128,
 }
 
 impl CarrierNode {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 13] = [
         Self::Unit,
         Self::I64,
         Self::F64,
@@ -48,6 +53,8 @@ impl CarrierNode {
         Self::Result,
         Self::Enum,
         Self::Struct,
+        Self::I128,
+        Self::U128,
     ];
 
     /// Whether this node is itself a two-word carrier.
@@ -69,6 +76,8 @@ impl CarrierNode {
             Self::Result => 9,
             Self::Enum => 10,
             Self::Struct => 11,
+            Self::I128 => 12,
+            Self::U128 => 13,
         }
     }
 }

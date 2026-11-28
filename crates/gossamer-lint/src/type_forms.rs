@@ -1069,13 +1069,13 @@ pub(crate) fn fields_take_literal_defaults(
                 let written = fields
                     .iter()
                     .map(|field| match &field.value {
-                        Some(value) => (
+                        Some(value) if !field.shorthand => (
                             field.name.name.clone(),
                             text(self.source, value.span).trim().to_string(),
                             field_removal(self.source, &field.name.name, value.span),
                             self_contained(value),
                         ),
-                        None => (field.name.name.clone(), String::new(), None, false),
+                        _ => (field.name.name.clone(), String::new(), None, false),
                     })
                     .collect::<Vec<_>>();
                 let entry = self.literals.entry(name.clone()).or_default();

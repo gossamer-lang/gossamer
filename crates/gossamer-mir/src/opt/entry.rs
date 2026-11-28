@@ -142,6 +142,8 @@ fn optimise_with_bounds_limit(
     crate::verify::debug_verify_body(body);
     move_elements_out_of_walked_vecs(body);
     crate::verify::debug_verify_body(body);
+    unshare_written_vectors(body, tcx, effects);
+    crate::verify::debug_verify_body(body);
     if std::env::var_os("GOS_BOUNDS_REMARKS").is_some() {
         let after_versioning = bounds_access_counts(body);
         eprintln!(
@@ -266,6 +268,8 @@ pub fn optimise_debug(body: &mut Body, tcx: &TyCtxt) {
     fuse_range_copy_loops(body, tcx);
     crate::verify::debug_verify_body(body);
     read_csv_as_tables(body, tcx);
+    crate::verify::debug_verify_body(body);
+    unshare_written_vectors(body, tcx, &effects);
     crate::verify::debug_verify_body(body);
 }
 

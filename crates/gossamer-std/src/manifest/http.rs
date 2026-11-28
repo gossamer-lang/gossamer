@@ -71,18 +71,56 @@ use super::*;
 
 pub const TLS: StdModule = StdModule {
     path: "std::tls",
-    summary: "Rustls-backed TLS support exposed through `http::serve_tls` and `net::TcpStream` TLS upgrades. The configuration constructors are host-runtime internals, not Gossamer callables.",
-    items: &[],
+    summary: "Rustls-backed TLS support: `ServerConfig` for `http::serve_tls_config`, `http::serve_tls` for a single certificate, and `net::TcpStream` TLS upgrades (`start_tls`, `start_tls_ca`, `start_tls_identity` with a client certificate, `start_tls_insecure`).",
+    items: &[StdItem {
+        name: "ServerConfig",
+        kind: StdItemKind::Type,
+        doc: "A live TLS server configuration for `http::serve_tls_config`: `ServerConfig::new(cert_pem, key_pem, client_ca: Option<String> = None, client_auth_optional: bool = false)` (a client CA requires each client to present a certificate it signed, unless `client_auth_optional`), `add_sni(host, cert_pem, key_pem)` (the certificate a client naming `host` sees), and `reload(cert_pem, key_pem)` (replaces the default certificate). A running server reads the configuration for each connection, so a reload or a new SNI certificate reaches the next handshake without a restart.",
+    }],
+};
+
+pub const TEXT_TEMPLATE: StdModule = StdModule {
+    path: "std::text::template",
+    summary: "Plain-text templates (Go `text/template` style) with no escaping, for configuration, code generation, and mail bodies: `{{ .field }}`, `{{ if }}`/`{{ else }}`, `{{ range }}`, and pipelines. Emit HTML through `html::template`.",
+    items: &[
+        StdItem {
+            name: "Template",
+            kind: StdItemKind::Type,
+            doc: "A parsed template, rendered any number of times from any goroutine: `Template::parse(source, missing_key: MissingKey = MissingKey::Error)?` (a syntax error names its line and column), then `t.render(data)?`, where `data` is any value with a JSON form (a struct, a map, a `json::Value`), with no escaping.",
+        },
+        StdItem {
+            name: "MissingKey",
+            kind: StdItemKind::Type,
+            doc: "What a field or key the data does not hold renders as: `MissingKey::Error` (the default) answers an `Err` naming its path, `MissingKey::Empty` renders nothing there, as Go's default does. A field that holds `null` (an `Option` that is `None`) renders empty under both.",
+        },
+        StdItem {
+            name: "render",
+            kind: StdItemKind::Function,
+            doc: "`render(source, data) -> Result<String, errors::Error>`: parses `source` and renders it once against `data`, a missing field being an `Err`.",
+        },
+    ],
 };
 
 pub const HTML_TEMPLATE: StdModule = StdModule {
     path: "std::html::template",
     summary: "Context-aware HTML templates with auto-escape (text/attr/URL/JS). The context classifier is heuristic - sound for typical server-rendered responses but NOT a content-security-policy substitute; sanitize untrusted HTML fragments with a dedicated sanitizer.",
-    items: &[StdItem {
-        name: "render_json",
-        kind: StdItemKind::Function,
-        doc: "render_json(source, json_text) -> Result<String, Error>: renders a context-aware HTML template against a data context given as JSON text. Stateless and wired bit-identically across every tier.",
-    }],
+    items: &[
+        StdItem {
+            name: "Template",
+            kind: StdItemKind::Type,
+            doc: "A parsed template, rendered any number of times from any goroutine: `Template::parse(source, missing_key: MissingKey = MissingKey::Error)?` (a syntax error names its line and column), then `t.render(data)?`, where `data` is any value with a JSON form (a struct, a map, a `json::Value`), each value escaped by the HTML context it lands in.",
+        },
+        StdItem {
+            name: "MissingKey",
+            kind: StdItemKind::Type,
+            doc: "What a field or key the data does not hold renders as: `MissingKey::Error` (the default) answers an `Err` naming its path, `MissingKey::Empty` renders nothing there, as Go's default does. A field that holds `null` (an `Option` that is `None`) renders empty under both.",
+        },
+        StdItem {
+            name: "render",
+            kind: StdItemKind::Function,
+            doc: "`render(source, data) -> Result<String, errors::Error>`: parses `source` and renders it once against `data`, a missing field being an `Err`.",
+        },
+    ],
 };
 
 pub const HTTP: StdModule = StdModule {
@@ -123,6 +161,16 @@ pub const HTTP: StdModule = StdModule {
             name: "serve",
             kind: StdItemKind::Function,
             doc: "Convenience: bind and serve an HTTP handler. `Result<(), Error>` - a bind failure is an Err value.",
+        },
+        StdItem {
+            name: "serve_tls_config",
+            kind: StdItemKind::Function,
+            doc: "TLS-terminating server over a live `tls::ServerConfig`: `serve_tls_config(addr, config, handler) -> Result<(), Error>`. Client-certificate authentication, SNI certificates, and certificate reloads apply as the configuration says, each new connection reading its current state.",
+        },
+        StdItem {
+            name: "__serve_tls_live",
+            kind: StdItemKind::Function,
+            doc: "Internal: `serve_tls_config(addr, config, handler)` with the configuration's registry id.",
         },
         StdItem {
             name: "serve_tls",
@@ -661,53 +709,6 @@ pub const HTTP_COOKIE: StdModule = StdModule {
     ],
 };
 
-pub const HTTP_CSRF: StdModule = StdModule {
-    path: "std::http::csrf",
-    summary: "Double-submit-cookie CSRF protection with Origin / Referer allowlist.",
-    items: &[
-        StdItem {
-            name: "Config",
-            kind: StdItemKind::Type,
-            doc: "Signing key, cookie / header names, and origin allowlist.",
-        },
-        StdItem {
-            name: "RouteAuth",
-            kind: StdItemKind::Type,
-            doc: "Per-route policy: Required, Optional, or Skipped.",
-        },
-        StdItem {
-            name: "issue_token",
-            kind: StdItemKind::Function,
-            doc: "Mint a fresh CSRF token bound to the configured signing key.",
-        },
-        StdItem {
-            name: "verify_token",
-            kind: StdItemKind::Function,
-            doc: "Constant-time verify of a presented token against the cookie value.",
-        },
-        StdItem {
-            name: "extract_token",
-            kind: StdItemKind::Function,
-            doc: "Pull a token from the configured header or form field.",
-        },
-        StdItem {
-            name: "origin_allowed",
-            kind: StdItemKind::Function,
-            doc: "Origin / Referer allowlist check for unsafe methods.",
-        },
-        StdItem {
-            name: "check",
-            kind: StdItemKind::Function,
-            doc: "Combined origin + token gate; returns Err on failure.",
-        },
-        StdItem {
-            name: "attach_cookie",
-            kind: StdItemKind::Function,
-            doc: "Set the CSRF cookie on a Response.",
-        },
-    ],
-};
-
 pub const HTTP_FORM: StdModule = StdModule {
     path: "std::http::form",
     summary: "application/x-www-form-urlencoded parser and builder.",
@@ -767,106 +768,4 @@ pub const HTTP_QUERY: StdModule = StdModule {
     path: "std::http::query",
     summary: "A request's query string is already parsed: read `request.query` for the raw text and `request.query_pairs` for the decoded name/value pairs.",
     items: &[],
-};
-
-pub const HTTP_SESSION: StdModule = StdModule {
-    path: "std::http::session",
-    summary: "Signs and verifies a session payload. The cookie itself - name, attributes, expiry, a server-side store, id rotation on privilege change, revocation - is application policy and belongs in a session package built on these two.",
-    items: &[
-        StdItem {
-            name: "with_session",
-            kind: StdItemKind::Function,
-            doc: "Run a closure with the session bound; persist any mutations.",
-        },
-        StdItem {
-            name: "sign",
-            kind: StdItemKind::Function,
-            doc: "Sign session data into a tamper-evident cookie value.",
-        },
-        StdItem {
-            name: "verify",
-            kind: StdItemKind::Function,
-            doc: "Verify and decode a signed session cookie value.",
-        },
-    ],
-};
-
-pub const HTTP_STATE: StdModule = StdModule {
-    path: "std::http::state",
-    summary: "Dependency injection is closure capture: build the router from closures that capture the pool, the cache, and the configuration, and each handler reads what it captured. A captured heap value is shared, so one map serves every request.",
-    items: &[],
-};
-
-pub const JWT: StdModule = StdModule {
-    path: "std::jwt",
-    summary: "RFC 7519 tokens. Signs with HS256 / HS384 / HS512, ES256, and EdDSA; verifies those plus the RS256 / RS384 / RS512 family every mainstream identity provider mints with. Claims cross the boundary as JSON text.",
-    items: &[
-        StdItem {
-            name: "verify",
-            kind: StdItemKind::Function,
-            doc: "`verify(token, alg, key, leeway_secs, issuer, audience) -> Result<String, errors::Error>` - the verifier a service protecting an endpoint uses. One entry point for every algorithm, RS* included; `key` is the shared secret for HS* and the PEM public key for the rest. `issuer` and `audience` are enforced when non-empty - leaving them empty accepts a token minted for another service by anyone sharing the key.",
-        },
-        StdItem {
-            name: "header",
-            kind: StdItemKind::Function,
-            doc: "`header(token) -> Result<String, errors::Error>` - the JOSE header as JSON, read WITHOUT verifying the signature. Read `kid` to choose a key from a key set; nothing in it is trustworthy until `verify` succeeds.",
-        },
-        StdItem {
-            name: "sign_hs",
-            kind: StdItemKind::Function,
-            doc: "Sign claims with HMAC-SHA family using a shared key.",
-        },
-        StdItem {
-            name: "verify_hs",
-            kind: StdItemKind::Function,
-            doc: "Verify an HS* token against a shared key with a clock-skew allowance. Prefer `verify`, which also enforces the issuer and the audience.",
-        },
-        StdItem {
-            name: "sign_es256",
-            kind: StdItemKind::Function,
-            doc: "Sign with ECDSA P-256 from a PEM-encoded private key.",
-        },
-        StdItem {
-            name: "verify_es256",
-            kind: StdItemKind::Function,
-            doc: "Verify an ES256 token against a PEM-encoded public key. Prefer `verify`, which also enforces the issuer and the audience.",
-        },
-        StdItem {
-            name: "sign_eddsa",
-            kind: StdItemKind::Function,
-            doc: "Sign with Ed25519 from a PEM-encoded private key.",
-        },
-        StdItem {
-            name: "verify_eddsa",
-            kind: StdItemKind::Function,
-            doc: "Verify an EdDSA token against a PEM-encoded public key. Prefer `verify`, which also enforces the issuer and the audience.",
-        },
-    ],
-};
-
-pub const HTTP_H3: StdModule = StdModule {
-    path: "std::http_h3",
-    summary: "HTTP/3 over QUIC. std::http_h3 is the retained 0.27 spelling; no std::http::h3 alias.",
-    items: &[
-        StdItem {
-            name: "Handler",
-            kind: StdItemKind::Trait,
-            doc: "Per-request handler. `fn serve(&self, request: Request) -> Response`.",
-        },
-        StdItem {
-            name: "H3Error",
-            kind: StdItemKind::Type,
-            doc: "Transport / protocol error variants surfaced from quinn + h3.",
-        },
-        StdItem {
-            name: "serve",
-            kind: StdItemKind::Function,
-            doc: "Run an HTTP/3 server bound to `addr` with TLS certificate + key paths and the supplied handler.",
-        },
-        StdItem {
-            name: "Client",
-            kind: StdItemKind::Type,
-            doc: "HTTP/3 client. `new` validates against the Mozilla root store; `insecure` skips verification (dev only). Methods: `get`, `post`, `put`, `delete`, `head`, `request`.",
-        },
-    ],
 };

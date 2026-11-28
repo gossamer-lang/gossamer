@@ -285,6 +285,7 @@ impl<'a> Builder<'a> {
             B::Bytes => Some("gos_rt_binding_bytes_free"),
             B::Map(..) => Some("gos_rt_binding_map_free"),
             B::Tuple(..) => Some("gos_rt_binding_tuple_free"),
+            B::Option(_) => Some("gos_rt_binding_option_free"),
             B::Opaque(_) => Some("gos_rt_binding_struct_free"),
             _ => None,
         }
@@ -799,6 +800,24 @@ impl<'a> Builder<'a> {
                         Operand::Copy(Place::local(slots)),
                         Operand::Copy(Place::local(count_local)),
                         Operand::Copy(Place::local(tags_local)),
+                    ],
+                    ptr_ty,
+                    span,
+                );
+            }
+            // An `Option` crosses as the binding's variant, built from the
+            // compiled carrier and the payload's wire tag.
+            Some(B::Option(inner)) => {
+                let Some(tag) = Self::packed_wire_tags(std::slice::from_ref(inner.as_ref())) else {
+                    return raw;
+                };
+                let tag_local = self.const_i64_local(tag, span);
+                let ptr_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+                return self.emit_runtime_call(
+                    "gos_rt_binding_option_from_carrier",
+                    vec![
+                        Operand::Copy(Place::local(raw)),
+                        Operand::Copy(Place::local(tag_local)),
                     ],
                     ptr_ty,
                     span,

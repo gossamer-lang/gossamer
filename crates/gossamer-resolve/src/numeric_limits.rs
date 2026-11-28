@@ -35,8 +35,8 @@ pub fn limit_constant(ty_name: &str, name: &str) -> Option<LimitConstant> {
             PrimitiveTy::UInt(width)
         };
         let literal = match (name, signed) {
-            ("MIN", true) => (-(1i128 << (bits - 1))).to_string(),
-            ("MAX", true) => ((1i128 << (bits - 1)) - 1).to_string(),
+            ("MIN", true) => (-((u128::MAX >> (129 - bits)) as i128) - 1).to_string(),
+            ("MAX", true) => ((u128::MAX >> (129 - bits)) as i128).to_string(),
             ("MIN", false) => "0".to_string(),
             // Hex, so a value above `i64::MAX` reads back as its bit pattern.
             ("MAX", false) => format!("0x{:X}", u128::MAX >> (128 - bits)),
@@ -101,6 +101,8 @@ fn int_shape(name: &str) -> Option<(IntWidth, bool, u32)> {
         "u32" => (IntWidth::W32, false, 32),
         "u64" => (IntWidth::W64, false, 64),
         "usize" => (IntWidth::Size, false, 64),
+        "i128" => (IntWidth::W128, true, 128),
+        "u128" => (IntWidth::W128, false, 128),
         _ => return None,
     })
 }
@@ -123,6 +125,9 @@ mod tests {
         assert_eq!(int("i8", "MIN"), "-128");
         assert_eq!(int("u8", "MAX"), "0xFF");
         assert_eq!(int("u64", "MAX"), "0xFFFFFFFFFFFFFFFF");
+        assert_eq!(int("i128", "MIN"), i128::MIN.to_string());
+        assert_eq!(int("i128", "MAX"), i128::MAX.to_string());
+        assert_eq!(int("u128", "MAX"), format!("0x{:X}", u128::MAX));
         assert_eq!(int("u32", "BITS"), "32");
     }
 

@@ -756,6 +756,19 @@ impl TypeChecker<'_> {
         {
             return Some(ret);
         }
+        // `template::render(source, data)`, rewritten to the module's mangled
+        // name: `data` is any value with a JSON form, encoded at the call.
+        if module.is_empty()
+            && matches!(
+                last,
+                "__gos_text_template_render" | "__gos_html_template_render"
+            )
+            && let ([source, data], [source_ty, data_ty]) = (args, arg_tys)
+        {
+            let string = self.tcx.string_ty();
+            self.unify(string, *source_ty, source.span);
+            return Some(self.check_template_data(data, *data_ty));
+        }
         // The prelude's printers and assertions answer nothing: `()` when
         // nothing else constrains the call, as for a closure that only
         // prints, while a printer closing a callback whose answer is
@@ -1608,10 +1621,34 @@ impl TypeChecker<'_> {
             || gossamer_resolve::STDLIB_MODULES
                 .binary_search(&module.as_str())
                 .is_err()
-            || !gossamer_resolve::is_stdlib_type_path(module, ty)
             || gossamer_resolve::is_stdlib_item_path(&format!("{module}::{ty}::{member}"))
         {
             return None;
+        }
+        // A type the module does not declare has no members to reach.
+        if !gossamer_resolve::is_stdlib_type_path(module, ty)
+            && !self.user_type_defs.contains_key(ty.as_str())
+        {
+            let prefix = format!("{module}::");
+            let mut declared: Vec<String> = gossamer_resolve::STDLIB_QUALIFIED
+                .iter()
+                .filter_map(|path| path.strip_prefix(prefix.as_str()))
+                .filter(|rest| {
+                    !rest.contains("::") && rest.starts_with(|c: char| c.is_ascii_uppercase())
+                })
+                .map(ToString::to_string)
+                .collect();
+            declared.sort();
+            declared.dedup();
+            self.emit(
+                TypeError::UnknownAssocItem {
+                    base: format!("std::{module}"),
+                    name: ty.clone(),
+                    declared,
+                },
+                callee.span,
+            );
+            return Some(self.tcx.error_ty());
         }
         if let Some(first) = arg_tys.first() {
             let first = self.infer.resolve(self.tcx, *first);

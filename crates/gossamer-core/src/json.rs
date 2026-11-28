@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use thiserror::Error;
 
+pub use document::{Children, ParsedTape, ValueRef};
+
+mod document;
 mod scan;
 pub mod typed;
 mod walk;
@@ -165,8 +168,41 @@ pub fn integral_u64(f: f64) -> Option<u64> {
     (f.fract() == 0.0 && (0.0..TWO_POW_64).contains(&f)).then_some(f as u64)
 }
 
-/// Parses a JSON document into a [`Value`].
+/// What a key an object repeats reads as. JSON leaves it open (RFC 8259
+/// section 4), and readers that disagree on it read one document two ways, so
+/// a repeated key is refused unless the program chooses a value for it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DuplicateKeys {
+    /// A repeated key is an error naming it.
+    #[default]
+    Error,
+    /// The key's first value is kept.
+    UseFirst,
+    /// The key's last value is kept.
+    UseLast,
+}
+
+impl DuplicateKeys {
+    /// The policy a program's `DuplicateKeys` value stands for, by its
+    /// declaration order (`Error`, `UseFirst`, `UseLast`).
+    #[must_use]
+    pub fn from_index(index: i64) -> Self {
+        match index {
+            1 => Self::UseFirst,
+            2 => Self::UseLast,
+            _ => Self::Error,
+        }
+    }
+}
+
+/// Parses a JSON document into a [`Value`], refusing a repeated key.
 pub fn parse(source: &str) -> Result<Value, Error> {
+    parse_with(source, DuplicateKeys::Error)
+}
+
+/// Parses a JSON document into a [`Value`], reading a repeated key as
+/// `duplicates` says.
+pub fn parse_with(source: &str, duplicates: DuplicateKeys) -> Result<Value, Error> {
     let cap = max_size();
     if source.len() > cap {
         return Err(Error {
@@ -176,6 +212,7 @@ pub fn parse(source: &str) -> Result<Value, Error> {
         });
     }
     let mut parser = Parser::new(source);
+    parser.duplicates = duplicates;
     parser.skip_whitespace();
     let value = parser.parse_value()?;
     parser.skip_whitespace();
@@ -210,6 +247,22 @@ pub type ContainerSpans = Vec<(usize, usize)>;
 pub fn validate_with_containers(bytes: &[u8]) -> Result<(&str, ContainerSpans), Error> {
     validate_with(bytes, Some(Vec::new()))
         .map(|(source, containers)| (source, containers.unwrap_or_default()))
+}
+
+/// [`validate`] for a document already known to be UTF-8: whether it is one
+/// JSON value, as [`parse`] reads it, without building anything.
+///
+/// # Errors
+///
+/// The error [`validate`] reports, apart from an encoding one.
+pub fn validate_str(source: &str) -> Result<(), Error> {
+    check_size(source.as_bytes())?;
+    // The fast loop reads a well-formed document once; only one it stops
+    // short in is read again by the checking walk, for its error.
+    if walk::well_formed(source, max_depth()) {
+        return Ok(());
+    }
+    validate_source(source, None).map(|_| ())
 }
 
 /// [`validate_with_containers`] for a document already known to be UTF-8.
@@ -372,6 +425,88 @@ impl Tape {
     }
 }
 
+/// The first key an object of `tape` repeats, with the byte offset of its
+/// repetition, in document order of the repetitions.
+#[must_use]
+pub fn tape_duplicate_key(source: &str, tape: &Tape) -> Option<(String, usize)> {
+    /// An object with at most this many members is searched pairwise; a
+    /// larger one through a set.
+    const PAIRWISE: u32 = 16;
+    let key_text = |node: TapeNode| -> std::borrow::Cow<'_, str> {
+        let raw = &source[node.start as usize + 1..node.end() as usize - 1];
+        if node.kind() == TapeKind::StrEscaped {
+            std::borrow::Cow::Owned(unescape_string(raw))
+        } else {
+            std::borrow::Cow::Borrowed(raw)
+        }
+    };
+    let mut first: Option<(String, usize)> = None;
+    let mut seen: std::collections::HashSet<std::borrow::Cow<'_, str>> =
+        std::collections::HashSet::new();
+    let mut keys: Vec<TapeNode> = Vec::new();
+    for &object in &tape.objects {
+        let members = tape.count(object);
+        if members < 2 {
+            continue;
+        }
+        let mut key = object + 2;
+        let mut repeated = None;
+        if members <= PAIRWISE {
+            keys.clear();
+            for _ in 0..members {
+                let node = tape.node(key);
+                // Two keys without an escape are equal exactly when their
+                // spans are; a key with one is compared as it reads.
+                let raw = |n: TapeNode| &source.as_bytes()[n.start as usize..n.end() as usize];
+                let same = keys.iter().any(|&earlier| {
+                    match (
+                        earlier.kind() == TapeKind::StrEscaped,
+                        node.kind() == TapeKind::StrEscaped,
+                    ) {
+                        (false, false) => raw(earlier) == raw(node),
+                        _ => key_text(earlier) == key_text(node),
+                    }
+                });
+                if same {
+                    repeated = Some(node);
+                    break;
+                }
+                keys.push(node);
+                key = tape.extent(key + 1);
+            }
+        } else {
+            seen.clear();
+            for _ in 0..members {
+                let node = tape.node(key);
+                let text = key_text(node);
+                if seen.contains(&text) {
+                    repeated = Some(node);
+                    break;
+                }
+                seen.insert(text);
+                key = tape.extent(key + 1);
+            }
+        }
+        if let Some(node) = repeated {
+            let at = node.start as usize;
+            if first.as_ref().is_none_or(|(_, earlier)| at < *earlier) {
+                first = Some((key_text(node).into_owned(), at));
+            }
+        }
+    }
+    first
+}
+
+/// Whether an object of `source`, a document [`validate`] accepted into
+/// `tape` (`None` for one too long for a tape), repeats a key.
+#[must_use]
+pub fn has_duplicate_key(source: &str, tape: Option<&Tape>) -> bool {
+    match tape {
+        Some(tape) => tape_duplicate_key(source, tape).is_some(),
+        None => validate_source_with(source, None, DuplicateKeys::Error).is_err(),
+    }
+}
+
 /// [`validate`], also reading the document into a [`Tape`] in the same walk.
 /// A document longer than [`TAPE_MAX_LEN`] bytes answers no tape: its
 /// offsets do not fit one.
@@ -387,6 +522,33 @@ pub fn validate_to_tape(bytes: &[u8]) -> Result<(&str, Option<Tape>), Error> {
         return Ok((source, None));
     }
     tape_of(source).map(|tape| (source, Some(tape)))
+}
+
+/// [`validate_to_tape`] for `json::parse`, which refuses a repeated key when
+/// `duplicates` is [`DuplicateKeys::Error`].
+///
+/// # Errors
+///
+/// The error [`validate`] reports, or a repeated key with its position.
+pub fn parse_to_tape(
+    bytes: &[u8],
+    duplicates: DuplicateKeys,
+) -> Result<(&str, Option<Tape>), Error> {
+    check_size(bytes)?;
+    let source = utf8_source(bytes)?;
+    if source.len() > TAPE_MAX_LEN {
+        validate_source_with(source, None, duplicates)?;
+        return Ok((source, None));
+    }
+    let tape = tape_of(source)?;
+    if duplicates == DuplicateKeys::Error
+        && let Some((key, at)) = tape_duplicate_key(source, &tape)
+    {
+        let mut parser = Parser::new(source);
+        parser.cursor = at;
+        return Err(parser.error(format!("duplicate key `{key}`")));
+    }
+    Ok((source, Some(tape)))
 }
 
 /// [`validate_to_tape`] for a document already known to be UTF-8: its tape,
@@ -493,7 +655,7 @@ pub fn unescape_string(raw: &str) -> String {
     out
 }
 
-fn check_size(bytes: &[u8]) -> Result<(), Error> {
+pub(super) fn check_size(bytes: &[u8]) -> Result<(), Error> {
     let cap = max_size();
     if bytes.len() > cap {
         return Err(Error {
@@ -531,8 +693,19 @@ fn validate_source(
     source: &str,
     containers: Option<ContainerSpans>,
 ) -> Result<Option<ContainerSpans>, Error> {
+    validate_source_with(source, containers, DuplicateKeys::UseLast)
+}
+
+/// [`validate_source`], refusing a repeated key when `duplicates` is
+/// [`DuplicateKeys::Error`].
+fn validate_source_with(
+    source: &str,
+    containers: Option<ContainerSpans>,
+    duplicates: DuplicateKeys,
+) -> Result<Option<ContainerSpans>, Error> {
     let mut parser = Parser::new(source);
     parser.build = false;
+    parser.duplicates = duplicates;
     parser.containers = containers;
     parser.skip_whitespace();
     parser.check_value()?;
@@ -559,6 +732,8 @@ struct Parser<'a> {
     tape: Option<Tape>,
     /// Whether the string the walk read last held an escape.
     escaped: bool,
+    /// What a key an object repeats reads as, when the walk builds.
+    duplicates: DuplicateKeys,
 }
 
 impl<'a> Parser<'a> {
@@ -573,6 +748,7 @@ impl<'a> Parser<'a> {
             containers: None,
             tape: None,
             escaped: false,
+            duplicates: DuplicateKeys::Error,
         }
     }
 
@@ -832,6 +1008,7 @@ impl<'a> Parser<'a> {
         let slot = self.record(TapeKind::Object, self.cursor, 0);
         self.bump();
         let mut map = BTreeMap::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut count = 0u32;
         self.skip_whitespace();
         if self.peek() == Some(b'}') {
@@ -850,9 +1027,32 @@ impl<'a> Parser<'a> {
             if self.bump() != Some(b':') {
                 return Err(self.error("expected `:`"));
             }
+            let key_end = self.cursor;
+            if !self.build && self.duplicates == DuplicateKeys::Error && !seen.insert(key.clone()) {
+                self.cursor = key_start;
+                let error = self.error(format!("duplicate key `{key}`"));
+                self.cursor = key_end;
+                return Err(error);
+            }
             let value = self.parse_value()?;
             if self.build {
-                map.insert(key, value);
+                match self.duplicates {
+                    DuplicateKeys::UseLast => {
+                        map.insert(key, value);
+                    }
+                    DuplicateKeys::UseFirst => {
+                        map.entry(key).or_insert(value);
+                    }
+                    DuplicateKeys::Error => {
+                        if map.contains_key(&key) {
+                            self.cursor = key_start;
+                            let error = self.error(format!("duplicate key `{key}`"));
+                            self.cursor = key_end;
+                            return Err(error);
+                        }
+                        map.insert(key, value);
+                    }
+                }
             }
             count += 1;
             self.skip_whitespace();
@@ -1136,7 +1336,39 @@ impl Parser<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TapeKind, Value, integral_i64, integral_u64, parse, tape_bound, validate_to_tape};
+    use super::{
+        DuplicateKeys, TapeKind, Value, integral_i64, integral_u64, parse, parse_to_tape,
+        parse_with, tape_bound, validate_to_tape,
+    };
+
+    #[test]
+    fn a_repeated_key_is_refused_by_default_and_named_with_its_position() {
+        let text = r#"{"a": 1, "b": {"k": 1, "k": 2}}"#;
+        let error = parse(text).unwrap_err();
+        assert_eq!(error.to_string(), "duplicate key `k` at 1:24");
+        let error = parse_to_tape(text.as_bytes(), DuplicateKeys::Error).unwrap_err();
+        assert_eq!(error.to_string(), "duplicate key `k` at 1:24");
+        assert!(parse_to_tape(text.as_bytes(), DuplicateKeys::UseLast).is_ok());
+    }
+
+    #[test]
+    fn a_repeated_key_keeps_the_value_the_policy_names() {
+        let text = r#"{"a": 1, "a": 2}"#;
+        let first = parse_with(text, DuplicateKeys::UseFirst).unwrap();
+        let last = parse_with(text, DuplicateKeys::UseLast).unwrap();
+        let member = |value: &Value| match value {
+            Value::Object(members) => members.get("a").cloned(),
+            _ => None,
+        };
+        assert_eq!(member(&first), Some(Value::Int(1)));
+        assert_eq!(member(&last), Some(Value::Int(2)));
+    }
+
+    #[test]
+    fn keys_equal_after_unescaping_are_one_key() {
+        assert!(parse(r#"{"a": 1, "\u0061": 2}"#).is_err());
+        assert!(parse_to_tape(br#"{"a": 1, "\u0061": 2}"#, DuplicateKeys::Error).is_err());
+    }
 
     #[test]
     fn integral_conversions_exclude_the_power_of_two_past_each_range() {

@@ -137,24 +137,25 @@ fn register_inline_enums(program: &HirProgram, tcx: &mut TyCtxt) {
 /// or themselves inline enums, which would not fit in one payload word).
 fn field_fits_inline(tcx: &TyCtxt, ty: gossamer_types::Ty) -> bool {
     use gossamer_types::TyKind;
-    matches!(
-        tcx.kind_of(ty),
-        TyKind::Bool
-            | TyKind::Char
-            | TyKind::Int(_)
-            | TyKind::Float(_)
-            | TyKind::String
-            | TyKind::Slice(_)
-            | TyKind::Vec(_)
-            | TyKind::HashMap { .. }
-            | TyKind::Sender(_)
-            | TyKind::Receiver(_)
-            | TyKind::JoinHandle(_)
-            | TyKind::Ref { .. }
-            | TyKind::FnPtr(_)
-            | TyKind::JsonValue
-            | TyKind::DynError
-    )
+    !tcx.is_wide_int(ty)
+        && matches!(
+            tcx.kind_of(ty),
+            TyKind::Bool
+                | TyKind::Char
+                | TyKind::Int(_)
+                | TyKind::Float(_)
+                | TyKind::String
+                | TyKind::Slice(_)
+                | TyKind::Vec(_)
+                | TyKind::HashMap { .. }
+                | TyKind::Sender(_)
+                | TyKind::Receiver(_)
+                | TyKind::JoinHandle(_)
+                | TyKind::Ref { .. }
+                | TyKind::FnPtr(_)
+                | TyKind::JsonValue
+                | TyKind::DynError
+        )
 }
 
 /// Records the fields of every concrete generic struct type the front end
@@ -752,6 +753,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut Vec<Body>, start: usize, tcx: &
     crate::monomorph::register_struct_instantiations(&bodies[start..], tcx);
     let user_fn_names: std::collections::HashSet<String> =
         bodies.iter().map(|body| body.name.clone()).collect();
+    let callee_params = crate::opt::CalleeParams::compute(bodies, tcx);
     // Which callees borrow a `json::Value` they are handed, so the carrier a
     // combinator reads the handle out of can be reclaimed after the call.
     let json_borrowing_fns = collect_json_borrowing_fns(bodies, tcx);
@@ -785,7 +787,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut Vec<Body>, start: usize, tcx: &
         copy_stored_containers(body, tcx);
         copy_values_into_holders(body, tcx);
         borrow_lent_payload_reads(body, tcx);
-        copy_returned_lent_tables(body, tcx);
+        copy_returned_lent_tables(body, tcx, &user_fn_names);
         rewrite_str_concat_consuming(body);
         crate::opt::elide_vec_clone_in_three_way_swaps(body);
         crate::opt::reserve_vecs_for_counted_push_loops(body);
@@ -804,7 +806,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut Vec<Body>, start: usize, tcx: &
         view_read_only_string_bytes(body);
         read_packed_elements_by_value(body, tcx);
         release_mapped_payloads(body, tcx);
-        own_carrier_payloads(body, tcx);
+        own_carrier_payloads(body, tcx, &user_fn_names);
     });
     for body in rest.iter_mut() {
         record_channel_elem_kind(body, tcx);
@@ -813,12 +815,12 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut Vec<Body>, start: usize, tcx: &
         shadow_rebound_string_parameters(body, tcx);
         clear_region_on_call_results(body);
         free_overwritten_ctor_values(body, tcx, &container_ctor_free);
-        own_returned_map_payloads(body, tcx);
+        own_returned_map_payloads(body, tcx, &user_fn_names);
         own_sequence_slot_stores(body, tcx);
         insert_drops_at_returns(body, tcx, &user_fn_names);
         complete_ok_or_err_kind(body, tcx);
         clone_json_field_reads(body, tcx);
-        insert_rc_releases(body, tcx);
+        insert_rc_releases(body, tcx, &callee_params);
         retain_borrowed_fallback_payloads(body, tcx);
         insert_aggr_copy_drops(body, tcx);
         insert_json_frees(body, tcx, &json_borrowing_fns);
@@ -881,6 +883,13 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut Vec<Body>, start: usize, tcx: &
     // gate excludes goroutine-shared values, whose count is adjusted
     // concurrently under the atomic protocol. `GOS_RC_NO_ELIDE` disables
     // the pass for differential measurement and as a safety escape hatch.
+    // A body that holds a value whose release runs a cleanup observes when
+    // each release happens, so the passes below, which move and merge
+    // releases, leave it as the drop passes placed them.
+    let cleanup_types = tcx.has_cleanup_types();
+    let observes_releases = move |body: &Body, tcx: &TyCtxt| {
+        cleanup_types && body.locals.iter().any(|local| tcx.is_scope_bound(local.ty))
+    };
     if std::env::var_os("GOS_RC_NO_ELIDE").is_none() {
         // Uniqueness-driven transfers run first, so the null sources they
         // leave are what the null-accounting elision below cleans up.
@@ -890,6 +899,9 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut Vec<Body>, start: usize, tcx: &
             let rest = &mut bodies[start..];
             let mut reports = vec![crate::opt::UniquenessReport::default(); rest.len()];
             for_each_body_with(rest, &mut reports, tcx, |body, report, tcx| {
+                if observes_releases(body, tcx) {
+                    return;
+                }
                 *report = crate::opt::UniquenessReport {
                     shares_transferred: crate::opt::transfer_last_use_shares(body, tcx, &summaries)
                         + crate::opt::transfer_carrier_payload_shares(body, tcx, &summaries)
@@ -903,6 +915,9 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut Vec<Body>, start: usize, tcx: &
         }
         let callees = crate::opt::CalleeParams::compute(bodies, tcx);
         for_each_body(&mut bodies[start..], tcx, |body, tcx| {
+            if observes_releases(body, tcx) {
+                return;
+            }
             crate::opt::elide_unit_variant_rc(body);
             crate::opt::elide_null_rc_accounting(body);
             crate::opt::elide_redundant_rc_pairs(body, tcx);
@@ -917,11 +932,17 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut Vec<Body>, start: usize, tcx: &
             crate::opt::elide_redundant_rc_pairs(body, tcx);
         });
     }
-    for_each_body(
-        &mut bodies[start..],
-        tcx,
-        crate::opt::forward_moved_temporaries,
-    );
+    for_each_body(&mut bodies[start..], tcx, |body, tcx| {
+        if !observes_releases(body, tcx) {
+            crate::opt::forward_moved_temporaries(body, tcx);
+        }
+    });
+    // After the passes that move and elide shares, which read the marker as
+    // a use of the binding, so its share stays the binding's to its release.
+    for_each_body(&mut bodies[start..], tcx, release_scope_bound_bindings);
+    if tcx.has_cleanup_types() {
+        for_each_body(&mut bodies[start..], tcx, drain_cleanups_at_returns);
+    }
     // Perceus reuse: recycle a uniquely-owned block being released into a
     // same-type constructor in place. Runs last so it sees the final release
     // set; `GOS_RC_NO_REUSE` disables it for differential measurement and as a
@@ -929,7 +950,11 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut Vec<Body>, start: usize, tcx: &
     // this MIR), and a runtime refcount check makes any mis-pairing fall back to
     // a fresh allocation rather than corrupt.
     if std::env::var_os("GOS_RC_NO_REUSE").is_none() {
-        for_each_body(&mut bodies[start..], tcx, crate::opt::insert_rc_reuse);
+        for_each_body(&mut bodies[start..], tcx, |body, tcx| {
+            if !observes_releases(body, tcx) {
+                crate::opt::insert_rc_reuse(body, tcx);
+            }
+        });
     }
     // After every pass that places or moves a release, so the releases it
     // finds past a region's pop are the final ones.

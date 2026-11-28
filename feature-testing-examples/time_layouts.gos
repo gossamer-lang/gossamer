@@ -1,0 +1,40 @@
+// `Time::format(layout)` and `time::parse(layout, text, location:)` read and
+// write strftime directives the same way on every tier.
+use std::time
+
+fn main() {
+    let t = time::Time::from_unix_ms(1717257600123)
+    println(t.format("%Y-%m-%d %H:%M:%S%.3f %a %b %j").unwrap())
+    let ny = time::Location::lookup("America/New_York").unwrap()
+    let local = t.in_location(ny)
+    println(local.format("%A, %B %-d, %Y at %-I:%M %p %Z (%:z)").unwrap())
+    let p = time::parse("%Y-%m-%d %H:%M:%S %z", "2024-06-01 08:00:00 -0400").unwrap()
+    println(f"{p} {p.unix_ms()}")
+    let utc = time::parse("%d/%m/%Y %H:%M", "01/06/2024 12:00").unwrap()
+    println(f"{utc}")
+    let in_ny = time::parse("%Y-%m-%d %H:%M", "2024-06-01 08:00", location: Some(ny)).unwrap()
+    println(f"{in_ny} same instant: {in_ny.unix_ms() == p.unix_ms()}")
+    let named = time::parse("%Y-%m-%d %H:%M %Q", "2024-12-01 08:00 America/New_York").unwrap()
+    println(f"{named} in {named.location().name()}")
+    match time::parse("%Y-%m-%d %H:%M", "2024-03-10 02:30", location: Some(ny)) {
+        Ok(t) => println(f"gap parsed {t}")
+        Err(e) => println(f"gap: {e}")
+    }
+    match time::parse("%Y-%m-%d %H:%M", "2024-11-03 01:30", location: Some(ny)) {
+        Ok(t) => println(f"fold parsed {t}")
+        Err(e) => println(f"fold: {e}")
+    }
+    match time::parse("%Y-%m-%d %H:%M %z", "2024-11-03 01:30 -0500", location: Some(ny)) {
+        Ok(t) => println(f"fold with offset {t}")
+        Err(e) => println(f"fold with offset: {e}")
+    }
+    match time::parse("%Y-%m-%d", "2024-13-01") {
+        Ok(t) => println(f"bad parsed {t}")
+        Err(e) => println(f"bad: {e}")
+    }
+    match t.format("%Q %K") {
+        Ok(s) => println(f"odd {s}")
+        Err(e) => println(f"bad layout: {e}")
+    }
+    println(f"{time::parse("%s", "1717257600").unwrap()}")
+}

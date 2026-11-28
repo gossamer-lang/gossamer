@@ -1,0 +1,56 @@
+// Program types that share a name with a standard handle (`Client`,
+// `Server`, `Scanner`) keep their own methods, `&self` receivers included.
+
+struct Client {
+    base: String
+}
+
+impl Client {
+    fn request(&self, method: String, path: String) -> String { f"{method} {self.base}{path}" }
+
+    fn get(&self, path: String) -> String { self.request("GET", path) }
+
+    fn post(&self, path: String) -> String { self.request("POST", path) }
+}
+
+struct Server {
+    port: i64
+}
+
+impl Server {
+    fn addr(&self) -> String { f"127.0.0.1:{self.port}" }
+
+    fn shutdown(&mut self) { self.port = 0 }
+}
+
+struct Scanner {
+    words: Vec<String>
+}
+
+impl Scanner {
+    fn scan(&mut self) -> bool { self.words.len() > 0 }
+
+    fn text(&self) -> String { self.words.join(" ") }
+}
+
+// A loop over the methods, so the JIT compiles them too.
+fn fetch_all(client: Client, paths: Vec<String>) -> i64 {
+    let mut total = 0
+    for path in paths {
+        total += client.get(path).len()
+    }
+    total
+}
+
+fn main() {
+    let client = Client { base: "http://h" }
+    println(fetch_all(client, #["/a", "/bc", "/def"]))
+    println(client.get("/a"))
+    println(client.post("/b"))
+    let mut server = Server { port: 8080 }
+    println(server.addr())
+    server.shutdown()
+    println(server.addr())
+    let mut scanner = Scanner { words: #["one", "two"] }
+    println(f"{scanner.scan()} {scanner.text()}")
+}

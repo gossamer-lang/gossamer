@@ -93,16 +93,22 @@ impl<'a> Lowerer<'a> {
                 // A bare reference local already stores the referent pointer,
                 // so forward that value instead of taking the address of the
                 // stack slot that happens to hold the reference.
+                // A runtime handle (a channel end, an atomic, a mutex, a
+                // file) is referred to by the handle itself, which its
+                // methods take, as a collection is.
+                let leaf_ty = self.place_leaf_ty(place);
                 let leaf_is_heap_value = matches!(
-                    self.tcx.kind(self.place_leaf_ty(place)),
+                    self.tcx.kind(leaf_ty),
                     Some(
                         TyKind::String | TyKind::Slice(_) | TyKind::Vec(_) | TyKind::HashMap { .. }
                     )
-                );
+                ) || self.tcx.is_managed_handle(leaf_ty);
+                // A `&mut String` names the slot a callee rebinds, a bare
+                // local's or a field's or element's alike: the text is
+                // replaced whole, never edited where it lies.
                 let bare_mut_string = *mutable
-                    && place.projection.is_empty()
                     && matches!(
-                        self.tcx.kind(self.body.local_ty(place.local)),
+                        self.tcx.kind(self.place_leaf_ty(place)),
                         Some(TyKind::String)
                     );
                 // A local whose slot holds a pointer to its value - which is
@@ -483,11 +489,58 @@ impl<'a> Lowerer<'a> {
         })
     }
 
+    /// A 128-bit payload of the carrier type `carrier`, boxed into a counted
+    /// copy whose address is the payload word: the `Option` / `Result` arm
+    /// `disc` selects, when that arm is `i128` / `u128`. `None` for any other
+    /// payload.
+    fn box_wide_payload(
+        &mut self,
+        disc: &Operand,
+        payload: &Operand,
+        carrier: Ty,
+    ) -> Result<Option<String>, BuildError> {
+        let payload_ty = match payload {
+            Operand::Copy(place) if place.projection.is_empty() => {
+                Some(self.body.local_ty(place.local))
+            }
+            _ => {
+                let Some(TyKind::Adt { def, substs }) = self.tcx.kind(carrier) else {
+                    return Ok(None);
+                };
+                let types = substs.types();
+                // A constant discriminant names the arm; `Some` and `Ok` are 0.
+                let arm = match disc {
+                    Operand::Const(ConstValue::Int(n)) => usize::try_from(*n).unwrap_or(0),
+                    _ => 0,
+                };
+                match def.local {
+                    n if n == u32::MAX - 1 && arm == 0 => types.first().copied(),
+                    n if n == u32::MAX => types.get(arm.min(1)).copied(),
+                    _ => None,
+                }
+            }
+        };
+        let Some(payload_ty) = payload_ty.filter(|ty| self.tcx.is_wide_int(*ty)) else {
+            return Ok(None);
+        };
+        let Some(meta) = self.tcx.aggr_copy_meta(payload_ty).map(str::to_owned) else {
+            return Ok(None);
+        };
+        let value = self.lower_operand(payload)?;
+        let allocator = self.rc_alloc_entry(false, Some(&meta));
+        let heap = self.emit_rc_alloc(allocator, 16, &format!("@\"{meta}\""), "null");
+        writeln!(self.out, "  store i128 {value}, ptr {heap}, align 8").unwrap();
+        let word = self.fresh();
+        writeln!(self.out, "  {word} = ptrtoint ptr {heap} to i64").unwrap();
+        Ok(Some(word))
+    }
+
     fn try_inline_result_carrier(
         &mut self,
         name: &str,
         args: &[Operand],
         dest_ty: &str,
+        dest_ty_mir: Ty,
     ) -> Result<Option<String>, BuildError> {
         // Coerce an SSA value to `dest_ty` (a no-op when it already matches,
         // or when the result is discarded into a `void` / unit destination -
@@ -576,6 +629,10 @@ impl<'a> Lowerer<'a> {
                 // A payload with no fields carries no bits, as `()` does.
                 let payload = if self.is_field_free_operand(&args[1]) {
                     "0".to_string()
+                } else if let Some(boxed) =
+                    self.box_wide_payload(&args[0], &args[1], dest_ty_mir)?
+                {
+                    boxed
                 } else if let Some(hv) = self
                     .maybe_heap_copy_value_enum(&args[1])
                     .or_else(|| self.maybe_heap_copy_aggregate_moved(&args[1], owned))
@@ -629,6 +686,28 @@ impl<'a> Lowerer<'a> {
                 // generic template names the plain extractor before its
                 // payload type is known, and its specialised copy reads into
                 // the float local that instantiation declares.
+                // A 128-bit payload is boxed, and the word is the box's
+                // address; `None` carries a null word, which reads as zero. A
+                // nested carrier reads through `gos_rt_result_payload_i128`,
+                // so an `i128` destination here is a 128-bit integer.
+                if dest_ty == "i128" && name == "gos_rt_result_payload" {
+                    let boxed = self.fresh();
+                    writeln!(self.out, "  {boxed} = inttoptr i64 {p64} to ptr").unwrap();
+                    let present = self.fresh();
+                    writeln!(self.out, "  {present} = icmp ne i64 {p64}, 0").unwrap();
+                    let safe = self.fresh();
+                    writeln!(
+                        self.out,
+                        "  {safe} = select i1 {present}, ptr {boxed}, ptr @gos_rt_wide_zero"
+                    )
+                    .unwrap();
+                    self.runtime_refs.insert(
+                        "@gos_rt_wide_zero = external dso_local global [2 x i64]".to_string(),
+                    );
+                    let wide = self.fresh();
+                    writeln!(self.out, "  {wide} = load i128, ptr {safe}, align 8").unwrap();
+                    return Ok(Some(coerce_dest(self, wide, "i128")));
+                }
                 if name == "gos_rt_result_payload_f64" || matches!(dest_ty, "double" | "float") {
                     let f = self.fresh();
                     writeln!(self.out, "  {f} = bitcast i64 {p64} to double").unwrap();
@@ -1064,7 +1143,9 @@ impl<'a> Lowerer<'a> {
         // pure register pack/unpack, so `?`-heavy code stops paying an FFI call
         // per propagation. Inlining also sidesteps the Win64 i128 by-pointer /
         // `<16 x i8>` calling convention entirely - no ABI boundary is crossed.
-        if let Some(inlined) = self.try_inline_result_carrier(name, args, &dest_ty)? {
+        if let Some(inlined) =
+            self.try_inline_result_carrier(name, args, &dest_ty, self.body.local_ty(dest_local))?
+        {
             return Ok(inlined);
         }
         if name == "gos_rt_bits_trailing_zeros" && args.len() == 1 {
@@ -1729,7 +1810,9 @@ impl<'a> Lowerer<'a> {
             ));
         }
         let dest_ty = render_ty(self.tcx, self.body.local_ty(dest_local));
-        if let Some(inlined) = self.try_inline_result_carrier(name, args, &dest_ty)? {
+        if let Some(inlined) =
+            self.try_inline_result_carrier(name, args, &dest_ty, self.body.local_ty(dest_local))?
+        {
             return Ok(inlined);
         }
         let llvm_intrinsic = match intrinsic {
@@ -1756,6 +1839,19 @@ impl<'a> Lowerer<'a> {
             // an out-of-range / null access redirects to a scratch byte, which
             // reproduces `gos_rt_heap_u8_set`'s no-op-on-OOB semantics without
             // the per-byte call overhead (fasta's hot inner loop).
+            // The check every Vec write path makes: a flag test, and for a
+            // buffer of its own one load of the count of vectors holding it,
+            // inline; only a buffer copies share calls the runtime.
+            RawIntrinsic::Runtime if name == "gos_rt_vec_unshare" => {
+                let v = self.lower_operand(&args[0])?;
+                self.emit_vec_unshare_inline(&v);
+                return Ok(match dest_ty.as_str() {
+                    "ptr" => "null",
+                    "double" | "float" => "0.0",
+                    _ => "0",
+                }
+                .to_string());
+            }
             RawIntrinsic::Runtime if name == "gos_rt_heap_u8_set" => {
                 let v = self.lower_operand(&args[0])?;
                 let idx = self.lower_operand(&args[1])?;

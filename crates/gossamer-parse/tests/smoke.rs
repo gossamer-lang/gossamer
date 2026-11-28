@@ -1431,9 +1431,11 @@ fn positional_and_named_struct_literal_entries_both_end_at_a_newline() {
     let names: Vec<&str> = fields.iter().map(|f| f.name.name.as_str()).collect();
     assert_eq!(names, ["0", "b", "c"]);
     assert!(
-        fields[2].value.is_none(),
+        fields[2].shorthand
+            && matches!(&fields[2].value, Some(value) if matches!(&value.kind, ExprKind::Path(path) if path.segments.len() == 1 && path.segments[0].name.name == "c")),
         "a name alone on its line is shorthand for the binding of that name"
     );
+    assert!(!fields[1].shorthand);
 }
 
 #[test]

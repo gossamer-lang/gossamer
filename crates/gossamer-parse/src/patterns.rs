@@ -627,6 +627,7 @@ fn primitive_int_limit(ty: &str, limit: &str) -> Option<i128> {
         "i16" => (i16::MIN.into(), i16::MAX.into()),
         "i32" => (i32::MIN.into(), i32::MAX.into()),
         "i64" | "isize" => (i64::MIN.into(), i64::MAX.into()),
+        "i128" => (i128::MIN, i128::MAX),
         "u8" => (0, u8::MAX.into()),
         "u16" => (0, u16::MAX.into()),
         "u32" => (0, u32::MAX.into()),

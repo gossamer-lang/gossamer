@@ -1,18 +1,18 @@
 // Process Spawn and Output Capture
-// Use exec::run to spawn subprocesses, capture stdout/stderr,
+// Use process::run to spawn subprocesses, capture stdout/stderr,
 // and check exit codes - the one-shot subprocess pattern.
 
-use std::os::exec
+use std::process
 
 fn run_cmd(prog: String, args: Vec<String>) -> Result<String, String> {
-    match exec::run(prog, args) {
+    match process::run(prog, args) {
         Ok(out) => Ok(out.stdout.trim().clone())
         Err(e) => Err(format("{e}"))
     }
 }
 
 fn run_and_check_code(prog: String, args: Vec<String>) -> i64 {
-    match exec::run(prog, args) {
+    match process::run(prog, args) {
         Ok(out) => out.code
         Err(_) => -1
     }
@@ -20,7 +20,7 @@ fn run_and_check_code(prog: String, args: Vec<String>) -> i64 {
 
 fn main() {
     // echo - simple stdout capture
-    match exec::run("echo", Vec::from(["hello from subprocess"])) {
+    match process::run("echo", Vec::from(["hello from subprocess"])) {
         Ok(out) => {
             println("stdout: '{}'", out.stdout.trim())
             println("code: {}", out.code)
@@ -29,7 +29,7 @@ fn main() {
     }
 
     // echo with multiple args
-    match exec::run("echo", Vec::from(["foo", "bar", "baz"])) {
+    match process::run("echo", Vec::from(["foo", "bar", "baz"])) {
         Ok(out) => println("multi-arg: '{}'", out.stdout.trim())
         Err(e) => println("error: {}", e)
     }
@@ -42,13 +42,13 @@ fn main() {
     println("false exit code = {}", false_code)
 
     // printf for controlled output
-    match exec::run("printf", Vec::from(["%d\\n", "42"])) {
+    match process::run("printf", Vec::from(["%d\\n", "42"])) {
         Ok(out) => println("printf output starts: {}", out.stdout.starts_with("42"))
         Err(e) => println("printf error: {}", e)
     }
 
     // sh -c for pipeline
-    match exec::run("sh", Vec::from(["-c", "echo hello | tr a-z A-Z"])) {
+    match process::run("sh", Vec::from(["-c", "echo hello | tr a-z A-Z"])) {
         Ok(out) => println("uppercase: '{}'", out.stdout.trim())
         Err(e) => println("sh error: {}", e)
     }
@@ -62,12 +62,12 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use std::os::exec
+    use std::process
     use std::testing
 
     #[test]
     fn echo_captures_stdout() {
-        match exec::run("echo", Vec::from(["gossamer"])) {
+        match process::run("echo", Vec::from(["gossamer"])) {
             Ok(out) => {
                 let _ = testing::check_eq(out.code, 0, "exit code 0")
                 let _ = testing::check(out.stdout.contains("gossamer"), "stdout contains gossamer")
@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn true_exits_zero() {
-        match exec::run("true", Vec::from([])) {
+        match process::run("true", Vec::from([])) {
             Ok(out) => { let _ = testing::check_eq(out.code, 0, "true exits 0")
             }
             Err(e) => { let _ = testing::check(false, e.to_string())
@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn false_exits_nonzero() {
-        match exec::run("false", Vec::from([])) {
+        match process::run("false", Vec::from([])) {
             Ok(out) => { let _ = testing::check(out.code != 0, "false exits non-zero")
             }
             Err(e) => { let _ = testing::check(false, e.to_string())
@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn sh_pipeline() {
-        match exec::run("sh", Vec::from(["-c", "echo hello"])) {
+        match process::run("sh", Vec::from(["-c", "echo hello"])) {
             Ok(out) => { let _ = testing::check(out.stdout.contains("hello"), "sh -c echo")
             }
             Err(e) => { let _ = testing::check(false, e.to_string())

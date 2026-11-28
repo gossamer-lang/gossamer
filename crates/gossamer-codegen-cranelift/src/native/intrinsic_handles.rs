@@ -214,6 +214,7 @@ pub(super) fn lower_intrinsic_call_handles(
         | "gos_rt_vec_mark_signed_elems"
         | "gos_rt_vec_mark_vec_elems"
         | "gos_rt_vec_mark_weak_elems"
+        | "gos_rt_vec_unshare"
         | "gos_rt_vec_compact_elems"
         | "gos_rt_vec_share_elements"
         | "gos_rt_set_free"
@@ -229,6 +230,7 @@ pub(super) fn lower_intrinsic_call_handles(
                 "gos_rt_vec_mark_signed_elems" => "gos_rt_vec_mark_signed_elems",
                 "gos_rt_vec_mark_vec_elems" => "gos_rt_vec_mark_vec_elems",
                 "gos_rt_vec_mark_weak_elems" => "gos_rt_vec_mark_weak_elems",
+                "gos_rt_vec_unshare" => "gos_rt_vec_unshare",
                 "gos_rt_vec_compact_elems" => "gos_rt_vec_compact_elems",
                 "gos_rt_vec_share_elements" => "gos_rt_vec_share_elements",
                 "gos_rt_set_free" => "gos_rt_set_free",

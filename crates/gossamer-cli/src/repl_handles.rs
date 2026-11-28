@@ -282,11 +282,6 @@ pub const HANDLE_SIGNATURES: &[(&str, &str, &str)] = &[
         "fn from_secs(secs: i64) -> time::Duration",
     ),
     (
-        "EndedSpan",
-        "to_otlp_json",
-        "fn to_otlp_json(self: trace::EndedSpan) -> String",
-    ),
-    (
         "Error",
         "cause",
         "fn cause(self: errors::Error) -> Option<errors::Error>",
@@ -321,47 +316,6 @@ pub const HANDLE_SIGNATURES: &[(&str, &str, &str)] = &[
         "Error",
         "with_field",
         "fn with_field(self: errors::Error, name: String, value: String) -> errors::Error",
-    ),
-    (
-        "Errors",
-        "add",
-        "fn add(self: validate::Errors, path: String, error: validate::FieldError) -> ()",
-    ),
-    (
-        "Errors",
-        "collect",
-        "fn collect(self: validate::Errors) -> String",
-    ),
-    (
-        "Errors",
-        "count",
-        "fn count(self: validate::Errors, path: String) -> i64",
-    ),
-    (
-        "Errors",
-        "get",
-        "fn get(self: validate::Errors, path: String) -> String",
-    ),
-    (
-        "Errors",
-        "is_empty",
-        "fn is_empty(self: validate::Errors) -> bool",
-    ),
-    ("Errors", "len", "fn len(self: validate::Errors) -> i64"),
-    (
-        "FieldError",
-        "code",
-        "fn code(self: validate::FieldError) -> String",
-    ),
-    (
-        "FieldError",
-        "message",
-        "fn message(self: validate::FieldError) -> String",
-    ),
-    (
-        "FieldError",
-        "path",
-        "fn path(self: validate::FieldError) -> String",
     ),
     ("File", "close", "fn close(self: fs::File) -> ()"),
     (
@@ -854,21 +808,6 @@ pub const HANDLE_SIGNATURES: &[(&str, &str, &str)] = &[
     ("SecurityHeaders", "off", "fn off() -> String"),
     ("SecurityHeaders", "strict", "fn strict() -> String"),
     ("Set", "new", "fn new<T>() -> Set<T>"),
-    (
-        "Span",
-        "end",
-        "fn end(self: trace::Span) -> trace::EndedSpan",
-    ),
-    (
-        "Span",
-        "set_attribute",
-        "fn set_attribute(self: trace::Span, key: String, value: String) -> ()",
-    ),
-    (
-        "Span",
-        "set_status",
-        "fn set_status(self: trace::Span, ok: bool, message: String) -> ()",
-    ),
     ("Stream", "flush", "fn flush(self: io::Stream) -> ()"),
     (
         "Stream",
@@ -984,6 +923,12 @@ pub const HANDLE_SIGNATURES: &[(&str, &str, &str)] = &[
     ),
     (
         "TcpStream",
+        "start_tls_identity",
+        "fn start_tls_identity(self: net::TcpStream, host: String, ca_pem: String, \
+         cert_pem: String, key_pem: String) -> Result<net::TcpStream, errors::Error>",
+    ),
+    (
+        "TcpStream",
         "start_tls_insecure",
         "fn start_tls_insecure(self: net::TcpStream, host: String) \
          -> Result<net::TcpStream, errors::Error>",
@@ -997,12 +942,6 @@ pub const HANDLE_SIGNATURES: &[(&str, &str, &str)] = &[
         "TcpStream",
         "write_all",
         "fn write_all(self: net::TcpStream, data: Vec<u8>) -> Result<(), errors::Error>",
-    ),
-    ("Tracer", "new", "fn new() -> trace::Tracer"),
-    (
-        "Tracer",
-        "start_span",
-        "fn start_span(self: trace::Tracer, name: String) -> trace::Span",
     ),
     ("U8Vec", "byte_len", "fn byte_len(self: U8Vec) -> i64"),
     (

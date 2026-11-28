@@ -60,7 +60,7 @@ impl InFlight {
     }
 }
 
-const SERVER_NAME: &str = "Server";
+const SERVER_NAME: &str = "http::Server";
 const SERVER_FIELD: &str = "__server";
 
 /// The server a `Server` value holds.
@@ -105,15 +105,11 @@ pub(crate) fn install_http_server(globals: &mut Vec<(&'static str, Value)>) {
         ("shutdown", builtin_shutdown),
         ("new", builtin_new),
     ];
-    // Both dispatch keys, matching the router: a method call resolves
-    // through the receiver's type name, and a path call through the
-    // module-qualified one.
-    let mut entries: Vec<(&'static str, BuiltinFnPub)> = Vec::with_capacity(methods.len() * 2);
+    // A method call resolves through the receiver's type name, which is
+    // module-qualified so a program's own `Server` never answers for it; the
+    // path call `http::Server::new()` uses the same key.
+    let mut entries: Vec<(&'static str, BuiltinFnPub)> = Vec::with_capacity(methods.len());
     for &(method, call) in methods {
-        entries.push((
-            Box::leak(format!("Server::{method}").into_boxed_str()),
-            call,
-        ));
         entries.push((
             Box::leak(format!("http::Server::{method}").into_boxed_str()),
             call,

@@ -812,6 +812,122 @@ pub unsafe extern "C-unwind" fn gos_rt_http_serve_tls(
     super::result::pack_result(0, 0)
 }
 
+/// `http::serve_tls_config(addr, config, handler)`, after the front end has
+/// read the configuration's registry id: serves TLS with the live
+/// configuration `config_id` names, read again for each accepted connection
+/// so a reload or a new SNI certificate reaches the next handshake.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn gos_rt_http_serve_tls_live(
+    addr: *const c_char,
+    config_id: i64,
+    handler_env: *mut u8,
+    handler_fn: i64,
+) -> i128 {
+    let addr_s = if addr.is_null() {
+        "0.0.0.0:8443".to_string()
+    } else {
+        // SAFETY: `addr` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `gos_str_arg_string` accepts.
+        unsafe { crate::c_abi::gos_str_arg_string(addr) }
+    };
+    let Some(live) = crate::tls_server::live(config_id) else {
+        return http_serve_err_result("http::serve_tls_config: the configuration was released");
+    };
+    let listener = match crate::listen::bind_tcp(&addr_s) {
+        Ok(l) => l,
+        Err(e) => return http_serve_err_result(&format!("http::serve_tls_config: {e}")),
+    };
+    let env_addr = handler_env as usize;
+    let fn_addr = handler_fn as usize;
+    accept_serve(listener, ConnHome::Goroutine, move |stream| {
+        // SAFETY: the caller keeps the handler environment live while the
+        // server runs, and `handler_fn` is its compiled method.
+        unsafe { serve_tls_conn(stream, env_addr, fn_addr, live.current()) };
+    });
+    super::result::pack_result(0, 0)
+}
+
+/// Reads a String argument as owned text, or the empty string for null.
+///
+/// # Safety
+///
+/// `ptr` is null or a live string body for the call.
+unsafe fn tls_text(ptr: *const c_char) -> String {
+    if ptr.is_null() {
+        String::new()
+    } else {
+        // SAFETY: the caller's contract.
+        unsafe { crate::c_abi::gos_str_arg_string(ptr) }
+    }
+}
+
+fn tls_unit_result(result: Result<(), String>) -> i128 {
+    match result {
+        Ok(()) => super::result::pack_result(0, 0),
+        Err(e) => http_serve_err_result(&format!("tls::ServerConfig: {e}")),
+    }
+}
+
+/// `__gos_tls_server_config_new_raw(cert_pem, key_pem, has_ca, ca_pem,
+/// ca_optional) -> Result<i64, Error>`: a live configuration's registry id.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_tls_server_config_new_raw(
+    cert_pem: *const c_char,
+    key_pem: *const c_char,
+    has_ca: i64,
+    ca_pem: *const c_char,
+    ca_optional: i64,
+) -> i128 {
+    ffi_entry!({
+        // SAFETY: the String arguments are this shim's (C-ABI contract).
+        let (cert, key, ca) = unsafe { (tls_text(cert_pem), tls_text(key_pem), tls_text(ca_pem)) };
+        let ca = (has_ca != 0).then_some(ca.as_str());
+        match crate::tls_server::create(&cert, &key, ca, ca_optional != 0) {
+            Ok(id) => super::result::pack_result(0, id),
+            Err(e) => http_serve_err_result(&format!("tls::ServerConfig::new: {e}")),
+        }
+    })
+}
+
+/// `__gos_tls_server_config_add_sni_raw(id, host, cert_pem, key_pem)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_tls_server_config_add_sni_raw(
+    id: i64,
+    host: *const c_char,
+    cert_pem: *const c_char,
+    key_pem: *const c_char,
+) -> i128 {
+    ffi_entry!({
+        // SAFETY: the String arguments are this shim's (C-ABI contract).
+        let (host, cert, key) = unsafe { (tls_text(host), tls_text(cert_pem), tls_text(key_pem)) };
+        tls_unit_result(crate::tls_server::add_sni(id, &host, &cert, &key))
+    })
+}
+
+/// `__gos_tls_server_config_reload_raw(id, cert_pem, key_pem)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_tls_server_config_reload_raw(
+    id: i64,
+    cert_pem: *const c_char,
+    key_pem: *const c_char,
+) -> i128 {
+    ffi_entry!({
+        // SAFETY: the String arguments are this shim's (C-ABI contract).
+        let (cert, key) = unsafe { (tls_text(cert_pem), tls_text(key_pem)) };
+        tls_unit_result(crate::tls_server::reload(id, &cert, &key))
+    })
+}
+
+/// `__gos_tls_server_config_release_raw(id) -> Result<(), Error>`: gives back
+/// the registry's hold on a configuration as its last reference goes.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_tls_server_config_release_raw(id: i64) -> i128 {
+    ffi_entry!({
+        crate::tls_server::release(id);
+        super::result::pack_result(0, 0)
+    })
+}
+
 /// rustls-terminated server connection. The accepted socket has the same
 /// read/write deadlines and bounded admission as plaintext HTTP.
 struct TlsServerConn {
@@ -2671,70 +2787,6 @@ pub(crate) unsafe fn extract_response_into(
     true
 }
 
-/// A handler response decomposed into `(status, headers, body)` for
-/// transports that frame the response themselves (HTTP/3, HTTP/2).
-pub(crate) type StructuredResponse = (u16, Vec<(String, String)>, Vec<u8>);
-
-/// Extracts a handler `result`'s response as a [`StructuredResponse`]
-/// for transports that frame the response themselves (HTTP/3, HTTP/2)
-/// rather than emitting HTTP/1.1 wire bytes. Header names are
-/// lowercased and CR/LF/NUL-bearing headers are dropped with the same
-/// gate as [`extract_response_into`]; an absent content-type is
-/// defaulted identically so the body the handler returned is served
-/// byte-for-byte across tiers. Returns `None` when `result` is an
-/// `Err` or carries a null response.
-///
-/// # Safety
-///
-/// The `Ok` payload of `result` is null or a live `http::Response` handle.
-pub(crate) unsafe fn extract_response_struct(result: i128) -> Option<StructuredResponse> {
-    if super::result::gos_rt_result_disc(result) != 0 {
-        return None;
-    }
-    let response_ptr = super::result::gos_rt_result_payload(result) as *const GosHttpResponse;
-    if response_ptr.is_null() {
-        return None;
-    }
-    // SAFETY: `response_ptr` is non-null (checked above), a live response per this `unsafe fn`'s
-    // contract.
-    let response = unsafe { &*response_ptr };
-    // A streamed response cannot be framed by the buffered h3 path;
-    // release the pending reader so the upstream connection closes
-    // rather than leaking, matching the h2c bridge and the interp
-    // tier. The buffered `body` (empty for a pure stream) is served.
-    if response.stream_handle >= 0 {
-        drop(super::http_client::stream_take_for_serve(
-            response.stream_handle,
-        ));
-    }
-    let body: Vec<u8> = match &response.body_bytes {
-        Some(bytes) => bytes.clone(),
-        None if response.body.is_null() => Vec::new(),
-        // SAFETY: a live response's non-null `body` is the string it owns.
-        None => unsafe { crate::c_abi::gos_str_arg_bytes(response.body.as_ptr()) }.to_vec(),
-    };
-    let mut headers: Vec<(String, String)> = Vec::with_capacity(response.headers.len() + 1);
-    let mut has_content_type = false;
-    for (k, v) in &response.headers {
-        if !is_valid_header_name(k) || !is_valid_header_value(v) {
-            continue;
-        }
-        if k.eq_ignore_ascii_case("content-type") {
-            has_content_type = true;
-        }
-        headers.push((k.to_ascii_lowercase(), v.clone()));
-    }
-    if !has_content_type {
-        let ct = if response.content_type.is_empty() {
-            "text/plain; charset=utf-8".to_string()
-        } else {
-            response.content_type.clone().into_owned()
-        };
-        headers.push(("content-type".to_string(), ct));
-    }
-    Some((response.status as u16, headers, body))
-}
-
 /// Returns the stream-registry handle when `result` is an Ok
 /// response built by `gos_rt_http_response_stream_new`
 /// (`stream_handle >= 0`); `None` for buffered responses and errors.
@@ -3680,7 +3732,6 @@ mod tests {
         _req: *mut GosHttpRequest,
     ) -> i128 {
         crate::c_abi::panic::panic_text("handler exploded");
-        0
     }
 
     #[test]

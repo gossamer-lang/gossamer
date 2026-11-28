@@ -1058,9 +1058,11 @@ impl<'a> Builder<'a> {
                 }
                 // A callback answering an `Option` or `Result` hands back the
                 // two-word carrier by value, which the carrier shim reads and
-                // stores whole.
+                // stores whole; a 128-bit integer result is two words the same
+                // way.
                 if matches!(self.tcx.kind_of(out_ty),
                     TyKind::Adt { def, .. } if def.local == u32::MAX || def.local == u32::MAX - 1)
+                    || self.tcx.is_wide_int(out_ty)
                 {
                     let closure_local =
                         self.lower_iter_closure(&args[0], &[in_ty], out_ty, span)?;

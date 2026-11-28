@@ -498,7 +498,7 @@ fn lower_typed_iterator_statement(
                     "gos_rt_result_new",
                     &[disc, payload],
                 )?
-                .unwrap_or_else(|| builder.ins().iconst(types::I128, 0));
+                .unwrap_or_else(|| super::lowering_rvalue::int_const(builder, types::I128, 0));
                 store_typed_iter_value(
                     module, builder, locals, body, tcx, dst_option, packed, intrinsics,
                 )?;
@@ -522,7 +522,7 @@ fn lower_typed_iterator_statement(
                 "gos_rt_lazy_iter_next_i64",
                 &[iter],
             )?
-            .unwrap_or_else(|| builder.ins().iconst(types::I128, 0));
+            .unwrap_or_else(|| super::lowering_rvalue::int_const(builder, types::I128, 0));
             store_typed_iter_value(
                 module, builder, locals, body, tcx, dst_option, value, intrinsics,
             )?;
@@ -758,7 +758,9 @@ fn is_aggregate_copy_src(body: &Body, tcx: &TyCtxt, rvalue: &Rvalue) -> bool {
         return false;
     };
     // Runtime element-address results name storage whose words the destination owns separately.
+    // A 128-bit destination of one already holds the value the address names.
     if src.projection.is_empty()
+        && !tcx.is_wide_int(body.local_ty(src.local))
         && body.blocks.iter().any(|block| {
             matches!(&block.terminator,
                 Terminator::Call {
@@ -1040,7 +1042,12 @@ pub(super) fn lower_statement(
                 Rvalue::Use(Operand::Copy(p)) if !p.projection.is_empty() => {
                     let leaf = resolve_place_ty(tcx, body, p);
                     let count = type_slot_count(tcx, leaf);
-                    if count > 1 { Some(count) } else { None }
+                    // A 128-bit integer is a value, not an address.
+                    if count > 1 && !tcx.is_wide_int(leaf) {
+                        Some(count)
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             };
@@ -1972,7 +1979,7 @@ pub(super) fn lower_terminator(
                     .first()
                     .map_or(types::I64, |p| p.value_type);
                 let coerced = coerce_arg_to(builder, retval, want)
-                    .unwrap_or_else(|_| builder.ins().iconst(want, 0));
+                    .unwrap_or_else(|_| super::lowering_rvalue::int_const(builder, want, 0));
                 builder.ins().return_(&[coerced]);
             }
         }
@@ -2756,6 +2763,10 @@ pub(super) fn assert_message_text(msg: &AssertMessage) -> &'static str {
         AssertMessage::BoundsCheck { .. } => "index out of bounds\n",
         AssertMessage::Overflow => "arithmetic overflow\n",
         AssertMessage::DivideByZero => "divide by zero\n",
+        AssertMessage::DivideOverflow { rem: false } => "attempt to divide with overflow\n",
+        AssertMessage::DivideOverflow { rem: true } => {
+            "attempt to calculate the remainder with overflow\n"
+        }
         AssertMessage::ShiftOverflow { left: true } => "attempt to shift left with overflow\n",
         AssertMessage::ShiftOverflow { left: false } => "attempt to shift right with overflow\n",
     }
@@ -2772,6 +2783,8 @@ pub(super) const STATIC_PANIC_MESSAGES: &[&str] = &[
     "attempt to subtract with overflow\n",
     "attempt to multiply with overflow\n",
     "divide by zero\n",
+    "attempt to divide with overflow\n",
+    "attempt to calculate the remainder with overflow\n",
     "attempt to shift left with overflow\n",
     "attempt to shift right with overflow\n",
     UNREACHABLE_PANIC_MSG,

@@ -1,0 +1,31 @@
+// `process::exit` unwinds the calling goroutine: the deferred expressions of
+// every frame it leaves run, innermost first, before the process ends with
+// the code, on every tier. A lock file deferred for removal in `main` is
+// gone after a helper exits.
+use std::{env, fs, path, process}
+
+fn lock_path() -> String {
+    path::join(env::temp_dir(), f"gos_exit_defers_{process::id()}.lock")
+}
+
+fn report() {
+    println(f"lock still there: {fs::exists(lock_path())}")
+}
+
+fn finish(code: i64) {
+    defer println("finish defer")
+    let mut total = 0
+    for i in 0..4 { total += i }
+    println(f"total {total}")
+    process::exit(code)
+}
+
+fn main() {
+    let _ = fs::write(lock_path(), "held".bytes())
+    defer report()
+    defer fs::remove_file(lock_path())
+    defer println("main defer")
+    for i in 0..2 { println(f"step {i}") }
+    finish(0)
+    println("unreachable")
+}

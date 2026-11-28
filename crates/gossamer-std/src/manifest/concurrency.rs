@@ -101,6 +101,16 @@ pub const SYNC: StdModule = StdModule {
     summary: "Synchronisation primitives beyond channels.",
     items: &[
         StdItem {
+            name: "Semaphore",
+            kind: StdItemKind::Type,
+            doc: "A weighted counting semaphore: `Semaphore::new(n)`; `acquire(weight = 1)` waits for that many permits and answers a `Permit`, `try_acquire(weight = 1)` answers `None` at once when they are not free, `size()`. The permits go back when the last reference to the `Permit` goes, so an early `return` or `?` cannot leak one.",
+        },
+        StdItem {
+            name: "Permit",
+            kind: StdItemKind::Type,
+            doc: "Permits a `Semaphore` handed out, given back when the last reference goes: `weight()`.",
+        },
+        StdItem {
             name: "Channel",
             kind: StdItemKind::Type,
             doc: "Bidirectional channel handle.",

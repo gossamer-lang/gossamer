@@ -553,6 +553,8 @@ pub unsafe extern "C" fn gos_rt_arr_reverse(p: *mut u8, len: i64, elem_bytes: i6
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_sort_by_i64(v: *mut GosVec, env: *const u8) {
     ffi_entry_passthrough!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         // SAFETY: `v`, `env` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `sortable_elems` accepts.
         let Some(mut elems) = (unsafe { sortable_elems(v, env) }) else {
@@ -580,6 +582,8 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_sort_by_i64(v: *mut GosVec, env: *con
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_sort_by_f64(v: *mut GosVec, env: *const u8) {
     ffi_entry_passthrough!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         // SAFETY: `v`, `env` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `sortable_elems` accepts.
         let Some(mut elems) = (unsafe { sortable_elems(v, env) }) else {
@@ -672,6 +676,8 @@ unsafe fn store_elems(v: *mut GosVec, elems: &[i64]) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_sort_f64(v: *mut GosVec) {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             return;
         }
@@ -705,6 +711,8 @@ pub unsafe extern "C" fn gos_rt_vec_sort_f64(v: *mut GosVec) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_sort_i64(v: *mut GosVec) {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             return;
         }
@@ -753,6 +761,8 @@ unsafe fn sort_slots<T: Ord>(data: *mut u8, len: usize) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_sort_str(v: *mut GosVec) {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             return;
         }
@@ -778,6 +788,8 @@ pub unsafe extern "C" fn gos_rt_vec_sort_str(v: *mut GosVec) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_reverse(v: *mut GosVec) {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             return;
         }
@@ -872,6 +884,8 @@ pub unsafe extern "C-unwind" fn gos_rt_arr_sort_by_aggr(
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_sort_by_aggr(v: *mut GosVec, env: *const u8) {
     ffi_entry_passthrough!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() || env.is_null() {
             return;
         }
@@ -1180,6 +1194,8 @@ pub unsafe extern "C" fn gos_rt_vec_get_ptr_unchecked(v: *const GosVec, idx: i64
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_set_i64(v: *mut GosVec, idx: i64, value: i64) {
     ffi_entry_passthrough!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec index", idx, 0);
         }
@@ -1206,6 +1222,8 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_set_i64(v: *mut GosVec, idx: i64, val
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_set_i64_unchecked(v: *mut GosVec, idx: i64, value: i64) {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         // SAFETY: this `unsafe fn`'s contract makes `v` a non-null `GosVec`.
         let vec = unsafe { &mut *v };
         // SAFETY: this `unsafe fn`'s contract puts `idx` in `[0, v.len)`.
@@ -1218,6 +1236,8 @@ pub unsafe extern "C" fn gos_rt_vec_set_i64_unchecked(v: *mut GosVec, idx: i64, 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_swap_i64(v: *mut GosVec, i: i64, j: i64) {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             return;
         }
@@ -1251,6 +1271,8 @@ pub unsafe extern "C" fn gos_rt_vec_swap_i64(v: *mut GosVec, i: i64, j: i64) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_swap_safe(v: *mut GosVec, i: i64, j: i64) {
     ffi_entry_passthrough!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec swap index", i, 0);
         }
@@ -1278,6 +1300,8 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_swap_safe(v: *mut GosVec, i: i64, j: 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_swap_unchecked(v: *mut GosVec, i: i64, j: i64) {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         // SAFETY: this `unsafe fn`'s contract makes `v` a non-null `GosVec` with `i` and `j` in
         // bounds.
         unsafe { gos_rt_vec_swap_i64(v, i, j) };
@@ -1773,6 +1797,8 @@ pub unsafe extern "C" fn gos_rt_floatarr_slice_result(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_insert_safe(v: *mut GosVec, idx: i64, value: i64) -> i128 {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         // SAFETY: `v` is null or live for the call (C-ABI contract).
         let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if idx < 0 || idx > len {
@@ -1792,12 +1818,13 @@ pub unsafe extern "C" fn gos_rt_vec_insert_safe(v: *mut GosVec, idx: i64, value:
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_insert_at(v: *mut GosVec, idx: i64, value: i64) {
     ffi_entry_passthrough!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         // SAFETY: `v` is null or live for the call (C-ABI contract).
         let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if v.is_null() || idx < 0 || idx > len {
             let msg = format!("insert: index {idx} out of bounds for length {len}");
             crate::c_abi::panic::panic_text(&msg);
-            return;
         }
         // Grow by one (handling region/global reallocation) with the new
         // element parked at the tail, then rotate it down to `idx`.
@@ -1834,6 +1861,8 @@ pub unsafe extern "C" fn gos_rt_vec_insert_slots_safe(
     slots: *const u8,
 ) -> i128 {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         // SAFETY: `v` is null or live for the call (C-ABI contract).
         let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if idx < 0 || idx > len {
@@ -1887,6 +1916,8 @@ unsafe fn removed_elem_payload(vec: &GosVec, idx: i64) -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_remove_safe(v: *mut GosVec, idx: i64) -> i128 {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         // SAFETY: `v` is null or live for the call (C-ABI contract).
         let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if v.is_null() || idx < 0 || idx >= len {
@@ -1925,12 +1956,13 @@ pub unsafe extern "C" fn gos_rt_vec_remove_safe(v: *mut GosVec, idx: i64) -> i12
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn gos_rt_vec_remove_at(v: *mut GosVec, idx: i64) -> i64 {
     ffi_entry_passthrough!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         // SAFETY: `v` is null or live for the call (C-ABI contract).
         let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if v.is_null() || idx < 0 || idx >= len {
             let msg = format!("remove: index {idx} out of bounds for length {len}");
             crate::c_abi::panic::panic_text(&msg);
-            return 0;
         }
         // SAFETY: `v` is non-null (the other case panics above) and live for the call (C-ABI
         // contract).
@@ -1962,6 +1994,8 @@ pub unsafe extern "C-unwind" fn gos_rt_vec_remove_at(v: *mut GosVec, idx: i64) -
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_pop_opt(v: *mut GosVec) -> i128 {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() {
             return gos_rt_result_new(1, 0);
         }
@@ -1986,6 +2020,8 @@ pub unsafe extern "C" fn gos_rt_vec_pop_opt(v: *mut GosVec) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_pop_into(v: *mut GosVec, out: *mut u8) -> i64 {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() || out.is_null() {
             return 1;
         }
@@ -2009,6 +2045,8 @@ pub unsafe extern "C" fn gos_rt_vec_pop_into(v: *mut GosVec, out: *mut u8) -> i6
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_pop(v: *mut GosVec, out: *mut u8) -> i32 {
     ffi_entry!({
+        // SAFETY: `v` is this shim's vector, null or live, which it writes.
+        unsafe { crate::c_abi::vec::vec_unshare(v) };
         if v.is_null() || out.is_null() {
             return 0;
         }
