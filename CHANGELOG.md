@@ -11,6 +11,7 @@
 - A copy of a `Vec` in native code shares its elements with the original until one of the two is written, as the bytecode VM already did, where it copied every nested vector at once. Copying a vector of vectors, a range of one (`built[a..b]`), or a struct holding vectors no longer costs time and memory in proportion to everything nested inside, so building a tree from slices of its children takes linear time.
 - A release build compiled through `clang` keeps vector code within 256-bit registers, as one compiled through `llc` already did, where copies of 64-byte values used 512-bit stores that the loads after them waited on.
 - `main` and every goroutine start their stacks at the creating thread's offset within a page, so how fast a deep recursion runs no longer depends on the length of the path a program was started by.
+- A deadlock that `main` finds while a goroutine waits on a `Mutex` or an `RwLock` ends the program with its report on the bytecode VM, where the program could hang or wait out the 30-second exit drain first.
 - `sort_by` and `sort_by_key` on a vector of vectors build and run in native code, where the build failed on an undefined symbol.
 - `let v = *r` of a `&mut Vec` in native code takes a copy of the vector, where it shared it, so a later write through `r` showed in `v`.
 - `fs::read_to_string` in native code reads a file straight into the string it answers, and `json::decode::<Vec<T>>` keeps one copy of the vectors it builds, where each held its data twice at its peak.
